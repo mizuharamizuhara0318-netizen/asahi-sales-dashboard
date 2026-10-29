@@ -488,26 +488,35 @@ with col_top2:
     else:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top_v3")
 
-# グローバルな担当者選択（分析モード用）
-staff_options_global = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
-
 # ========================================================
 # ★ 🧮 簡易見積＆利益シミュレーター（営業担当別切り替え対応）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
+    # 売上データからの商品名マップに加えて、JANマスタのタイトルも確実に統合する
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
     for k_t, v_t in jan_title_dict.items():
-        if k_t not in code_to_name_map or not code_to_name_map[k_t]:
-            code_to_name_map[k_t] = v_t
+        sk_trim = str(k_t).strip()
+        if sk_trim not in code_to_name_map or not code_to_name_map[sk_trim]:
+            code_to_name_map[sk_trim] = str(v_t).strip()
 
     raw_prod_title_map = {}
     if "元商品名" in df.columns:
         raw_prod_title_map = df.dropna(subset=["商品コード", "元商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["元商品名"].to_dict()
     for k_t, v_t in jan_title_dict.items():
-        if k_t not in raw_prod_title_map: raw_prod_title_map[k_t] = v_t
+        sk_trim = str(k_t).strip()
+        if sk_trim not in raw_prod_title_map:
+            raw_prod_title_map[sk_trim] = str(v_t).strip()
 
-    all_calc_codes = sorted(list(set(list(code_to_name_map.keys()) + list(cost_master.keys()) + list(jan_master_dict.keys()) + list(member_default_min_map.keys()))))
+    # すべてのマスタからコードを完全に収集（ABA-501やABA-507なども確実に含まれるようにする）
+    all_calc_codes = sorted(list(set(
+        [str(c).strip() for c in code_to_name_map.keys()] +
+        [str(c).strip() for c in cost_master.keys()] +
+        [str(c).strip() for c in jan_master_dict.keys()] +
+        [str(c).strip() for c in jan_title_dict.keys()] +
+        [str(c).strip() for c in member_default_min_map.keys()]
+    )))
     if "ABA-40" in all_calc_codes: all_calc_codes.remove("ABA-40")
+    if "" in all_calc_codes: all_calc_codes.remove("")
 
     STANDARD_RANKS = [
         "ロット単価",
@@ -522,19 +531,23 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     }
 
     def get_sku_details(sku_code, rank_selection="ロット単価", cust_comp_name=""):
-        p_name = code_to_name_map.get(sku_code, "")
-        if not p_name: p_name = jan_title_dict.get(sku_code, sku_code)
-        p_jan = jan_master_dict.get(sku_code, "")
-        p_cost = int(cost_master.get(sku_code, 0.0))
+        s_trim = str(sku_code).strip()
+        # JANマスタや売上データ、商品名マップから優先順位をつけて正確に取得
+        p_name = code_to_name_map.get(s_trim, "")
+        if not p_name or p_name == "nan": 
+            p_name = jan_title_dict.get(s_trim, s_trim)
+        
+        p_jan = jan_master_dict.get(s_trim, "")
+        p_cost = int(cost_master.get(s_trim, 0.0))
         
         norm_cust = re.sub(r'[\s ]+', '', str(cust_comp_name)) if cust_comp_name else ""
-        min_p = member_default_min_map.get(sku_code, 0)
+        min_p = member_default_min_map.get(s_trim, 0)
 
         comp_lot_p = 0
-        if cust_comp_name and (cust_comp_name, sku_code) in member_cust_sku_map:
-            comp_lot_p = member_cust_sku_map[(cust_comp_name, sku_code)]
-        elif norm_cust and (norm_cust, sku_code) in member_cust_sku_map:
-            comp_lot_p = member_cust_sku_map[(norm_cust, sku_code)]
+        if cust_comp_name and (cust_comp_name, s_trim) in member_cust_sku_map:
+            comp_lot_p = member_cust_sku_map[(cust_comp_name, s_trim)]
+        elif norm_cust and (norm_cust, s_trim) in member_cust_sku_map:
+            comp_lot_p = member_cust_sku_map[(norm_cust, s_trim)]
 
         clean_r = str(rank_selection).strip() if rank_selection else "ロット単価"
         p_price = 0
@@ -1026,7 +1039,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 # ========================================================
 # ★ 分析用モード（会議用資料・各種ランキング）
 # ========================================================
-sel_staff = "（すべて）" # デフォルト定義
+sel_staff = "（すべて）"
 
 if view_type == '📊 営業会議用：上位社 売上比較シート':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
