@@ -998,11 +998,11 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             """
 
             btn_c1, _ = st.columns([1.4, 2.0])
-        with btn_c1:
-            if st.button("💾 この見積を保存して一覧へ登録", use_container_width=True, key=f"save_btn_{s_key}"):
-                st.session_state.saved_estimates.insert(0, current_estimate_obj)
-                save_quotes_list(st.session_state.saved_estimates)
-                st.success("✅ 保存済み見積一覧に登録しました！")
+            with btn_c1:
+                if st.button("💾 この見積を保存して一覧へ登録", use_container_width=True, key=f"save_btn_{s_key}"):
+                    st.session_state.saved_estimates.insert(0, current_estimate_obj)
+                    save_quotes_list(st.session_state.saved_estimates)
+                    st.success("✅ 保存済み見積一覧に登録しました！")
 
         st.write("")
         st.markdown("##### 👁️ PDFプレビュー表示＆ワンクリックPDF保存")
