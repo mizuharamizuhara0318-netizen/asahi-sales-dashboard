@@ -61,6 +61,24 @@ st.markdown("""
         font-size: 11px;
         font-weight: bold;
     }
+    .modal-box-header {
+        background: linear-gradient(135deg, #1e3a8a, #2563eb);
+        color: white;
+        padding: 12px 18px;
+        border-radius: 6px 6px 0 0;
+        font-size: 16px;
+        font-weight: bold;
+        margin-bottom: 10px;
+    }
+    .modal-summary-box {
+        background-color: #fefce8;
+        border: 1px solid #fde047;
+        border-left: 6px solid #eab308;
+        padding: 10px 16px;
+        font-size: 13px;
+        margin-bottom: 12px;
+        border-radius: 4px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -707,9 +725,11 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
         [str(c).strip() for c in code_to_name_map.keys()] +
         [str(c).strip() for c in cost_master_dict.keys()] +
         [str(c).strip() for c in jan_master_dict.keys()] +
+        [str(c).strip() for c in jan_title_dict.keys()] +
         [str(c).strip() for c in member_default_min_map.keys()]
     )))
     if "ABA-40" in all_calc_codes: all_calc_codes.remove("ABA-40")
+    if "" in all_calc_codes: all_calc_codes.remove("")
 
     STANDARD_RANKS = [
         "ロット単価",
@@ -726,7 +746,9 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     def get_sku_details(sku_code, rank_selection="ロット単価", cust_comp_name=""):
         s_trim = str(sku_code).strip()
         p_name = jan_title_dict.get(s_trim, "")
-        if not p_name: p_name = code_to_name_map.get(s_trim, s_trim)
+        if not p_name or p_name == "nan": 
+            p_name = code_to_name_map.get(s_trim, s_trim)
+        
         p_jan = jan_master_dict.get(s_trim, "")
         p_cost = int(cost_master_dict.get(s_trim, 0.0))
         
@@ -740,28 +762,23 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             comp_lot_p = member_cust_sku_map[(norm_cust, s_trim)]
 
         clean_r = str(rank_selection).strip() if rank_selection else "ロット単価"
-
         p_price = 0
         actual_rank_applied = clean_r
 
         if clean_r in RANK_MULTIPLIERS:
             if min_p > 0:
                 p_price = int(round(min_p * RANK_MULTIPLIERS[clean_r]))
-                actual_rank_applied = clean_r
             else:
                 p_price = 99999
-                actual_rank_applied = clean_r
         elif clean_r == "ロット単価" or clean_r == "":
             if comp_lot_p > 0:
                 p_price = comp_lot_p
-                actual_rank_applied = "ロット単価"
+            elif min_p > 0:
+                p_price = min_p
             else:
                 p_price = 99999
-                actual_rank_applied = "ロット単価"
 
-        if p_price == 0:
-            p_price = 99999
-
+        if p_price == 0: p_price = 99999
         return p_name, p_jan, p_price, p_cost, min_p, actual_rank_applied
 
     if "load_target_estimate" in st.session_state and st.session_state["load_target_estimate"]:
@@ -899,9 +916,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 
         st.markdown("---")
 
-        # ========================================================
-        # ★ 複数品目のまとめ見積リスト（スプレッドシート型）
-        # ========================================================
         st.markdown("##### 📑 複数品目のまとめ見積リスト（見積書作成）")
 
         c_btn_del, c_btn_clear, c_rank_box, _ = st.columns([1.5, 1.2, 2.0, 1.3])
