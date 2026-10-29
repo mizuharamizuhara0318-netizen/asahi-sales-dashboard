@@ -261,7 +261,8 @@ def load_customer_master(file_path, file_mtime):
     return pd.DataFrame()
 
 def get_hanko_bytes():
-    search_dirs = [OTHER_DATA_DIR, BASE_SHARE, BASE_DIR]
+    # クラウド環境に合わせてBASE_SHAREを除外し、BASE_DIRとOTHER_DATA_DIRのみを対象にする
+    search_dirs = [BASE_DIR]
     patterns = ["*hanko*.png", "*05171642*.png", "*印鑑*.png", "input_file_5.png"]
     for d in search_dirs:
         if os.path.exists(d):
