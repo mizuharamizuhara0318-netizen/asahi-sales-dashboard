@@ -194,10 +194,8 @@ def load_member_price_master_v2(file_path, file_mtime):
         try:
             mdf = pd.read_excel(file_path)
             for _, r in mdf.iterrows():
-                # 🔴 商品管理番号(col 3) と 商品番号(col 4) の両方をキーとしてマップに登録し、親コード・子コードどちらでも一発で引けるようにする
                 sku_mgmt = str(r.iloc[3]).strip() if len(r) > 3 else ""
                 sku_num = str(r.iloc[4]).strip() if len(r) > 4 else ""
-                
                 skus = [s for s in [sku_mgmt, sku_num] if s and s != "nan"]
                 if not skus: continue
 
@@ -641,6 +639,94 @@ def render_universal_table(df_data):
     calc_h = min(620, 80 + len(df_data) * 36)
     components.html(table_html, height=calc_h, scrolling=True)
 
+@st.dialog("🏢 得意先別 売れ筋・売上TOP10詳細", width="large")
+def show_customer_top10_dialog(cust_name, sub_df, period_str):
+    st.markdown(f"#### 🎯 対象得意先: **{cust_name}**")
+    st.caption(f"指定期間: {period_str}")
+    if sub_df.empty:
+        st.info("該当期間の売上データはありません。")
+        return
+
+    p_agg = sub_df.groupby(["商品コード", "商品名"]).agg(
+        数量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")
+    ).reset_index().sort_values(by="販売金額", ascending=False).head(10)
+
+    p_agg["粗利率"] = p_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
+    p_agg.insert(0, "順位", range(1, len(p_agg) + 1))
+    
+    show_p_df = p_agg[["順位", "商品コード", "商品名", "数量", "販売金額", "粗利額", "粗利率"]]
+    
+    tot_s = int(p_agg["販売金額"].sum())
+    tot_q = int(p_agg["数量"].sum())
+    st.markdown(f"<div class='total-card'><b>TOP10商品売上合計:</b> ¥{tot_s:,} &nbsp;|&nbsp; <b>数量合計:</b> {tot_q:,} 個</div>", unsafe_allow_html=True)
+    render_universal_table(show_p_df)
+
+def generate_excel_bytes(data_df, title_str):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        data_df.to_excel(writer, index=False, sheet_name=title_str[:30])
+    return output.getvalue()
+
+def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, tgt_y, tgt_m, next_y, next_m_val, f_year):
+    cur_sales = int(cur_m[cur_m["得意先名"] == cust]["金額"].sum()) if not cur_m.empty else 0
+    ly_sales = int(ly_m[ly_m["得意先名"] == cust]["金額"].sum()) if not ly_m.empty else 0
+    next_sales = int(next_m[next_m["得意先名"] == cust]["金額"].sum()) if not next_m.empty else 0
+    prev_fy_sales = int(prev_fy[prev_fy["得意先名"] == cust]["金額"].sum()) if not prev_fy.empty else 0
+    return {
+        "cust_name": cust,
+        "cust_id": cid,
+        "cur_sales": cur_sales,
+        "ly_sales": ly_sales,
+        "diff": cur_sales - ly_sales,
+        "next_sales": next_sales,
+        "prev_fy_sales": prev_fy_sales,
+        "next_diff": next_sales - prev_fy_sales,
+        "tgt_m": tgt_m,
+        "next_m": next_m_val
+    }
+
+def render_meeting_card_html(card):
+    diff_color = "#16a34a" if card["diff"] >= 0 else "#dc2626"
+    next_diff_color = "#16a34a" if card["next_diff"] >= 0 else "#dc2626"
+    return f"""
+    <div style="border:1px solid #cbd5e1; border-radius:6px; padding:12px; background:#fff; margin-bottom:12px;">
+        <div style="font-size:15px; font-weight:bold; color:#1e3a8a; border-bottom:1px solid #e2e8f0; padding-bottom:6px; margin-bottom:8px;">
+            🏢 {card['cust_name']} <span style="font-size:12px; color:#64748b;">(ID: {card['cust_id']})</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:4px;">
+            <span><b>{card['tgt_m']}月実績:</b> ¥{card['cur_sales']:,}</span>
+            <span>(前年: ¥{card['ly_sales']:,})</span>
+            <span style="color:{diff_color}; font-weight:bold;">差額: ¥{card['diff']:,}</span>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:13px;">
+            <span><b>来月({card['next_m']}月)予測:</b> ¥{card['next_sales']:,}</span>
+            <span>(前年同月: ¥{card['prev_fy_sales']:,})</span>
+            <span style="color:{next_diff_color}; font-weight:bold;">差額: ¥{card['next_diff']:,}</span>
+        </div>
+    </div>
+    """
+
+def generate_meeting_comparison_excel(cards_data, tgt_ym):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "上位社売上比較"
+    ws.cell(row=1, column=1, value=f"{tgt_ym} 営業会議 上位社売上比較シート").font = Font(size=14, bold=True)
+    row_idx = 3
+    for c in cards_data:
+        ws.cell(row=row_idx, column=1, value=f"得意先名: {c['cust_name']}")
+        ws.cell(row=row_idx+1, column=1, value=f"当月売上: {c['cur_sales']:,} 円")
+        ws.cell(row=row_idx+2, column=1, value=f"来月予測: {c['next_sales']:,} 円")
+        row_idx += 5
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+def generate_meeting_top_cust_excel(res_df, title_str):
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine='openpyxl') as writer:
+        res_df.to_excel(writer, index=False, sheet_name="上位客先実績")
+    return out.getvalue()
+
 df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=False)
 
 member_p_path, member_p_mtime = get_member_price_file_info()
@@ -726,7 +812,7 @@ with col_top2:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
 
 # ========================================================
-# ★ 🧮 簡易見積＆利益シミュレーター（ABA-507等部分一致対応）
+# ★ 🧮 簡易見積＆利益シミュレーター（ABA-507等部分一致＆親SKU除外対応）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
@@ -743,15 +829,25 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
         if sk_trim not in raw_prod_title_map:
             raw_prod_title_map[sk_trim] = str(v_t).strip()
 
-    all_calc_codes = sorted(list(set(
+    raw_calc_codes = sorted(list(set(
         [str(c).strip() for c in code_to_name_map.keys()] +
         [str(c).strip() for c in cost_master_dict.keys()] +
         [str(c).strip() for c in jan_master_dict.keys()] +
         [str(c).strip() for c in jan_title_dict.keys()] +
         [str(c).strip() for c in member_default_min_map.keys()]
     )))
-    if "ABA-40" in all_calc_codes: all_calc_codes.remove("ABA-40")
-    if "" in all_calc_codes: all_calc_codes.remove("")
+    if "ABA-40" in raw_calc_codes: raw_calc_codes.remove("ABA-40")
+    if "" in raw_calc_codes: raw_calc_codes.remove("")
+
+    # 🔴 ユーザー要望：カラーや別SKU（子バリエーション）がある親SKU（例: ABA-507, ABO-08）は選択肢から除外し、枝番付き（ABA-507WH, ABO-08BL等）のみを表示
+    parent_sku_candidates = set()
+    for c in raw_calc_codes:
+        for other in raw_calc_codes:
+            if other != c and other.startswith(c) and len(other) > len(c):
+                parent_sku_candidates.add(c)
+                break
+    
+    all_calc_codes = [c for c in raw_calc_codes if c not in parent_sku_candidates]
 
     STANDARD_RANKS = [
         "ロット単価",
@@ -768,7 +864,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     def get_sku_details(sku_code, rank_selection="ロット単価", cust_comp_name=""):
         s_trim = str(sku_code).strip()
         
-        # 🔴 ABA-507などの部分一致・親コード検索フォールバック
+        # 🔴 親コードや部分一致コードが入力された場合でもマスターから安全に解決
         matched_key = s_trim
         if s_trim not in jan_title_dict and s_trim not in cost_master_dict and s_trim not in member_default_min_map:
             candidates = [k for k in jan_title_dict.keys() if str(k).strip().startswith(s_trim) or s_trim in str(k)]
