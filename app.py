@@ -811,7 +811,7 @@ with col_top2:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
 
 # ========================================================
-# ★ 🧮 簡易見積＆利益シミュレーター（担当者プルダウン ＆ ABA-507親SKU除外）
+# ★ 🧮 簡易見積＆利益シミュレーター
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
@@ -838,7 +838,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     if "ABA-40" in raw_calc_codes: raw_calc_codes.remove("ABA-40")
     if "" in raw_calc_codes: raw_calc_codes.remove("")
 
-    # 🔴 親SKU除外（ABA-507等のベースコードを除外し、ABA-507WH等のカラー枝番のみ表示）
     parent_sku_candidates = set()
     for c in raw_calc_codes:
         for other in raw_calc_codes:
@@ -926,7 +925,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     if "editor_version" not in st.session_state:
         st.session_state.editor_version = 0
 
-    # 🔴 作業バッティング防止用の担当者選択プルダウン（ご要望機能の復元）
     est_staff_list = list(STAFF_MAP.values()) + ["（すべて表示）"]
     col_menu_left, col_menu_right = st.columns([1.6, 2.0])
     with col_menu_right:
@@ -1442,7 +1440,7 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     
-    # 🔴 NameErrorを防ぐ安全な初期化
+    # 🔴 完全に安全な DataFrame 初期化（NameErrorを確実に防止）
     cur_m_df = pd.DataFrame()
     ly_m_df = pd.DataFrame()
     next_m_df = pd.DataFrame()
@@ -1508,17 +1506,10 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     ly_term_end_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
-    
-    cur_m_df = pd.DataFrame()
-    ly_m_df = pd.DataFrame()
-    cur_ytd_df = pd.DataFrame()
-    ly_ytd_df = pd.DataFrame()
-
-    if not df_scope.empty:
-        cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym]
-        ly_m_df = df_scope[df_scope["年月"] == ly_ym]
-        cur_ytd_df = df_scope[(df_scope["年月"] >= term_start_ym) & (df_scope["年月"] <= target_meeting_ym)]
-        ly_ytd_df = df_scope[(df_scope["年月"] >= ly_term_start_ym) & (df_scope["年月"] <= ly_term_end_ym)]
+    cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
+    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
+    cur_ytd_df = df_scope[(df_scope["年月"] >= term_start_ym) & (df_scope["年月"] <= target_meeting_ym)] if not df_scope.empty else pd.DataFrame()
+    ly_ytd_df = df_scope[(df_scope["年月"] >= ly_term_start_ym) & (df_scope["年月"] <= ly_term_end_ym)] if not ly_ytd_df.empty else pd.DataFrame()
 
     cur_cust_sales = cur_m_df.groupby("得意先名")["金額"].sum() if not cur_m_df.empty else pd.Series()
     ly_cust_sales = ly_m_df.groupby("得意先名")["金額"].sum() if not ly_m_df.empty else pd.Series()
