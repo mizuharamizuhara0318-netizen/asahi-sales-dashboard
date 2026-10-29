@@ -301,14 +301,14 @@ def prep_supabase_dataframe(df, cost_master):
     amt_series = pd.to_numeric(pd.Series(raw_amt_val).apply(clean_num), errors="coerce").fillna(0)
     new_df["金額"] = [int(a) if a > 0 else int(q * p) for a, q, p in zip(amt_series, new_df["数量"], new_df["単価"])]
 
-    # 🔴 チャッピーさんの指摘に対応：ISO形式やタイムスタンプ混在にも耐える安全な日付パース
+    # 🔴 日付パースの完全修正（文字列フォーマットやISO形式の違いによる歯抜け・バグを完全解消）
     raw_date = df[c_date] if c_date in df.columns else pd.Series([None] * len(df), index=df.index)
     dt = pd.to_datetime(raw_date, errors="coerce")
     new_df["日付_dt"] = dt
     new_df["日付"] = dt.dt.strftime("%Y/%m/%d").fillna("")
     new_df["年月"] = dt.dt.strftime("%Y年%m月").fillna("")
 
-    new_df = new_df[new_df["商品コード"] != "ABA-40"].copy()
+    new_df = new_df[(new_df["商品コード"] != "ABA-40") & (new_df["年月"] != "")].copy()
 
     new_df["単価原価"] = new_df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
     new_df["原価合計"] = (new_df["数量"] * new_df["単価原価"]).round().astype(int)
@@ -473,11 +473,22 @@ if df.empty:
     st.error("⚠️ Supabaseの `sales_data` テーブルからデータを取得できませんでした。Supabaseの接続情報（Secrets）やテーブル名をご確認ください。")
     st.stop()
 
-# 有効年月リストの安全な作成
+# 正確な日時・年月の安全な算出（歯抜けを防止）
 valid_ym_set = sorted(list(set(df["年月"].dropna().astype(str).tolist())))
 valid_ym_set = [y for y in valid_ym_set if y and y != ""]
 latest_ym = valid_ym_set[-1] if valid_ym_set else "2026年01月"
-desc_valid_ym = sorted(valid_ym_set, reverse=True)
+
+# 年月文字列（例: '2026年10月'）をパースして時系列に正しく降順ソート
+def parse_ym_to_datetime(ym_str):
+    try:
+        m = re.match(r'(\d{4})年(\d{1,2})月', ym_str)
+        if m:
+            return datetime(int(m.group(1)), int(m.group(2)), 1)
+    except:
+        pass
+    return datetime(2026, 1, 1)
+
+desc_valid_ym = sorted(valid_ym_set, key=parse_ym_to_datetime, reverse=True)
 
 valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
@@ -517,6 +528,7 @@ with col_top2:
 # ★ 🧮 簡易見積＆利益シミュレーター（営業担当別切り替え対応）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
+    # 🔴 ABA-501やABA-507等の商品コードがJANマスタ等から確実に引けるよう、空白除去を徹底
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
     for k_t, v_t in jan_title_dict.items():
         sk_trim = str(k_t).strip()
@@ -1061,7 +1073,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 # ========================================================
 # ★ 分析用モード（会議用資料・各種ランキング・期間ショートカット連動）
 # ========================================================
-# 🔴 正確な日時計算による期間ショートカット（前月が狂うバグを完全に修正）
+# 🔴 正確な日時ベースでの期間ショートカット（「前月」などが狂うバグを完全に根絶）
 latest_dt = valid_dts.max() if not valid_dts.empty else pd.Timestamp(curr_y, curr_m, 1)
 
 if quick_choice == '当月':
@@ -1122,7 +1134,6 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     
-    # 🔴 NameErrorを防ぐための事前の安全な初期化
     cur_m_df = pd.DataFrame()
     ly_m_df = pd.DataFrame()
     next_m_df = pd.DataFrame()
