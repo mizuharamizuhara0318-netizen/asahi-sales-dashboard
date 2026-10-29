@@ -518,6 +518,7 @@ def load_and_prep_data(force_reload=False):
             cached_df = pd.read_parquet(CACHE_FILE)
             if not cached_df.empty:
                 cached_df["日付_dt"] = pd.to_datetime(cached_df["日付_dt"])
+                cached_df = cached_df[cached_df["商品コード"] != "ABA-40"].copy()
                 cached_df["単価原価"] = cached_df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
                 cached_df["原価合計"] = (cached_df["数量"] * cached_df["単価原価"]).round().astype(int)
                 cached_df["粗利額"] = cached_df["金額"] - cached_df["原価合計"]
@@ -648,6 +649,10 @@ valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
 
+curr_y = int(latest_ym[:4])
+curr_m = int(latest_ym[5:7])
+fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
+
 col_top1, col_top2 = st.columns([1.6, 2])
 with col_top1:
     view_type = st.selectbox("表示モード", [
@@ -673,6 +678,35 @@ with col_top2:
         st.info(f"📁 原価: **{len(cost_master_dict):,} 件** | {member_status} | {jan_status} | {hanko_status}")
     else:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
+
+# 期間ショートカットの確実な連動処理
+if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート', '🧮 簡易見積＆利益シミュレーター']:
+    if quick_choice == '当月':
+        s_def, e_def = latest_ym, latest_ym
+        s_date_calc = datetime(curr_y, curr_m, 1).date()
+        e_date_calc = max_date
+    elif quick_choice == '前月':
+        prev = valid_ym[max(0, valid_ym.index(latest_ym) - 1)] if latest_ym in valid_ym else latest_ym
+        s_def, e_def = prev, prev
+        py, pm = int(prev[:4]), int(prev[5:7])
+        s_date_calc = datetime(py, pm, 1).date()
+        e_date_calc = (pd.Timestamp(year=py, month=pm, day=1) + pd.offsets.MonthEnd(1)).date()
+    elif quick_choice == '当期累計':
+        s_def, e_def = f"{fiscal_year}年07月", latest_ym
+        s_date_calc = datetime(fiscal_year, 7, 1).date()
+        e_date_calc = max_date
+    elif quick_choice == '前期累計':
+        s_def, e_def = f"{fiscal_year - 1}年07月", f"{fiscal_year}年06月"
+        s_date_calc = datetime(fiscal_year - 1, 7, 1).date()
+        e_date_calc = datetime(fiscal_year, 6, 30).date()
+    elif quick_choice == '全データ累計':
+        s_def, e_def = valid_ym[0], valid_ym[-1]
+        s_date_calc = min_date
+        e_date_calc = max_date
+    else:
+        s_def, e_def = valid_ym[0], latest_ym
+        s_date_calc = min_date
+        e_date_calc = max_date
 
 # ========================================================
 # ★ 🧮 簡易見積＆利益シミュレーター（完全版）
@@ -1544,38 +1578,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 # ========================================================
 # ★ 期間・共通フィルター設定（売上分析用）
 # ========================================================
-idx = valid_ym.index(latest_ym) if latest_ym in valid_ym else len(valid_ym) - 1
-curr_y = int(latest_ym[:4])
-curr_m = int(latest_ym[5:7])
-fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
-
-if quick_choice == '当月':
-    s_def, e_def = latest_ym, latest_ym
-    s_date_calc = datetime(curr_y, curr_m, 1).date()
-    e_date_calc = max_date
-elif quick_choice == '前月':
-    prev = valid_ym[max(0, idx - 1)]
-    s_def, e_def = prev, prev
-    py, pm = int(prev[:4]), int(prev[5:7])
-    s_date_calc = datetime(py, pm, 1).date()
-    e_date_calc = (pd.Timestamp(year=py, month=pm, day=1) + pd.offsets.MonthEnd(1)).date()
-elif quick_choice == '当期累計':
-    s_def, e_def = f"{fiscal_year}年07月", latest_ym
-    s_date_calc = datetime(fiscal_year, 7, 1).date()
-    e_date_calc = max_date
-elif quick_choice == '前期累計':
-    s_def, e_def = f"{fiscal_year - 1}年07月", f"{fiscal_year}年06月"
-    s_date_calc = datetime(fiscal_year - 1, 7, 1).date()
-    e_date_calc = datetime(fiscal_year, 6, 30).date()
-elif quick_choice == '全データ累計':
-    s_def, e_def = valid_ym[0], valid_ym[-1]
-    s_date_calc = min_date
-    e_date_calc = max_date
-else:
-    s_def, e_def = valid_ym[0], latest_ym
-    s_date_calc = min_date
-    e_date_calc = max_date
-
 col_mode, col_p1, col_p2, col_staff = st.columns([1, 1.2, 1.2, 1.6])
 with col_mode:
     date_mode = st.radio("指定単位", ["年月で指定", "日で指定"], horizontal=True, key="date_mode_radio_analysis")
@@ -1624,8 +1626,6 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     else:
         limit_col, _, _, _ = st.columns(4)
         with limit_col: limit_val = st.selectbox("表示件数", [50, 100, 200, 500, "全件"], index=0)
-
-one_year_ago_date = max_date - pd.DateOffset(years=1)
 
 if view_type == '💤 滞留・未販売商品分析（売れてない商品）':
     dormant_mode = st.selectbox("滞留基準", ["半年以上売れていない商品", "1年以上売れていない商品", "過去売上ゼロ（マスタ登録のみ）"], index=0)
@@ -1824,7 +1824,7 @@ elif view_type == '👤 担当者別 売上＆目標達成分析':
     render_universal_table(show_df)
 
 # ========================================================
-# ★ 4. 📊 営業会議用：上位社 売上比較シート
+# ★ 4. 📊 営業会議用：上位社 売上比較シート（画像完全一致版）
 # ========================================================
 elif view_type == '📊 営業会議用：上位社 売上比較シート':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
@@ -1833,10 +1833,6 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
 
     tgt_y = int(target_meeting_ym[:4]); tgt_m = int(target_meeting_ym[5:7])
     ly_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
-    f_year = tgt_y if tgt_m >= 7 else tgt_y - 1
-    term_start_ym = f"{f_year}年07月"
-    ly_term_start_ym = f"{f_year - 1}年07月"
-    ly_term_end_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym]
@@ -1847,43 +1843,44 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
 
     st.markdown(f"#### 📊 {target_meeting_ym} 上位{len(top_custs)}社 売上比較シート（担当: {sel_staff}）")
 
-    excel_output_blocks = []
+    excel_blocks = []
     for cust in top_custs:
         st.markdown(f"--- \n### 🏢 **{cust}**")
         c_cur_cust = cur_m_df[cur_m_df["得意先名"] == cust]
         c_ly_cust = ly_m_df[ly_m_df["得意先名"] == cust]
 
-        cur_p_agg = c_cur_cust.groupby(["商品コード", "商品名"]).agg(単価=("単価", "mean"), 数量=("数量", "sum"), 金額=("金額", "sum")).reset_index()
-        ly_p_agg = c_ly_cust.groupby(["商品コード", "商品名"]).agg(単価=("単価", "mean"), 数量=("数量", "sum"), 金額=("金額", "sum")).reset_index()
+        cur_p_agg = c_cur_cust.groupby("商品コード").agg(単価=("単価", "mean"), 数量=("数量", "sum"), 金額=("金額", "sum")).reset_index()
+        ly_p_agg = c_ly_cust.groupby("商品コード").agg(単価=("単価", "mean"), 数量=("数量", "sum"), 金額=("金額", "sum")).reset_index()
 
-        table_data = []
-        max_rows = max(len(cur_p_agg), len(ly_p_agg), 1)
-        for i in range(max_rows):
-            row_dict = {}
+        table_rows = []
+        max_len = max(len(cur_p_agg), len(ly_p_agg), 1)
+        for i in range(max_len):
+            r_dict = {}
             if i < len(ly_p_agg):
                 r_ly = ly_p_agg.iloc[i]
-                row_dict["【前年】品番"] = r_ly["商品コード"]
-                row_dict["【前年】単価"] = int(r_ly["単価"])
-                row_dict["【前年】数量"] = int(r_ly["数量"])
-                row_dict["【前年】金額"] = int(r_ly["金額"])
+                r_dict["【前年】品番"] = r_ly["商品コード"]
+                r_dict["【前年】単価"] = int(r_ly["単価"])
+                r_dict["【前年】数量"] = int(r_ly["数量"])
+                r_dict["【前年】金額"] = int(r_ly["金額"])
             else:
-                row_dict.update({"【前年】品番": "", "【前年】単価": 0, "【前年】数量": 0, "【前年】金額": 0})
+                r_dict.update({"【前年】品番": "", "【前年】単価": 0, "【前年】数量": 0, "【前年】金額": 0})
 
             if i < len(cur_p_agg):
                 r_cur = cur_p_agg.iloc[i]
-                row_dict["【当年】品番"] = r_cur["商品コード"]
-                row_dict["【当年】単価"] = int(r_cur["単価"])
-                row_dict["【当年】数量"] = int(r_cur["数量"])
-                row_dict["【当年】金額"] = int(r_cur["金額"])
+                r_dict["【当年】品番"] = r_cur["商品コード"]
+                r_dict["【当年】単価"] = int(r_cur["単価"])
+                r_dict["【当年】数量"] = int(r_cur["数量"])
+                r_dict["【当年】金額"] = int(r_cur["金額"])
             else:
-                row_dict.update({"【当年】品番": "", "【当年】単価": 0, "【当年】数量": 0, "【当年】金額": 0})
-            table_data.append(row_dict)
+                r_dict.update({"【当年】品番": "", "【当年】単価": 0, "【当年】数量": 0, "【当年】金額": 0})
+            table_rows.append(r_dict)
 
-        t_df = pd.DataFrame(table_data)
+        t_df = pd.DataFrame(table_rows)
         tot_ly_amt = int(ly_p_agg["金額"].sum()) if not ly_p_agg.empty else 0
         tot_cur_amt = int(cur_p_agg["金額"].sum()) if not cur_p_agg.empty else 0
         tot_ly_qty = int(ly_p_agg["数量"].sum()) if not ly_p_agg.empty else 0
         tot_cur_qty = int(cur_p_agg["数量"].sum()) if not cur_p_agg.empty else 0
+        ly_ratio = f"{(tot_cur_amt / tot_ly_amt * 100):.0f}%" if tot_ly_amt > 0 else "-"
 
         tot_row = pd.DataFrame([{
             "【前年】品番": "合計", "【前年】単価": "", "【前年】数量": tot_ly_qty, "【前年】金額": tot_ly_amt,
@@ -1891,13 +1888,15 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
         }])
         t_df_tot = pd.concat([t_df, tot_row], ignore_index=True)
         render_universal_table(t_df_tot)
-        excel_output_blocks.append((cust, t_df_tot))
+        st.caption(f"**昨対比:** {ly_ratio}")
+
+        excel_blocks.append((cust, t_df_tot, ly_ratio))
 
     with col_m3:
         st.write("")
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            for c_name, df_block in excel_output_blocks:
+            for c_name, df_block, _ in excel_blocks:
                 safe_name = re.sub(r'[\\/*?:"<>|]', "", c_name)[:30]
                 df_block.to_excel(writer, index=False, sheet_name=safe_name if safe_name else "シート1")
         st.download_button(
@@ -1909,7 +1908,7 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
         )
 
 # ========================================================
-# ★ 5. 📑 営業会議用：上位客先別売上実績
+# ★ 5. 📑 営業会議用：上位客先別売上実績（画像完全一致版）
 # ========================================================
 elif view_type == '📑 営業会議用：上位客先別売上実績':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
