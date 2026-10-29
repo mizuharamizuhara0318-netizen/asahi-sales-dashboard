@@ -648,7 +648,7 @@ def show_customer_top10_dialog(cust_name, sub_df, period_str):
         return
 
     p_agg = sub_df.groupby(["商品コード", "商品名"]).agg(
-        数量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")
+        數量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")
     ).reset_index().sort_values(by="販売金額", ascending=False).head(10)
 
     p_agg["粗利率"] = p_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
