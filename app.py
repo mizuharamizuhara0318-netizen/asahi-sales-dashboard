@@ -569,7 +569,6 @@ def load_and_prep_data(force_reload=False):
     df = pd.concat(valid_dfs, ignore_index=True) if valid_dfs else pd.DataFrame()
 
     if df.empty:
-        # キャッシュもCSVも見つからない場合のフォールバック（エラーで止めずに空のDFを返す）
         return pd.DataFrame(columns=["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付_dt", "日付", "年月", "単価原価", "原価合計", "粗利額"]), 0, cost_master, 0
 
     if not df.empty and "商品コード" in df.columns:
@@ -653,7 +652,7 @@ hanko_bytes, hanko_file_path = get_hanko_bytes()
 
 col_status, col_refresh = st.columns([4, 1.2])
 with col_refresh:
-    if st.button("🔄 データを最新に再読み込み"):
+    if st.button("🔄 データを最新に再読み込み", key="btn_reload_top_main"):
         st.cache_data.clear()
         if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
         with st.spinner("最新データを読み込み中..."):
@@ -667,7 +666,14 @@ with col_refresh:
         st.rerun()
 
 if df.empty:
-    st.warning("⚠️ 売上データが空または見つかりませんでした。リポジトリに売上CSVファイルが含まれているか確認し、上の「データを最新に再読み込み」ボタンを押してください。")
+    col_err_ref, _ = st.columns([2, 2])
+    with col_err_ref:
+        if st.button("🔄 CSVからキャッシュを強制再生成する", key="btn_force_regen_empty"):
+            st.cache_data.clear()
+            if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
+            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
+            st.rerun()
+    st.stop()
 
 valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""]) if not df.empty else ["2026年01月"]
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
@@ -1178,7 +1184,7 @@ hanko_bytes, hanko_file_path = get_hanko_bytes()
 
 col_status, col_refresh = st.columns([4, 1.2])
 with col_refresh:
-    if st.button("🔄 データを最新に再読み込み"):
+    if st.button("🔄 データを最新に再読み込み", key="btn_reload_top_main"):
         st.cache_data.clear()
         if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
         with st.spinner("最新データを読み込み中..."):
@@ -1192,7 +1198,14 @@ with col_refresh:
         st.rerun()
 
 if df.empty:
-    st.warning("⚠️ 売上データが空または見つかりませんでした。リポジトリに売上CSVファイルが含まれているか確認し、上の「データを最新に再読み込み」ボタンを押してください。")
+    col_err_ref, _ = st.columns([2, 2])
+    with col_err_ref:
+        if st.button("🔄 CSVからキャッシュを強制再生成する", key="btn_force_regen_empty"):
+            st.cache_data.clear()
+            if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
+            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
+            st.rerun()
+    st.stop()
 
 valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""]) if not df.empty else ["2026年01月"]
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
@@ -2394,8 +2407,8 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
     ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
-    next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
-    prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not df_scope.empty else pd.DataFrame()
+    next_m_df = df_scope[df_scope["年月"] == next_ym] if not next_m_df.empty else pd.DataFrame()
+    prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not prev_fy_df.empty else pd.DataFrame()
 
     cust_id_lookup = {}
     if not customer_master_df.empty:
