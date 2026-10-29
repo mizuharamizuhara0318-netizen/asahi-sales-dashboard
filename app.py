@@ -641,7 +641,7 @@ def generate_excel_bytes(data_df, title_str):
     return output.getvalue()
 
 # ========================================================
-# ★ 営業会議用：Excel帳票生成ロジック（完全再現版）
+# ★ 営業会議用：Excel帳票生成ロジック（MergedCellエラー完全対策版）
 # ========================================================
 def build_meeting_comparison_card_data(cust_name, c_id_str, cur_m_df, ly_m_df, next_m_df, prev_fy_df, tgt_y, tgt_m, next_y, next_m, f_year):
     c_ly = ly_m_df[ly_m_df["得意先名"] == cust_name]
@@ -669,8 +669,8 @@ def build_meeting_comparison_card_data(cust_name, c_id_str, cur_m_df, ly_m_df, n
     next_yoy_str = f"{(next_tot / pfy_tot * 100):.0f}%" if pfy_tot > 0 else "0%"
 
     return {
-        "cust_name": cust_name,
-        "cust_id": c_id_str,
+        "cust_name": str(cust_name),
+        "cust_id": str(c_id_str) if c_id_str is not None else "",
         "ly_label": f"{tgt_y - 1}年{tgt_m}月実績",
         "cur_label": f"{tgt_y}年{tgt_m}月実績",
         "next_label": f"{next_y}年{next_m}月売上進捗",
@@ -825,29 +825,36 @@ def generate_meeting_comparison_excel(cards_data, title_ym):
     font_small = Font(name="Meiryo", size=8)
 
     thin = Side(style='thin', color='000000')
-    med = Side(style='medium', color='000000')
     b_box = Border(left=thin, right=thin, top=thin, bottom=thin)
     fill_hdr = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
 
-    def write_card_to_ws(ws, d, start_r, start_c):
-        ws.cell(row=start_r, column=start_c, value=d["cust_name"]).font = font_company
-        ws.cell(row=start_r, column=start_c + 2, value=d["cust_id"]).font = font_cell
+    def safe_set_cell(ws_obj, r_idx, c_idx, val, font_style=None, num_fmt=None, align_style=None):
+        cell = ws_obj.cell(row=r_idx, column=c_idx)
+        if not isinstance(cell, openpyxl.cell.cell.MergedCell):
+            cell.value = val
+            if font_style: cell.font = font_style
+            if num_fmt: cell.number_format = num_fmt
+            if align_style: cell.alignment = align_style
+        return cell
+
+    def write_card_to_ws(ws_obj, d, start_r, start_c):
+        safe_set_cell(ws_obj, start_r, start_c, str(d["cust_name"]), font_company)
+        safe_set_cell(ws_obj, start_r, start_c + 2, str(d["cust_id"]), font_cell)
 
         r = start_r + 2
-        ws.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 3)
-        ws.cell(row=r, column=start_c, value=d["ly_label"]).font = font_hdr
-        ws.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 7)
-        ws.cell(row=r, column=start_c + 4, value=d["cur_label"]).font = font_hdr
+        safe_set_cell(ws_obj, r, start_c, d["ly_label"], font_hdr)
+        safe_set_cell(ws_obj, r, start_c + 4, d["cur_label"], font_hdr)
+        ws_obj.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 3)
+        ws_obj.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 7)
         for ci in range(start_c, start_c + 8):
-            ws.cell(row=r, column=ci).border = b_box
-            ws.cell(row=r, column=ci).fill = fill_hdr
+            ws_obj.cell(row=r, column=ci).border = b_box
+            ws_obj.cell(row=r, column=ci).fill = fill_hdr
 
         r += 1
         sub_h = ["品番", "単価", "数量", "金額", "品番", "単価", "数量", "金額"]
         for idx_h, sh in enumerate(sub_h):
-            c = ws.cell(row=r, column=start_c + idx_h, value=sh)
-            c.font = font_hdr; c.border = b_box; c.fill = fill_hdr
-            c.alignment = Alignment(horizontal="center")
+            c = safe_set_cell(ws_obj, r, start_c + idx_h, sh, font_hdr, align_style=Alignment(horizontal="center"))
+            c.border = b_box; c.fill = fill_hdr
 
         for i in range(5):
             r += 1
@@ -858,51 +865,51 @@ def generate_meeting_comparison_excel(cards_data, title_ym):
                 c_it["商品コード"] if c_it else "", c_it["単価"] if c_it else "", c_it["数量"] if c_it else "", c_it["金額"] if c_it else ""
             ]
             for idx_v, v in enumerate(vals):
-                cell = ws.cell(row=r, column=start_c + idx_v, value=v)
-                cell.font = font_cell; cell.border = b_box
-                if idx_v in [1, 2, 3, 5, 6, 7] and v != "":
-                    cell.number_format = "#,##0"
-                    cell.alignment = Alignment(horizontal="right")
+                is_num = idx_v in [1, 2, 3, 5, 6, 7] and v != ""
+                c = safe_set_cell(
+                    ws_obj, r, start_c + idx_v, v, font_cell,
+                    num_fmt="#,##0" if is_num else None,
+                    align_style=Alignment(horizontal="right") if is_num else None
+                )
+                c.border = b_box
 
         r += 1
-        ws.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 2)
-        ws.cell(row=r, column=start_c, value="その他").font = font_cell
-        c_lo = ws.cell(row=r, column=start_c + 3, value=d["ly_other"]); c_lo.number_format = "#,##0"; c_lo.font = font_cell
-        ws.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 6)
-        ws.cell(row=r, column=start_c + 4, value="その他").font = font_cell
-        c_co = ws.cell(row=r, column=start_c + 7, value=d["cur_other"]); c_co.number_format = "#,##0"; c_co.font = font_cell
-        for ci in range(start_c, start_c + 8): ws.cell(row=r, column=ci).border = b_box
+        safe_set_cell(ws_obj, r, start_c, "その他", font_cell)
+        safe_set_cell(ws_obj, r, start_c + 3, d["ly_other"], font_cell, "#,##0", Alignment(horizontal="right"))
+        safe_set_cell(ws_obj, r, start_c + 4, "その他", font_cell)
+        safe_set_cell(ws_obj, r, start_c + 7, d["cur_other"], font_cell, "#,##0", Alignment(horizontal="right"))
+        ws_obj.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 2)
+        ws_obj.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 6)
+        for ci in range(start_c, start_c + 8): ws_obj.cell(row=r, column=ci).border = b_box
 
         r += 1
-        ws.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 2)
-        ws.cell(row=r, column=start_c, value="合計").font = font_hdr
-        c_lt = ws.cell(row=r, column=start_c + 3, value=d["ly_tot"]); c_lt.number_format = "#,##0"; c_lt.font = font_hdr
-        ws.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 6)
-        ws.cell(row=r, column=start_c + 4, value="合計").font = font_hdr
-        c_ct = ws.cell(row=r, column=start_c + 7, value=d["cur_tot"]); c_ct.number_format = "#,##0"; c_ct.font = font_hdr
+        safe_set_cell(ws_obj, r, start_c, "合計", font_hdr)
+        safe_set_cell(ws_obj, r, start_c + 3, d["ly_tot"], font_hdr, "#,##0", Alignment(horizontal="right"))
+        safe_set_cell(ws_obj, r, start_c + 4, "合計", font_hdr)
+        safe_set_cell(ws_obj, r, start_c + 7, d["cur_tot"], font_hdr, "#,##0", Alignment(horizontal="right"))
+        ws_obj.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 2)
+        ws_obj.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 6)
         for ci in range(start_c, start_c + 8):
-            ws.cell(row=r, column=ci).border = b_box
-            ws.cell(row=r, column=ci).fill = fill_hdr
+            ws_obj.cell(row=r, column=ci).border = b_box
+            ws_obj.cell(row=r, column=ci).fill = fill_hdr
 
         r += 1
-        ws.cell(row=r, column=start_c + 5, value="昨対比").font = font_hdr
-        c_yoy = ws.cell(row=r, column=start_c + 7, value=d["yoy_str"])
-        c_yoy.font = font_hdr; c_yoy.alignment = Alignment(horizontal="right")
+        safe_set_cell(ws_obj, r, start_c + 5, "昨対比", font_hdr)
+        safe_set_cell(ws_obj, r, start_c + 7, d["yoy_str"], font_hdr, align_style=Alignment(horizontal="right"))
 
         r += 2
-        ws.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 3)
-        ws.cell(row=r, column=start_c, value=d["next_label"]).font = font_hdr
-        ws.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 7)
-        ws.cell(row=r, column=start_c + 4, value="この1ヶ月の主な営業活動").font = font_hdr
+        safe_set_cell(ws_obj, r, start_c, d["next_label"], font_hdr)
+        safe_set_cell(ws_obj, r, start_c + 4, "この1ヶ月の主な営業活動", font_hdr)
+        ws_obj.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 3)
+        ws_obj.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 7)
         for ci in range(start_c, start_c + 8):
-            ws.cell(row=r, column=ci).border = b_box
-            ws.cell(row=r, column=ci).fill = fill_hdr
+            ws_obj.cell(row=r, column=ci).border = b_box
+            ws_obj.cell(row=r, column=ci).fill = fill_hdr
 
         r += 1
         for idx_h, sh in enumerate(["品番", "単価", "数量", "金額"]):
-            c = ws.cell(row=r, column=start_c + idx_h, value=sh)
-            c.font = font_hdr; c.border = b_box; c.fill = fill_hdr
-            c.alignment = Alignment(horizontal="center")
+            c = safe_set_cell(ws_obj, r, start_c + idx_h, sh, font_hdr, align_style=Alignment(horizontal="center"))
+            c.border = b_box; c.fill = fill_hdr
 
         act_start_r = r
         for i in range(5):
@@ -910,58 +917,59 @@ def generate_meeting_comparison_excel(cards_data, title_ym):
             n_it = d["next_top5"][i] if i < len(d["next_top5"]) else None
             vals = [n_it["商品コード"] if n_it else "", n_it["単価"] if n_it else "", n_it["数量"] if n_it else "", n_it["金額"] if n_it else ""]
             for idx_v, v in enumerate(vals):
-                cell = ws.cell(row=r, column=start_c + idx_v, value=v)
-                cell.font = font_cell; cell.border = b_box
-                if idx_v in [1, 2, 3] and v != "":
-                    cell.number_format = "#,##0"
-                    cell.alignment = Alignment(horizontal="right")
+                is_num = idx_v in [1, 2, 3] and v != ""
+                c = safe_set_cell(
+                    ws_obj, r, start_c + idx_v, v, font_cell,
+                    num_fmt="#,##0" if is_num else None,
+                    align_style=Alignment(horizontal="right") if is_num else None
+                )
+                c.border = b_box
 
         r += 1
-        ws.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 2)
-        ws.cell(row=r, column=start_c, value="その他").font = font_cell
-        c_no = ws.cell(row=r, column=start_c + 3, value=d["next_other"]); c_no.number_format = "#,##0"; c_no.font = font_cell
-        for ci in range(start_c, start_c + 4): ws.cell(row=r, column=ci).border = b_box
+        safe_set_cell(ws_obj, r, start_c, "その他", font_cell)
+        safe_set_cell(ws_obj, r, start_c + 3, d["next_other"], font_cell, "#,##0", Alignment(horizontal="right"))
+        ws_obj.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 2)
+        for ci in range(start_c, start_c + 4): ws_obj.cell(row=r, column=ci).border = b_box
 
-        ws.merge_cells(start_row=act_start_r, start_column=start_c + 4, end_row=r, end_column=start_c + 7)
+        ws_obj.merge_cells(start_row=act_start_r, start_column=start_c + 4, end_row=r, end_column=start_c + 7)
         for rr in range(act_start_r, r + 1):
             for cc in range(start_c + 4, start_c + 8):
-                ws.cell(row=rr, column=cc).border = b_box
+                ws_obj.cell(row=rr, column=cc).border = b_box
 
         r += 1
-        ws.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 2)
-        ws.cell(row=r, column=start_c, value="合計").font = font_hdr
-        c_nt = ws.cell(row=r, column=start_c + 3, value=d["next_tot"]); c_nt.number_format = "#,##0"; c_nt.font = font_hdr
-        ws.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 7)
-        ws.cell(row=r, column=start_c + 4, value="合計").font = font_hdr
+        safe_set_cell(ws_obj, r, start_c, "合計", font_hdr)
+        safe_set_cell(ws_obj, r, start_c + 3, d["next_tot"], font_hdr, "#,##0", Alignment(horizontal="right"))
+        safe_set_cell(ws_obj, r, start_c + 4, "合計", font_hdr)
+        ws_obj.merge_cells(start_row=r, start_column=start_c, end_row=r, end_column=start_c + 2)
+        ws_obj.merge_cells(start_row=r, start_column=start_c + 4, end_row=r, end_column=start_c + 7)
         for ci in range(start_c, start_c + 8):
-            ws.cell(row=r, column=ci).border = b_box
-            ws.cell(row=r, column=ci).fill = fill_hdr
+            ws_obj.cell(row=r, column=ci).border = b_box
+            ws_obj.cell(row=r, column=ci).fill = fill_hdr
 
         r += 1
         plan_start_r = r
-        ws.cell(row=r, column=start_c + 4, value=d["pfy_label"]).font = font_small
-        c_pfy = ws.cell(row=r, column=start_c + 7, value=d["pfy_tot"]); c_pfy.number_format = "#,##0"; c_pfy.font = font_small
+        safe_set_cell(ws_obj, plan_start_r, start_c, "【今後の予定】", font_small, align_style=Alignment(vertical="top", horizontal="left"))
+        safe_set_cell(ws_obj, r, start_c + 4, d["pfy_label"], font_small)
+        safe_set_cell(ws_obj, r, start_c + 7, d["pfy_tot"], font_small, "#,##0", Alignment(horizontal="right"))
 
         r += 1
-        ws.cell(row=r, column=start_c + 4, value="当月現在進捗").font = font_small
-        c_ncur = ws.cell(row=r, column=start_c + 7, value=d["next_tot"]); c_ncur.number_format = "#,##0"; c_ncur.font = font_small
+        safe_set_cell(ws_obj, r, start_c + 4, "当月現在進捗", font_small)
+        safe_set_cell(ws_obj, r, start_c + 7, d["next_tot"], font_small, "#,##0", Alignment(horizontal="right"))
 
         r += 1
-        ws.cell(row=r, column=start_c + 4, value="昨対進捗").font = font_small
-        c_nyoy = ws.cell(row=r, column=start_c + 7, value=d["next_yoy_str"]); c_nyoy.font = font_small; c_nyoy.alignment = Alignment(horizontal="right")
+        safe_set_cell(ws_obj, r, start_c + 4, "昨対進捗", font_small)
+        safe_set_cell(ws_obj, r, start_c + 7, d["next_yoy_str"], font_small, align_style=Alignment(horizontal="right"))
 
         r += 1
-        ws.merge_cells(start_row=plan_start_r, start_column=start_c, end_row=r, end_column=start_c + 3)
-        c_pl = ws.cell(row=plan_start_r, column=start_c, value="【今後の予定】")
-        c_pl.font = font_small; c_pl.alignment = Alignment(vertical="top", horizontal="left")
+        ws_obj.merge_cells(start_row=plan_start_r, start_column=start_c, end_row=r, end_column=start_c + 3)
         for rr in range(plan_start_r, r + 1):
             for cc in range(start_c, start_c + 8):
-                ws.cell(row=rr, column=cc).border = b_box
+                ws_obj.cell(row=rr, column=cc).border = b_box
 
     for idx, cd in enumerate(cards_data):
         pair_row = idx // 2
         pair_col = idx % 2
-        s_r = 2 + pair_row * 22
+        s_r = 2 + pair_row * 24
         s_c = 1 if pair_col == 0 else 10
         write_card_to_ws(ws, cd, s_r, s_c)
 
@@ -1226,7 +1234,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     if "saved_estimates" not in st.session_state:
         st.session_state.saved_estimates = load_saved_quotes()
 
-    # ご指定の青枠位置に「見積機能メニュー」と「営業担当者プルダウン」を横並び配置
     est_staff_list = list(STAFF_MAP.values()) + ["（すべて表示）"]
     col_menu_left, col_menu_right = st.columns([1.6, 2.0])
     with col_menu_right:
@@ -1250,7 +1257,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             key="est_active_tab"
         )
 
-    # 営業担当者ごとに独立したセッションキーを用意（同時操作でのバッティング防止）
     s_key = est_staff
     k_items = f"quotation_items_{s_key}"
     k_ver = f"editor_version_{s_key}"
@@ -1625,11 +1631,10 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 border_header = Border(left=thin, right=thin, top=thick, bottom=thick)
                 fill_gray = PatternFill(start_color="E9ECEF", end_color="E9ECEF", fill_type="solid")
 
+                ws["A2"] = "見 積 書"
+                ws["A2"].font = font_title
+                ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
                 ws.merge_cells("A2:F2")
-                t_cell = ws["A2"]
-                t_cell.value = "見 積 書"
-                t_cell.font = font_title
-                t_cell.alignment = Alignment(horizontal="center", vertical="center")
                 ws.row_dimensions[2].height = 30
                 for col_i in range(1, 7): ws.cell(row=3, column=col_i).border = Border(bottom=thick)
 
@@ -1658,12 +1663,13 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                         ws.add_image(img, "F7")
                     except Exception: pass
 
-                ws.merge_cells("A14:F14")
                 c_box1 = ws["A14"]
                 c_box1.value = " 見積内容"
                 c_box1.font = font_section
-                c_box1.fill = fill_gray
-                c_box1.border = Border(top=thin, bottom=thin, left=thin, right=thin)
+                ws.merge_cells("A14:F14")
+                for col_i in range(1, 7):
+                    ws.cell(row=14, column=col_i).fill = fill_gray
+                    ws.cell(row=14, column=col_i).border = border_cell
                 ws.row_dimensions[14].height = 22
 
                 ws["A15"] = "■見積金額"
@@ -1676,12 +1682,13 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 ws["A16"].font = font_bold
                 ws["B16"].font = font_main
 
-                ws.merge_cells("A18:F18")
                 c_box2 = ws["A18"]
                 c_box2.value = " お見積り明細"
                 c_box2.font = font_section
-                c_box2.fill = fill_gray
-                c_box2.border = Border(top=thin, bottom=thin, left=thin, right=thin)
+                ws.merge_cells("A18:F18")
+                for col_i in range(1, 7):
+                    ws.cell(row=18, column=col_i).fill = fill_gray
+                    ws.cell(row=18, column=col_i).border = border_cell
                 ws.row_dimensions[18].height = 22
 
                 ws["A19"] = "■お届け先:"
@@ -1732,31 +1739,29 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                     cur_r += 1
 
                 ws.row_dimensions[cur_r].height = 20
-                ws.merge_cells(start_row=cur_r, start_column=1, end_row=cur_r, end_column=3)
                 tot_sub_lbl = ws.cell(row=cur_r, column=1, value="小計 / 合計")
                 tot_sub_lbl.alignment = Alignment(horizontal="center", vertical="center")
                 tot_sub_lbl.font = font_bold
-                tot_sub_lbl.fill = fill_gray
+                ws.merge_cells(start_row=cur_r, start_column=1, end_row=cur_r, end_column=3)
 
                 c_tot_qty = ws.cell(row=cur_r, column=4, value=q_tot_qty)
                 c_tot_qty.number_format = '#,##0'
                 c_tot_qty.alignment = Alignment(horizontal="right", vertical="center")
                 c_tot_qty.font = font_bold
-                c_tot_qty.fill = fill_gray
 
                 c_tot_p = ws.cell(row=cur_r, column=5, value=q_tot_unit_price)
                 c_tot_p.number_format = '#,##0'
                 c_tot_p.alignment = Alignment(horizontal="right", vertical="center")
                 c_tot_p.font = font_bold
-                c_tot_p.fill = fill_gray
 
                 c_tot_a = ws.cell(row=cur_r, column=6, value=q_tot_sales)
                 c_tot_a.number_format = '#,##0'
                 c_tot_a.alignment = Alignment(horizontal="right", vertical="center")
                 c_tot_a.font = font_bold
-                c_tot_a.fill = fill_gray
 
-                for c_i in range(1, 7): ws.cell(row=cur_r, column=c_i).border = border_cell
+                for c_i in range(1, 7):
+                    ws.cell(row=cur_r, column=c_i).border = border_cell
+                    ws.cell(row=cur_r, column=c_i).fill = fill_gray
                 cur_r += 1
 
                 summary_labels = [
@@ -1767,12 +1772,13 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 ]
                 for s_lbl, s_val in summary_labels:
                     ws.row_dimensions[cur_r].height = 20
-                    ws.merge_cells(start_row=cur_r, start_column=4, end_row=cur_r, end_column=5)
                     lbl_c = ws.cell(row=cur_r, column=4, value=s_lbl)
                     lbl_c.alignment = Alignment(horizontal="center", vertical="center")
                     lbl_c.font = font_bold
-                    lbl_c.fill = fill_gray
-                    lbl_c.border = border_cell
+                    ws.merge_cells(start_row=cur_r, start_column=4, end_row=cur_r, end_column=5)
+                    for ci_s in [4, 5]:
+                        ws.cell(row=cur_r, column=ci_s).fill = fill_gray
+                        ws.cell(row=cur_r, column=ci_s).border = border_cell
 
                     val_c = ws.cell(row=cur_r, column=6, value=s_val)
                     val_c.number_format = '#,##0'
