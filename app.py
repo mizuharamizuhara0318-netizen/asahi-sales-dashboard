@@ -472,15 +472,13 @@ if df.empty:
     st.error("⚠️ Supabaseの `sales_data` テーブルからデータを取得できませんでした。Supabaseの接続情報（Secrets）やテーブル名をご確認ください。")
     st.stop()
 
-# 正確な日時ベースでの有効年月リスト作成（降順・昇順）
+valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
+latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
+desc_valid_ym = sorted(valid_ym, reverse=True)
+
 valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
-
-all_ym_periods = sorted(list(set([d.strftime('%Y年%m月') for d in valid_dts])))
-valid_ym = all_ym_periods # 昇順
-desc_valid_ym = sorted(all_ym_periods, reverse=True) # 降順
-latest_ym = desc_valid_ym[0] if desc_valid_ym else "2026年01月"
 
 curr_y = int(latest_ym[:4])
 curr_m = int(latest_ym[5:7])
@@ -1112,10 +1110,18 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
     prev_fy_ym = f"{next_y - 1}年{next_m:02d}月"
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
-    cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
-    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
-    next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
-    prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not prev_fy_df.empty else pd.DataFrame()
+    
+    # ★ 全てのDataFrame変数を事前に安全に初期化（NameErrorを完全に防ぐ）
+    cur_m_df = pd.DataFrame()
+    ly_m_df = pd.DataFrame()
+    next_m_df = pd.DataFrame()
+    prev_fy_df = pd.DataFrame()
+
+    if not df_scope.empty:
+        cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym]
+        ly_m_df = df_scope[df_scope["年月"] == ly_ym]
+        next_m_df = df_scope[df_scope["年月"] == next_ym]
+        prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym]
 
     cust_id_lookup = {}
     if not customer_master_df.empty:
@@ -1171,10 +1177,17 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     ly_term_end_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
-    cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
-    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
-    cur_ytd_df = df_scope[(df_scope["年月"] >= term_start_ym) & (df_scope["年月"] <= target_meeting_ym)] if not df_scope.empty else pd.DataFrame()
-    ly_ytd_df = df_scope[(df_scope["年月"] >= ly_term_start_ym) & (df_scope["年月"] <= ly_term_end_ym)] if not ly_ytd_df.empty else pd.DataFrame()
+    
+    cur_m_df = pd.DataFrame()
+    ly_m_df = pd.DataFrame()
+    cur_ytd_df = pd.DataFrame()
+    ly_ytd_df = pd.DataFrame()
+
+    if not df_scope.empty:
+        cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym]
+        ly_m_df = df_scope[df_scope["年月"] == ly_ym]
+        cur_ytd_df = df_scope[(df_scope["年月"] >= term_start_ym) & (df_scope["年月"] <= target_meeting_ym)]
+        ly_ytd_df = df_scope[(df_scope["年月"] >= ly_term_start_ym) & (df_scope["年月"] <= ly_term_end_ym)]
 
     cur_cust_sales = cur_m_df.groupby("得意先名")["金額"].sum() if not cur_m_df.empty else pd.Series()
     ly_cust_sales = ly_m_df.groupby("得意先名")["金額"].sum() if not ly_m_df.empty else pd.Series()
