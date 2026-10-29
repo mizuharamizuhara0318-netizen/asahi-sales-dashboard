@@ -99,27 +99,6 @@ STAFF_MAP = {
     "9": "川村", "10": "穴山", "11": "鈴木", "12": "松平"
 }
 
-ORDER_CSV_COLUMNS = [
-    '受注ID', '顧客ID', '要望等', '注文者お名前(姓)', '注文者お名前(名)', '注文者お名前(フリガナ・姓)', '注文者お名前(フリガナ名)',
-    '注文者会社名', '注文者メールアドレス', '注文者メールアドレスタイプ', '注文者電話番号', '注文者FAX', '注文者国', '注文者郵便番号',
-    '注文者都道府県', '注文者住所1', '注文者住所2', '注文者性別ID', '注文者性別', '注文者生年月日', '注文者職種ID', '注文者職種',
-    '商品合計', '調整額', '調整額備考', 'うち割引額１', 'うち割引額２', 'うち割引額３', 'うちその他調整額', '合計額', '送料（税別）',
-    '手数料（税別）', 'クーポンコード', 'クーポン名', 'クーポン利用', 'ポイント利用', '請求額', '消費税額', '加算ポイント', '入金額',
-    '配送コスト', 'EC種類', 'EC種類名', 'EC注文番号', 'EC注文番号枝番', 'EC店舗ID', 'EC店舗名', '販売ルートID', '受注ステータス',
-    '支払方法ID', '決済ステータス', '配送方法ID', '配送区分', '申込番号種類', '注文日時', '出荷予定日', '出荷日', 'ひとことメモ',
-    '伝達事項', '直接ＡＤコード', '初回ＡＤコード', '再計算フラグ', '送付先コード', '送付先お名前(姓)', '送付先お名前(名)',
-    '送付先お名前(フリガナ・姓)', '送付先お名前(フリガナ名)', '送付先会社名', '送付先電話番号', '送付先FAX', '送付先国',
-    '送付先郵便番号', '送付先都道府県', '送付先住所1', '送付先住所2', 'お届け日', 'お届け時間', 'マーク１', 'マーク２', 'マーク３',
-    '出力フラグ(受注伝票)', '出力フラグ(お手紙)', '出力フラグ(納品書)', '出力フラグ(領収書)', '出力フラグ(請求書)', '出力フラグ(EMS)',
-    '出力フラグ(送り状)', '出力済(受注伝票)', '出力済(お手紙)', '出力済(納品書)', '出力済(領収書)', '出力済(請求書)', '出力済(EMS)',
-    '出力済(送り状)', '出力済(後払い取引登録)', '出力済(後払い出荷登録)', '出力済(配送指示伝票)', '出力済(モール連携出荷)',
-    '出力済(モール連携処理済)', 'メール送信済(サンクス)', 'メール送信済(入金確認)', 'メール送信済(発送完了)', 'メール送信済(フォロー)',
-    'メール送信済(その他１)', 'メール送信済(その他２)', 'ご購入明細商品コード', 'ご購入明細商品名', 'ご購入明細消費税区分',
-    'ご購入明細規格名(横軸選択肢)', 'ご購入明細規格名(縦軸選択肢)', 'ご購入明細選択肢名', 'ご購入明細消費税課税規則', 'ご購入明細送料区分',
-    'ご購入明細手数料区分', 'ご購入明細税抜単価', 'ご購入明細税込単価', 'ご購入明細消費税', 'ご購入明細消費税率', 'ご購入明細数量',
-    'ご購入明細金額', 'ご購入明細定期区分', 'ご購入明細標準販売価格', 'ご購入明細JANコード', 'ご購入明細ロットNO', '消費税計算区分'
-]
-
 EXCLUDE_RANK_PATTERN = re.compile(r"下代変更前|オ.*プン|ｵ.*ﾌﾟﾝ|open|サンプル|ｻﾝﾌﾟﾙ|99,?999", re.IGNORECASE)
 
 def clean_cust_name(val):
@@ -314,28 +293,27 @@ def prep_supabase_dataframe(df, cost_master):
 
     col_map = {}
     for c in df.columns:
-        c_str = str(c).strip()
-        if "商品コード" in c_str or "品番" in c_str: col_map[c] = "商品コード"
-        elif "商品名" in c_str or "品名" in c_str: col_map[c] = "商品名"
-        elif "得意先名" in c_str or "顧客" in c_str or "会社" in c_str: col_map[c] = "得意先名"
-        elif "担当" in c_str: col_map[c] = "担当者"
-        elif "数量" in c_str or "個数" in c_str: col_map[c] = "数量"
-        elif "単価" in c_str: col_map[c] = "単価"
-        elif "金額" in c_str or "売上" in c_str: col_map[c] = "金額"
-        elif "日付" in c_str or "日" in c_str: col_map[c] = "日付"
+        c_str = str(c).strip().lower()
+        if any(k in c_str for k in ["商品コード", "商品cd", "sku", "品番", "code"]): col_map[c] = "商品コード"
+        elif any(k in c_str for k in ["商品名", "品名", "name"]): col_map[c] = "商品名"
+        elif any(k in c_str for k in ["得意先名", "顧客", "会社", "customer"]): col_map[c] = "得意先名"
+        elif any(k in c_str for k in ["担当", "staff"]): col_map[c] = "担当者"
+        elif any(k in c_str for k in ["数量", "個数", "qty", "quantity"]): col_map[c] = "数量"
+        elif any(k in c_str for k in ["単価", "price", "unit_price"]): col_map[c] = "単価"
+        elif any(k in c_str for k in ["金額", "売上", "amount", "total"]): col_map[c] = "金額"
+        elif any(k in c_str for k in ["日付", "date", "day"]): col_map[c] = "日付"
 
     df = df.rename(columns=col_map)
 
     for req in ["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付"]:
         if req not in df.columns:
-            df[req] = ""
+            df[req] = 0 if req in ["数量", "単価", "金額"] else ""
 
     df["商品コード"] = df["商品コード"].astype(str).str.strip()
     df["商品名"] = df["商品名"].astype(str).map(clean_product_name)
     df["得意先名"] = df["得意先名"].astype(str).map(clean_cust_name)
     df["担当者"] = df["担当者"].map(convert_staff_name).fillna("").astype(str)
     
-    # 安全な数値変換（KeyError / ValueError防止）
     df["数量"] = pd.to_numeric(df["数量"].apply(clean_num), errors="coerce").fillna(0).astype(int)
     df["単価"] = pd.to_numeric(df["単価"].apply(clean_num), errors="coerce").fillna(0).astype(int)
     
