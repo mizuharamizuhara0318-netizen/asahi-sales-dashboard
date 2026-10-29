@@ -677,6 +677,7 @@ curr_y = int(latest_ym[:4])
 curr_m = int(latest_ym[5:7])
 fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
+# ご要望の通り「表示モード」「得意先」「商品別売上」が最上部にくるように配置順を修正
 col_top1, col_top2 = st.columns([1.6, 2])
 with col_top1:
     view_type = st.selectbox("表示モード", [
@@ -704,7 +705,7 @@ with col_top2:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
 
 # ========================================================
-# ★ 営業会議用：Excel帳票生成ロジック（MergedCellエラー完全対策版）
+# ★ 営業会議用：Excel・カード生成ロジック定義
 # ========================================================
 def build_meeting_comparison_card_data(cust_name, c_id_str, cur_m_df, ly_m_df, next_m_df, prev_fy_df, tgt_y, tgt_m, next_y, next_m, f_year):
     c_ly = ly_m_df[ly_m_df["得意先名"] == cust_name]
@@ -2276,7 +2277,7 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
         growth_badge = f" | <b>前年同期比:</b> <span style='color:{('#188038' if diff >= 0 else '#d93025')};'>{symbol} {rate:+.1f}% ({int(diff):+,}円)</span>"
 
 # ========================================================
-# ★ 各種ビューの完全なレンダリング（表示モード・得意先・商品別を上部に）
+# ★ 各種ビューの完全なレンダリング
 # ========================================================
 if view_type == '🏢 得意先別ランキング':
     valid_date_df = filtered[filtered["日付"].str.strip() != ""]
