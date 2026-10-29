@@ -135,13 +135,17 @@ def clean_cust_name(val):
     return norm
 
 def clean_num(val):
-    if pd.isna(val): return 0.0
+    if val is None: return 0.0
+    try:
+        if pd.isna(val): return 0.0
+    except:
+        pass
     s = re.sub(r'[^\d.-]', '', str(val))
     try: return float(s) if s else 0.0
     except: return 0.0
 
 def convert_staff_name(val):
-    if pd.isna(val): return ""
+    if val is None: return ""
     v = str(val).strip().replace(".0", "")
     return STAFF_MAP.get(v, v)
 
@@ -330,9 +334,13 @@ def prep_supabase_dataframe(df, cost_master):
     df["商品名"] = df["商品名"].astype(str).map(clean_product_name)
     df["得意先名"] = df["得意先名"].astype(str).map(clean_cust_name)
     df["担当者"] = df["担当者"].map(convert_staff_name).fillna("").astype(str)
-    df["数量"] = df["数量"].apply(clean_num).astype(int)
-    df["単価"] = df["単価"].apply(clean_num).astype(int)
-    df["金額"] = df["金額"].apply(clean_num)
+    
+    # 安全な数値変換
+    df["数量"] = pd.to_numeric(df["数量"].apply(clean_num), errors="coerce").fillna(0).astype(int)
+    df["単価"] = pd.to_numeric(df["単価"].apply(clean_num), errors="coerce").fillna(0).astype(int)
+    
+    raw_amt = df["金額"].apply(clean_num)
+    df["金額"] = pd.to_numeric(raw_amt, errors="coerce").fillna(0)
     df["金額"] = df.apply(lambda r: int(r["金額"]) if r["金額"] > 0 else int(r["数量"] * r["単価"]), axis=1)
 
     raw_date = df["日付"].astype(str).str.replace(r'[^0-9]', '', regex=True)
@@ -1532,7 +1540,7 @@ if view_type == '🏢 得意先別ランキング':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "得意先別ランキング"), file_name="得意先別ランキング.xlsx", use_container_width=True, key="dl_btn_cust_rank_v3")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "得意先別ランキング"), file_name="得意先別ランキング.xlsx", use_container_width=True, key="dl_btn_cust_rank_v4")
 
     st.info("👆 **表の行をクリックすると、その得意先の「売れ数・売上TOP10詳細」がポップアップ表示されます。**")
 
@@ -1581,7 +1589,7 @@ elif view_type == '📦 商品別売上ランキング':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "商品別売上ランキング"), file_name="商品別売上ランキング.xlsx", use_container_width=True, key="dl_btn_prod_rank_v3")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "商品別売上ランキング"), file_name="商品別売上ランキング.xlsx", use_container_width=True, key="dl_btn_prod_rank_v4")
     render_universal_table(show_df)
 
 elif view_type == '👤 担当者別 売上＆目標達成分析':
@@ -1605,13 +1613,13 @@ elif view_type == '👤 担当者別 売上＆目標達成分析':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>全体売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "担当者別売上分析"), file_name="担当者別売上分析.xlsx", use_container_width=True, key="dl_btn_staff_v3")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "担当者別売上分析"), file_name="担当者別売上分析.xlsx", use_container_width=True, key="dl_btn_staff_v4")
     render_universal_table(show_df)
 
 elif view_type == '📊 営業会議用：上位社 売上比較シート':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
     with col_m1: target_meeting_ym = st.selectbox("対象月度", desc_valid_ym, index=0, key="tgt_ym_1")
-    with col_m2: compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=3, key="compare_cust_count_sel_v3")
+    with col_m2: compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=3, key="compare_cust_count_sel_v4")
 
     tgt_y = int(target_meeting_ym[:4]); tgt_m = int(target_meeting_ym[5:7])
     ly_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
@@ -1657,7 +1665,7 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
             file_name=f"営業会議_上位社売上比較シート_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
-            key="dl_btn_meeting_comp_v3"
+            key="dl_btn_meeting_comp_v4"
         )
 
     st.markdown(f"#### 📊 {tgt_m}月度 上位{len(top_custs)}社 売上比較シート（担当: {sel_staff}）")
@@ -1672,7 +1680,7 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
 elif view_type == '📑 営業会議用：上位客先別売上実績':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
     with col_m1: target_meeting_ym = st.selectbox("対象月度", desc_valid_ym, index=0, key="tgt_ym_2")
-    with col_m2: meeting_cust_count = st.selectbox("表示上位数", [10, 20, 30, 50, 100], index=0, key="meeting_cust_count_sel_v3")
+    with col_m2: meeting_cust_count = st.selectbox("表示上位数", [10, 20, 30, 50, 100], index=0, key="meeting_cust_count_sel_v4")
 
     tgt_y = int(target_meeting_ym[:4]); tgt_m = int(target_meeting_ym[5:7])
     ly_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
@@ -1685,7 +1693,7 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
     ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
     cur_ytd_df = df_scope[(df_scope["年月"] >= term_start_ym) & (df_scope["年月"] <= target_meeting_ym)] if not df_scope.empty else pd.DataFrame()
-    ly_ytd_df = df_scope[(df_scope["年月"] >= ly_term_start_ym) & (df_scope["年月"] <= ly_term_end_ym)] if not df_scope.empty else pd.DataFrame()
+    ly_ytd_df = df_scope[(df_scope["年月"] >= ly_term_start_ym) & (df_scope["年月"] <= ly_term_end_ym)] if not ly_ytd_df.empty else pd.DataFrame()
 
     cur_cust_sales = cur_m_df.groupby("得意先名")["金額"].sum() if not cur_m_df.empty else pd.Series()
     ly_cust_sales = ly_m_df.groupby("得意先名")["金額"].sum() if not ly_m_df.empty else pd.Series()
@@ -1739,7 +1747,7 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
             file_name=f"営業会議_{title_sheet}_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
-            key="dl_btn_top_cust_v3"
+            key="dl_btn_top_cust_v4"
         )
 
     st.markdown(f"### {title_sheet}（担当: {sel_staff}）")
@@ -1763,7 +1771,7 @@ elif view_type == '📈 商品別 前年実績比較':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>当期売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "商品別前年比較"), file_name="商品別前年比較.xlsx", use_container_width=True, key="dl_btn_prod_ly_v3")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "商品別前年比較"), file_name="商品別前年比較.xlsx", use_container_width=True, key="dl_btn_prod_ly_v4")
     render_universal_table(show_df)
 
 elif view_type == '📊 得意先別 前年実績比較':
@@ -1784,7 +1792,7 @@ elif view_type == '📊 得意先別 前年実績比較':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>当期売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "得意先別前年比較"), file_name="得意先別前年比較.xlsx", use_container_width=True, key="dl_btn_cust_ly_v3")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "得意先別前年比較"), file_name="得意先別前年比較.xlsx", use_container_width=True, key="dl_btn_cust_ly_v4")
     render_universal_table(show_df)
 
 elif view_type == '💤 滞留・未販売商品分析（売れてない商品）':
@@ -1810,7 +1818,7 @@ elif view_type == '💤 滞留・未販売商品分析（売れてない商品�
         res_d.insert(0, "番号", range(1, len(res_d) + 1))
     show_df = res_d[["番号", "商品コード", "商品名", "最終売上日", "累計数量", "累計売上", "単価原価"]].copy() if not res_d.empty else pd.DataFrame()
     if not show_df.empty and limit_val != "全件": show_df = show_df.head(int(limit_val))
-    st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "滞留未販売商品"), file_name="滞留未販売商品.xlsx", use_container_width=True, key="dl_btn_dormant_v3")
+    st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "滞留未販売商品"), file_name="滞留未販売商品.xlsx", use_container_width=True, key="dl_btn_dormant_v4")
     render_universal_table(show_df)
 
 elif view_type == '✨ 新商品売上分析（直近1年）':
@@ -1822,7 +1830,7 @@ elif view_type == '✨ 新商品売上分析（直近1年）':
         agg_n = agg_n.sort_values(by="販売金額", ascending=False)
         agg_n.insert(0, "順位", range(1, len(agg_n) + 1))
         if limit_val != "全件": agg_n = agg_n.head(int(limit_val))
-    st.download_button("📥 Excelで保存", data=generate_excel_bytes(agg_n, "新商品売上分析"), file_name="新商品売上分析.xlsx", use_container_width=True, key="dl_btn_new_prod_v3")
+    st.download_button("📥 Excelで保存", data=generate_excel_bytes(agg_n, "新商品売上分析"), file_name="新商品売上分析.xlsx", use_container_width=True, key="dl_btn_new_prod_v4")
     render_universal_table(agg_n)
 
 elif view_type == '🧩 得意先×商品 マトリクス':
@@ -1835,7 +1843,7 @@ elif view_type == '🧩 得意先×商品 マトリクス':
             piv = piv[piv[focus_unbought] == 0]
         piv.insert(0, "順位", range(1, len(piv) + 1))
         if limit_val != "全件": piv = piv.head(int(limit_val))
-    st.download_button("📥 Excelで保存", data=generate_excel_bytes(piv, "マトリクス分析"), file_name="得意先_商品マトリクス.xlsx", use_container_width=True, key="dl_btn_matrix_v3")
+    st.download_button("📥 Excelで保存", data=generate_excel_bytes(piv, "マトリクス分析"), file_name="得意先_商品マトリクス.xlsx", use_container_width=True, key="dl_btn_matrix_v4")
     render_universal_table(piv)
 
 else:
@@ -1843,5 +1851,5 @@ else:
     if not disp_df.empty:
         disp_df.insert(0, "番号", range(1, len(disp_df) + 1))
         if limit_val != "全件": disp_df = disp_df.head(int(limit_val))
-    st.download_button("📥 明細をExcelで保存", data=generate_excel_bytes(disp_df, "明細一覧"), file_name="売上明細一覧.xlsx", use_container_width=True, key="dl_btn_details_v3")
+    st.download_button("📥 明細をExcelで保存", data=generate_excel_bytes(disp_df, "明細一覧"), file_name="売上明細一覧.xlsx", use_container_width=True, key="dl_btn_details_v4")
     render_universal_table(disp_df)
