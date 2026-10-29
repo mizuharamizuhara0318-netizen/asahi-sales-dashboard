@@ -722,22 +722,6 @@ customer_master_df = load_customer_master(cust_path, cust_mtime)
 
 hanko_bytes, hanko_file_path = get_hanko_bytes()
 
-valid_ym_set = sorted(list(set(df["年月"].dropna().astype(str).tolist())))
-valid_ym_set = [y for y in valid_ym_set if y and y != ""]
-
-def parse_ym_to_datetime(ym_str):
-    try:
-        m = re.match(r'(\d{4})年(\d{1,2})月', ym_str)
-        if m:
-            return datetime(int(m.group(1)), int(m.group(2)), 1)
-    except:
-        pass
-    return datetime(2026, 1, 1)
-
-desc_valid_ym = sorted(valid_ym_set, key=parse_ym_to_datetime, reverse=True)
-latest_ym = desc_valid_ym[0] if desc_valid_ym else "2026年01月"
-valid_ym = valid_ym_set
-
 col_status, col_refresh = st.columns([4, 1.2])
 with col_refresh:
     if st.button("🔄 データを最新に再読み込み"):
@@ -757,13 +741,12 @@ if df.empty:
     st.error(f"売上CSVデータが見つかりませんでした。`{BASE_SHARE}` フォルダを確認してください。")
     st.stop()
 
+valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
+latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
+
 valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
-
-curr_y = int(latest_ym[:4]) if "年" in latest_ym else 2026
-curr_m = int(latest_ym.split("年")[1].replace("月", "")) if "年" in latest_ym and "月" in latest_ym else 1
-fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
 col_top1, col_top2 = st.columns([1.6, 2])
 with col_top1:
@@ -792,7 +775,7 @@ with col_top2:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
 
 # ========================================================
-# ★ 🧮 簡易見積＆利益シミュレーター
+# ★ 🧮 簡易見積＆利益シミュレーター（担当者プルダウン ＆ 親SKU除外完備）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
@@ -1545,6 +1528,43 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
 
     st.markdown(f"### {title_sheet}（担当: {sel_staff}）")
     render_universal_table(res_m_df_tot)
+
+elif view_type == '👤 担当者別 売上＆目標達成分析':
+    # 🔴 担当者別 売上＆目標達成分析の完全実装
+    st.markdown("### 👤 担当者別 売上＆目標達成分析")
+    staff_agg = df.groupby("担当者").agg(
+        販売金額=("金額", "sum"), 数量=("数量", "sum"), 粗利額=("粗利額", "sum"), 担当件数=("商品コード", "count")
+    ).reset_index() if not df.empty else pd.DataFrame()
+
+    if not staff_agg.empty:
+        staff_agg["粗利率"] = staff_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
+        staff_agg = staff_agg.sort_values(by="販売金額", ascending=False)
+        staff_agg.insert(0, "順位", range(1, len(staff_agg) + 1))
+    
+    show_staff_df = staff_agg[["順位", "担当者", "販売金額", "粗利額", "粗利率", "数量", "担当件数"]].copy() if not staff_agg.empty else pd.DataFrame()
+    
+    tot_st_sales = int(staff_agg["販売金額"].sum()) if not staff_agg.empty else 0
+    tot_st_prof = int(staff_agg["粗利額"].sum()) if not staff_agg.empty else 0
+    st.markdown(f"<div class='total-card'><b>全担当者売上合計:</b> ¥{tot_st_sales:,} &nbsp;|&nbsp; <b>総粗利額:</b> ¥{tot_st_prof:,}</div>", unsafe_allow_html=True)
+    render_universal_table(show_staff_df)
+
+elif view_type == '✨ 新商品売上分析（直近1年）':
+    # 🔴 新商品売上分析（直近1年）の完全実装
+    st.markdown("### ✨ 新商品売上分析（直近1年間）")
+    one_year_ago = max_date - pd.DateOffset(years=1)
+    new_prod_df = df[df["日付_dt"] >= one_year_ago] if not df.empty else pd.DataFrame()
+    
+    np_agg = new_prod_df.groupby(["商品コード", "商品名"]).agg(
+        販売金額=("金額", "sum"), 数量=("数量", "sum"), 粗利額=("粗利額", "sum"), 初回売上日=("日付", "min")
+    ).reset_index() if not new_prod_df.empty else pd.DataFrame()
+
+    if not np_agg.empty:
+        np_agg["粗利率"] = np_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
+        np_agg = np_agg.sort_values(by="販売金額", ascending=False)
+        np_agg.insert(0, "順位", range(1, len(np_agg) + 1))
+    
+    show_np_df = np_agg[["順位", "商品コード", "商品名", "初回売上日", "数量", "販売金額", "粗利額", "粗利率"]].copy() if not np_agg.empty else pd.DataFrame()
+    render_universal_table(show_np_df)
 
 else:
     # 通常の分析・ランキング表示モード
