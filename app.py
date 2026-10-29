@@ -600,7 +600,7 @@ def render_universal_table(df_data):
             val_str = "" if pd.isna(val) else str(val)
             align = "center" if c in center_cols else ("left" if c in left_cols else "right")
             if isinstance(val, (int, float)) and c not in center_cols:
-                val_str = f"{int(val):+,}" if c in ["増減額", "目標差額"] else f"{int(val):,}"
+                val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額"] else f"{int(val):,}"
 
             is_neg = False
             if isinstance(val, (int, float)) and val < 0: is_neg = True
@@ -649,66 +649,6 @@ def generate_excel_bytes(data_df, title_str):
         data_df.to_excel(writer, index=False, sheet_name=title_str[:30])
     return output.getvalue()
 
-def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, tgt_y, tgt_m, next_y, next_m_val, f_year):
-    cur_sales = int(cur_m[cur_m["得意先名"] == cust]["金額"].sum()) if not cur_m.empty else 0
-    ly_sales = int(ly_m[ly_m["得意先名"] == cust]["金額"].sum()) if not ly_m.empty else 0
-    next_sales = int(next_m[next_m["得意先名"] == cust]["金額"].sum()) if not next_m.empty else 0
-    prev_fy_sales = int(prev_fy[prev_fy["得意先名"] == cust]["金額"].sum()) if not prev_fy.empty else 0
-    return {
-        "cust_name": cust,
-        "cust_id": cid,
-        "cur_sales": cur_sales,
-        "ly_sales": ly_sales,
-        "diff": cur_sales - ly_sales,
-        "next_sales": next_sales,
-        "prev_fy_sales": prev_fy_sales,
-        "next_diff": next_sales - prev_fy_sales,
-        "tgt_m": tgt_m,
-        "next_m": next_m_val
-    }
-
-def render_meeting_card_html(card):
-    diff_color = "#16a34a" if card["diff"] >= 0 else "#dc2626"
-    next_diff_color = "#16a34a" if card["next_diff"] >= 0 else "#dc2626"
-    return f"""
-    <div style="border:1px solid #cbd5e1; border-radius:6px; padding:12px; background:#fff; margin-bottom:12px;">
-        <div style="font-size:15px; font-weight:bold; color:#1e3a8a; border-bottom:1px solid #e2e8f0; padding-bottom:6px; margin-bottom:8px;">
-            🏢 {card['cust_name']} <span style="font-size:12px; color:#64748b;">(ID: {card['cust_id']})</span>
-        </div>
-        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:4px;">
-            <span><b>{card['tgt_m']}月実績:</b> ¥{card['cur_sales']:,}</span>
-            <span>(前年: ¥{card['ly_sales']:,})</span>
-            <span style="color:{diff_color}; font-weight:bold;">差額: ¥{card['diff']:,}</span>
-        </div>
-        <div style="display:flex; justify-content:space-between; font-size:13px;">
-            <span><b>来月({card['next_m']}月)予測:</b> ¥{card['next_sales']:,}</span>
-            <span>(前年同月: ¥{card['prev_fy_sales']:,})</span>
-            <span style="color:{next_diff_color}; font-weight:bold;">差額: ¥{card['next_diff']:,}</span>
-        </div>
-    </div>
-    """
-
-def generate_meeting_comparison_excel(cards_data, tgt_ym):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "上位社売上比較"
-    ws.cell(row=1, column=1, value=f"{tgt_ym} 営業会議 上位社売上比較シート").font = Font(size=14, bold=True)
-    row_idx = 3
-    for c in cards_data:
-        ws.cell(row=row_idx, column=1, value=f"得意先名: {c['cust_name']}")
-        ws.cell(row=row_idx+1, column=1, value=f"当月売上: {c['cur_sales']:,} 円")
-        ws.cell(row=row_idx+2, column=1, value=f"来月予測: {c['next_sales']:,} 円")
-        row_idx += 5
-    out = io.BytesIO()
-    wb.save(out)
-    return out.getvalue()
-
-def generate_meeting_top_cust_excel(res_df, title_str):
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine='openpyxl') as writer:
-        res_df.to_excel(writer, index=False, sheet_name="上位客先実績")
-    return out.getvalue()
-
 df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=False)
 
 member_p_path, member_p_mtime = get_member_price_file_info()
@@ -722,31 +662,17 @@ customer_master_df = load_customer_master(cust_path, cust_mtime)
 
 hanko_bytes, hanko_file_path = get_hanko_bytes()
 
-col_status, col_refresh = st.columns([4, 1.2])
-with col_refresh:
-    if st.button("🔄 データを最新に再読み込み"):
-        st.cache_data.clear()
-        if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
-        with st.spinner("最新データを高速読み込み中..."):
-            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
-            member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
-            jan_master_dict, jan_title_dict, jan_std_price_dict = load_jan_master_v2(jan_path, jan_mtime)
-            customer_master_df = load_customer_master(cust_path, cust_mtime)
-            hanko_bytes, hanko_file_path = get_hanko_bytes()
-        st.success("最新データに更新しました！")
-        time.sleep(0.5)
-        st.rerun()
-
-if df.empty:
-    st.error(f"売上CSVデータが見つかりませんでした。`{BASE_SHARE}` フォルダを確認してください。")
-    st.stop()
-
 valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
+desc_valid_ym = sorted(valid_ym, reverse=True)
 
 valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
+
+curr_y = int(latest_ym[:4]) if "年" in latest_ym else 2026
+curr_m = int(latest_ym.split("年")[1].replace("月", "")) if "年" in latest_ym and "月" in latest_ym else 1
+fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
 col_top1, col_top2 = st.columns([1.6, 2])
 with col_top1:
@@ -1404,17 +1330,10 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     
-    # 🔴 NameErrorを防ぐ安全な初期化
-    cur_m_df = pd.DataFrame()
-    ly_m_df = pd.DataFrame()
-    next_m_df = pd.DataFrame()
-    prev_fy_df = pd.DataFrame()
-
-    if not df_scope.empty:
-        cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym]
-        ly_m_df = df_scope[df_scope["年月"] == ly_ym]
-        next_m_df = df_scope[df_scope["年月"] == next_ym]
-        prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym]
+    cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
+    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
+    next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
+    prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not df_scope.empty else pd.DataFrame()
 
     cust_id_lookup = {}
     if not customer_master_df.empty:
@@ -1530,7 +1449,6 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     render_universal_table(res_m_df_tot)
 
 elif view_type == '👤 担当者別 売上＆目標達成分析':
-    # 🔴 担当者別 売上＆目標達成分析の完全実装
     st.markdown("### 👤 担当者別 売上＆目標達成分析")
     staff_agg = df.groupby("担当者").agg(
         販売金額=("金額", "sum"), 数量=("数量", "sum"), 粗利額=("粗利額", "sum"), 担当件数=("商品コード", "count")
@@ -1542,14 +1460,12 @@ elif view_type == '👤 担当者別 売上＆目標達成分析':
         staff_agg.insert(0, "順位", range(1, len(staff_agg) + 1))
     
     show_staff_df = staff_agg[["順位", "担当者", "販売金額", "粗利額", "粗利率", "数量", "担当件数"]].copy() if not staff_agg.empty else pd.DataFrame()
-    
     tot_st_sales = int(staff_agg["販売金額"].sum()) if not staff_agg.empty else 0
     tot_st_prof = int(staff_agg["粗利額"].sum()) if not staff_agg.empty else 0
     st.markdown(f"<div class='total-card'><b>全担当者売上合計:</b> ¥{tot_st_sales:,} &nbsp;|&nbsp; <b>総粗利額:</b> ¥{tot_st_prof:,}</div>", unsafe_allow_html=True)
     render_universal_table(show_staff_df)
 
 elif view_type == '✨ 新商品売上分析（直近1年）':
-    # 🔴 新商品売上分析（直近1年）の完全実装
     st.markdown("### ✨ 新商品売上分析（直近1年間）")
     one_year_ago = max_date - pd.DateOffset(years=1)
     new_prod_df = df[df["日付_dt"] >= one_year_ago] if not df.empty else pd.DataFrame()
@@ -1567,7 +1483,6 @@ elif view_type == '✨ 新商品売上分析（直近1年）':
     render_universal_table(show_np_df)
 
 else:
-    # 通常の分析・ランキング表示モード
     col_p1, col_p2, col_staff_sub = st.columns([1.2, 1.2, 1.6])
     with col_p1: ym_start = st.selectbox("開始年月", desc_valid_ym, key="analysis_ym_start_v3")
     with col_p2: ym_end = st.selectbox("終了年月", desc_valid_ym, key="analysis_ym_end_v3")
