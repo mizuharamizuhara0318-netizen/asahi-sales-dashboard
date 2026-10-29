@@ -364,16 +364,16 @@ def show_customer_top10_dialog(cust_name, sub_df, period_str):
         return
 
     p_agg = sub_df.groupby(["商品コード", "商品名"]).agg(
-        數量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")
+        数量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")
     ).reset_index().sort_values(by="販売金額", ascending=False).head(10)
 
     p_agg["粗利率"] = p_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
     p_agg.insert(0, "順位", range(1, len(p_agg) + 1))
     
-    show_p_df = p_agg[["順位", "商品コード", "商品名", "數量", "販売金額", "粗利額", "粗利率"]]
+    show_p_df = p_agg[["順位", "商品コード", "商品名", "数量", "販売金額", "粗利額", "粗利率"]]
     
     tot_s = int(p_agg["販売金額"].sum())
-    tot_q = int(p_agg["數量"].sum())
+    tot_q = int(p_agg["数量"].sum())
     st.markdown(f"<div class='total-card'><b>TOP10商品売上合計:</b> ¥{tot_s:,} &nbsp;|&nbsp; <b>数量合計:</b> {tot_q:,} 個</div>", unsafe_allow_html=True)
     render_universal_table(show_p_df)
 
