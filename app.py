@@ -84,8 +84,9 @@ st.markdown("""
 
 st.markdown('<div class="main-header">売上管理＆営業分析表</div>', unsafe_allow_html=True)
 
-BASE_SHARE = r"G:\マイドライブ\売上ダッシュボード"
-OTHER_DATA_DIR = os.path.join(BASE_SHARE, "その他データ")
+# クラウドやGitHub上では、app.pyと同じ場所にある「その他データ」または同じ階層のExcelを読むようにする
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OTHER_DATA_DIR = BASE_DIR
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_FILE = os.path.join(BASE_DIR, "sales_cache.parquet")
