@@ -472,7 +472,7 @@ if df.empty:
     st.error("⚠️ Supabaseの `sales_data` テーブルからデータを取得できませんでした。Supabaseの接続情報（Secrets）やテーブル名をご確認ください。")
     st.stop()
 
-# 有効年月の算出（歯抜け防止・完全な時系列ソート）
+# 🔴 有効年月の算出（歯抜け・文字列表記のズレを完全に防ぐ正統派のdatetimeベースソート）
 valid_ym_set = sorted(list(set(df["年月"].dropna().astype(str).tolist())))
 valid_ym_set = [y for y in valid_ym_set if y and y != ""]
 
@@ -526,7 +526,7 @@ with col_top2:
 # ★ 🧮 簡易見積＆利益シミュレーター（営業担当別切り替え対応）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
-    # 🔴 ABA-501やABA-507等も含めてJANマスタ・売上から確実・安全に商品名マップを構成
+    # 🔴 ABA-501やABA-507等がJANマスタ等から確実に引けるよう、空白除去を徹底
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
     for k_t, v_t in jan_title_dict.items():
         sk_trim = str(k_t).strip()
@@ -565,7 +565,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 
     def get_sku_details(sku_code, rank_selection="ロット単価", cust_comp_name=""):
         s_trim = str(sku_code).strip()
-        # 🔴 JANマスタ（正式名称）を優先して取得し、ない場合は売上データから取得
+        # 🔴 JANマスタ（正式名称）を優先取得し、未登録時は売上実績のマップを使用
         p_name = jan_title_dict.get(s_trim, "")
         if not p_name or p_name == "nan":
             p_name = code_to_name_map.get(s_trim, s_trim)
