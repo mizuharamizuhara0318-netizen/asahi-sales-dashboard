@@ -472,13 +472,15 @@ if df.empty:
     st.error("⚠️ Supabaseの `sales_data` テーブルからデータを取得できませんでした。Supabaseの接続情報（Secrets）やテーブル名をご確認ください。")
     st.stop()
 
-valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
-latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
-desc_valid_ym = sorted(valid_ym, reverse=True)
-
+# 正確な日時ベースでの有効年月リスト作成（降順・昇順）
 valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
+
+all_ym_periods = sorted(list(set([d.strftime('%Y年%m月') for d in valid_dts])))
+valid_ym = all_ym_periods # 昇順
+desc_valid_ym = sorted(all_ym_periods, reverse=True) # 降順
+latest_ym = desc_valid_ym[0] if desc_valid_ym else "2026年01月"
 
 curr_y = int(latest_ym[:4])
 curr_m = int(latest_ym[5:7])
@@ -930,7 +932,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 </tr>
                 """
 
-            hanko_img_tag = f'<img src="data:image/png;base64,{hanko_base64}" style="position:absolute; right:15px; top:5px; width:75px; height:75px; opacity:0.92;" />' if hanko_base64 else ''
+            hanko_img_tag = f'<img src="data:image/png;base64,{hanko_base64}" style="position:absolute; right:15px; top:5px; width:75px; height:75px; opacity:0.92;" />' if hanko_bytes else ''
 
             pdf_template_html = f"""
             <!DOCTYPE html>
@@ -1063,7 +1065,7 @@ if quick_choice == '当月':
     s_date_calc = datetime(curr_y, curr_m, 1).date()
     e_date_calc = max_date
 elif quick_choice == '前月':
-    prev = valid_ym[max(0, valid_ym.index(latest_ym) - 1)] if latest_ym in valid_ym else latest_ym
+    prev = desc_valid_ym[min(len(desc_valid_ym) - 1, desc_valid_ym.index(latest_ym) + 1)] if latest_ym in desc_valid_ym else latest_ym
     s_def, e_def = prev, prev
     py, pm = int(prev[:4]), int(prev[5:7])
     s_date_calc = datetime(py, pm, 1).date()
@@ -1077,11 +1079,11 @@ elif quick_choice == '前期累計':
     s_date_calc = datetime(fiscal_year - 1, 7, 1).date()
     e_date_calc = datetime(fiscal_year, 6, 30).date()
 elif quick_choice == '全データ累計':
-    s_def, e_def = valid_ym[0], valid_ym[-1]
+    s_def, e_def = desc_valid_ym[-1], desc_valid_ym[0]
     s_date_calc = min_date
     e_date_calc = max_date
 else:
-    s_def, e_def = valid_ym[0], latest_ym
+    s_def, e_def = desc_valid_ym[-1], latest_ym
     s_date_calc = min_date
     e_date_calc = max_date
 
@@ -1112,7 +1114,7 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
     ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
-    next_m_df = df_scope[df_scope["年月"] == next_ym] if not next_m_df.empty else pd.DataFrame()
+    next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
     prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not prev_fy_df.empty else pd.DataFrame()
 
     cust_id_lookup = {}
