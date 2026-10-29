@@ -291,7 +291,7 @@ def prep_supabase_dataframe(df, cost_master):
     if df.empty:
         return pd.DataFrame(columns=["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付_dt", "日付", "年月", "単価原価", "原価合計", "粗利額"])
 
-    # Supabaseのカラム名を柔軟にマッピング
+    # Supabaseの実際のカラム名を柔軟に日本語にマッピング
     col_map = {}
     for c in df.columns:
         c_str = str(c).strip().lower()
@@ -306,11 +306,10 @@ def prep_supabase_dataframe(df, cost_master):
 
     df = df.rename(columns=col_map)
 
-    # 必須列が存在しない場合は安全にSeriesとして初期化してKeyErrorを防止
+    # 必須列が存在しない場合は強制的に0や空文字で作成してKeyErrorを防ぐ
     for req in ["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付"]:
         if req not in df.columns:
-            default_val = 0 if req in ["数量", "単価", "金額"] else ""
-            df[req] = pd.Series([default_val] * len(df))
+            df[req] = 0 if req in ["数量", "単価", "金額"] else ""
 
     df["商品コード"] = df["商品コード"].astype(str).str.strip()
     df["商品名"] = df["商品名"].astype(str).map(clean_product_name)
