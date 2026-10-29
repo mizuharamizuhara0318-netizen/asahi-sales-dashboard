@@ -87,11 +87,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">売上管理＆営業分析表</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-header">売上管理＆営業分析表 (Supabase連携版)</div>', unsafe_allow_html=True)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OTHER_DATA_DIR = os.path.join(BASE_DIR, "その他データ")
-CACHE_FILE = os.path.join(BASE_DIR, "sales_cache.parquet")
 SAVED_QUOTES_FILE = os.path.join(BASE_DIR, "saved_estimates.json")
 
 STAFF_MAP = {
@@ -123,12 +122,6 @@ ORDER_CSV_COLUMNS = [
 
 EXCLUDE_RANK_PATTERN = re.compile(r"下代変更前|オ.*プン|ｵ.*ﾌﾟﾝ|open|サンプル|ｻﾝﾌﾟﾙ|99,?999", re.IGNORECASE)
 
-def is_invalid_rank_name(name_str):
-    if not name_str: return True
-    s = str(name_str).strip()
-    if s in ["", "nan", "None", "#N/A"]: return True
-    return bool(EXCLUDE_RANK_PATTERN.search(s))
-
 def clean_cust_name(val):
     if not isinstance(val, str) or not val.strip(): return ""
     raw = str(val).strip()
@@ -151,11 +144,6 @@ def convert_staff_name(val):
     if pd.isna(val): return ""
     v = str(val).strip().replace(".0", "")
     return STAFF_MAP.get(v, v)
-
-def clean_product_name(val):
-    if not isinstance(val, str) or not val.strip(): return ""
-    if "】" in val: val = val.split("】", 1)[-1]
-    return re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]', '', val).strip()
 
 def find_file_multidir(filename_pattern):
     search_dirs = [BASE_DIR, OTHER_DATA_DIR]
@@ -287,309 +275,79 @@ def save_quotes_list(q_list):
             json.dump(q_list, f, ensure_ascii=False, indent=2)
     except Exception: pass
 
-def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
-    rows = []
-    pay_map = {"銀行振込": 3, "代金引換": 2, "現行通り": 3, "掛け払い（月末締め翌月末払い）": 3}
-    pay_id = pay_map.get(est_data.get("payment", ""), 3)
-    now_dt_str = datetime.now().strftime("%Y/%m/%d %H:%M")
-    ship_dt_str = datetime.now().strftime("%Y/%m/%d")
-    deliv_dt_str = (datetime.now() + timedelta(days=1)).strftime("%Y/%m/%d")
-
-    for item in est_data.get("items", []):
-        sku = item.get("商品コード", "")
-        qty = int(item.get("数量", 1))
-        unit_p = int(item.get("見積単価", 0))
-        line_amt = unit_p * qty
-        unit_tax = int(round(unit_p * 0.10))
-        unit_tax_in = unit_p + unit_tax
-        jan = item.get("JANコード", "")
-        clean_name = item.get("商品名", "")
-        full_prod_name = raw_title_map.get(sku, f"【{sku}】{clean_name}（{jan}）" if jan else f"【{sku}】{clean_name}")
-        std_p = std_price_map.get(sku, "")
-
-        r_dict = {col: "" for col in ORDER_CSV_COLUMNS}
-        r_dict['顧客ID'] = est_data.get("cust_id", -1)
-        r_dict['要望等'] = est_data.get("memo", "")
-        r_dict['注文者お名前(姓)'] = est_data.get("cust_sei", "ご担当者")
-        r_dict['注文者お名前(名)'] = est_data.get("cust_mei", "様")
-        r_dict['注文者お名前(フリガナ・姓)'] = est_data.get("cust_kana_sei", "")
-        r_dict['注文者お名前(フリガナ名)'] = est_data.get("cust_kana_mei", "")
-        r_dict['注文者会社名'] = est_data.get("cust_comp", "")
-        r_dict['注文者メールアドレス'] = est_data.get("cust_email", "")
-        r_dict['注文者メールアドレスタイプ'] = 1
-        r_dict['注文者電話番号'] = est_data.get("cust_tel", "")
-        r_dict['注文者FAX'] = est_data.get("cust_fax", "")
-        r_dict['注文者国'] = est_data.get("cust_country", "日本")
-        r_dict['注文者郵便番号'] = est_data.get("cust_post", "")
-        r_dict['注文者都道府県'] = est_data.get("cust_pref", "")
-        r_dict['注文者住所1'] = est_data.get("cust_addr1", "")
-        r_dict['注文者住所2'] = est_data.get("cust_addr2", "")
-        r_dict['注文者性別ID'] = 1
-        r_dict['注文者性別'] = "男性"
-        r_dict['注文者職種'] = est_data.get("cust_job_id", "")
-        r_dict['商品合計'] = line_amt
-        r_dict['調整額'] = 0
-        r_dict['うち割引額１'] = 0
-        r_dict['うち割引額２'] = 0
-        r_dict['うち割引額３'] = 0
-        r_dict['うちその他調整額'] = 0
-        r_dict['合計額'] = line_amt
-        r_dict['送料（税別）'] = est_data.get("shipping_fee", 0)
-        r_dict['手数料（税別）'] = est_data.get("cod_fee", 0)
-        r_dict['クーポン名'] = str(est_data.get("rank_name", "")).split(":")[0].strip()
-        r_dict['クーポン利用'] = 0
-        r_dict['ポイント利用'] = 0
-        r_dict['請求額'] = line_amt
-        r_dict['消費税額'] = unit_tax
-        r_dict['入金額'] = 0
-        r_dict['EC種類'] = 16
-        r_dict['EC注文番号'] = est_data.get("q_no", "").replace("-", "")
-        r_dict['EC店舗ID'] = 1000
-        r_dict['EC店舗名'] = "旭電機化成"
-        r_dict['販売ルートID'] = 1
-        r_dict['受注ステータス'] = 1
-        r_dict['支払方法ID'] = pay_id
-        r_dict['決済ステータス'] = 0
-        r_dict['配送方法ID'] = 1
-        r_dict['配送区分'] = 0
-        r_dict['申込番号種類'] = 0
-        r_dict['注文日時'] = est_data.get("created_at", now_dt_str)
-        r_dict['出荷予定日'] = ship_dt_str
-        r_dict['ひとことメモ'] = est_data.get("hitokoto", "")
-        r_dict['伝達事項'] = est_data.get("memo", "")
-        r_dict['再計算フラグ'] = 1
-        r_dict['送付先お名前(姓)'] = est_data.get("ship_sei", est_data.get("cust_sei", "ご担当者"))
-        r_dict['送付先お名前(名)'] = est_data.get("ship_mei", est_data.get("cust_mei", "様"))
-        r_dict['送付先会社名'] = est_data.get("ship_comp", est_data.get("cust_comp", ""))
-        r_dict['送付先電話番号'] = est_data.get("ship_tel", est_data.get("cust_tel", ""))
-        r_dict['送付先郵便番号'] = est_data.get("ship_post", est_data.get("cust_post", ""))
-        r_dict['送付先都道府県'] = est_data.get("ship_pref", est_data.get("cust_pref", ""))
-        r_dict['送付先住所1'] = est_data.get("ship_addr1", est_data.get("cust_addr1", ""))
-        r_dict['送付先住所2'] = est_data.get("ship_addr2", est_data.get("cust_addr2", ""))
-        r_dict['お届け日'] = deliv_dt_str
-        for flag_col in [
-            '出力済(受注伝票)', '出力済(お手紙)', '出力済(納品書)', '出力済(領収書)', '出力済(請求書)',
-            '出力済(EMS)', '出力済(送り状)', '出力済(後払い取引登録)', '出力済(後払い出荷登録)',
-            '出力済(配送指示伝票)', '出力済(モール連携出荷)', '出力済(モール連携処理済)',
-            'メール送信済(サンクス)', 'メール送信済(入金確認)', 'メール送信済(発送完了)',
-            'メール送信済(フォロー)', 'メール送信済(その他１)', 'メール送信済(その他２)'
-        ]:
-            r_dict[flag_col] = 0
-
-        r_dict['ご購入明細商品コード'] = sku
-        r_dict['ご購入明細商品名'] = full_prod_name
-        r_dict['ご購入明細消費税区分'] = "別"
-        r_dict['ご購入明細消費税課税規則'] = 3
-        r_dict['ご購入明細送料区分'] = "別"
-        r_dict['ご購入明細手数料区分'] = "別"
-        r_dict['ご購入明細税抜単価'] = unit_p
-        r_dict['ご購入明細税込単価'] = unit_tax_in
-        r_dict['ご購入明細消費税'] = unit_tax
-        r_dict['ご購入明細消費税率'] = 10
-        r_dict['ご購入明細数量'] = qty
-        r_dict['ご購入明細金額'] = line_amt
-        r_dict['ご購入明細定期区分'] = "商品"
-        r_dict['ご購入明細標準販売価格'] = std_p
-        r_dict['消費税計算区分'] = "伝票単位(B)"
-        rows.append(r_dict)
-
-    out_df = pd.DataFrame(rows, columns=ORDER_CSV_COLUMNS)
-    return out_df.to_csv(index=False, encoding="cp932", errors="replace").encode("cp932")
-
-def _read_single_csv(f):
-    path_date = None
-    ym_match = re.search(r'(\d{4})年?[/\\_](\d{1,2})月?[/\\_]yayoi_(\d{2})(\d{2})', f, re.IGNORECASE)
-    if ym_match:
-        y, m, md_m, md_d = ym_match.groups()
-        path_date = f"{y}{md_m}{md_d}"
-    else:
-        y_m = re.search(r'(\d{4})年', f)
-        d_m = re.search(r'yayoi_(\d{4})', f, re.IGNORECASE)
-        if y_m and d_m: path_date = f"{y_m.group(1)}{d_m.group(1)}"
-
-    for enc in ["cp932", "shift_jis", "utf-8"]:
-        try:
-            d = pd.read_csv(f, encoding=enc, encoding_errors="replace", low_memory=False)
-            cols = [str(c).strip() for c in d.columns]
-            qty_cols = [c for c in cols if "数量" in c]
-            d["_auto_qty"] = d[qty_cols[0]].apply(clean_num) if qty_cols else (
-                d.iloc[:, 21].apply(clean_num) if len(cols) >= 22 else 0.0
-            )
-            price_cols = [c for c in cols if "単価" in c]
-            d["_auto_price"] = d[price_cols[0]].apply(clean_num) if price_cols else (
-                d.iloc[:, 20].apply(clean_num) if len(cols) >= 21 else 0.0
-            )
-            amt_cols = [c for c in cols if c in ["金額", "売上金額", "販売金額"]]
-            if amt_cols:
-                d["_auto_amt"] = d[amt_cols[0]].apply(clean_num)
-                d["_auto_amt"] = d.apply(lambda r: (r["_auto_qty"] * r["_auto_price"]) if r["_auto_amt"] == 0 and r["_auto_price"] > 0 else r["_auto_amt"], axis=1)
-            else:
-                d["_auto_amt"] = d["_auto_qty"] * d["_auto_price"]
-            d["_fallback_date"] = path_date
-            d["_source_file"] = os.path.basename(f)
-            return d
-        except Exception: continue
-    return None
-
-def _read_amazon_seller_csv(f):
-    norm_f = f.replace('\\', '/')
-    ym_match = re.search(r'(\d{4})年?[/](\d{1,2})月?', norm_f)
-    if ym_match:
-        y_str = ym_match.group(1)
-        m_str = f"{int(ym_match.group(2)):02d}"
-        target_ym = f"{y_str}年{m_str}月"
-        try: dt_last = pd.Timestamp(year=int(y_str), month=int(m_str), day=1) + pd.offsets.MonthEnd(1)
-        except Exception: dt_last = datetime(int(y_str), int(m_str), 28)
-    else:
-        target_ym = "2026年09月"
-        dt_last = datetime(2026, 9, 30)
-
-    for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
-        try:
-            d = pd.read_csv(f, encoding=enc, encoding_errors="replace", low_memory=False)
-            if d.empty: continue
-            sku_series = None
-            for c in d.columns:
-                if str(c).strip().upper() == "SKU":
-                    sku_series = d[c].astype(str).str.strip()
-                    break
-            if sku_series is None:
-                sku_series = d.iloc[:, 3].astype(str).str.strip() if len(d.columns) >= 4 else d.iloc[:, 0].astype(str).str.strip()
-
-            qty_series = None
-            for c in d.columns:
-                if any(k in str(c) for k in ['点数', '數量', '数量', '個数']):
-                    qty_series = d[c].apply(clean_num).astype(int)
-                    break
-            if qty_series is None:
-                if len(d.columns) >= 15: qty_series = d.iloc[:, 14].apply(clean_num).astype(int)
-                elif len(d.columns) >= 3: qty_series = d.iloc[:, 2].apply(clean_num).astype(int)
-                else: qty_series = pd.Series([1] * len(d))
-
-            amt_series = None
-            for c in d.columns:
-                if any(k in str(c) for k in ['売上額', '売上金額', '売上', '金額']):
-                    gross = d[c].apply(clean_num)
-                    amt_series = (gross / 1.10).round().astype(int)
-                    break
-            if amt_series is None:
-                if len(d.columns) >= 19: gross = d.iloc[:, 18].apply(clean_num); amt_series = (gross / 1.10).round().astype(int)
-                elif len(d.columns) >= 2: gross = d.iloc[:, 1].apply(clean_num); amt_series = (gross / 1.10).round().astype(int)
-                else: continue
-
-            res = pd.DataFrame({
-                "商品コード": sku_series, "商品名": sku_series, "得意先名": "アマゾンセラー", "担当者": "水原",
-                "数量": qty_series, "金額": amt_series, "日付_dt": dt_last,
-                "日付": dt_last.strftime('%Y/%m/%d'), "年月": target_ym,
-                "_source_file": os.path.basename(f)
-            })
-            res["単価"] = (res["金額"] / res["数量"].replace(0, 1)).round().astype(int)
-            return res
-        except Exception: continue
-    return None
-
-def _parse_raw_df_to_standard(df_all):
-    if df_all.empty: return pd.DataFrame()
-    def find_col(candidates, cols):
-        for cand in candidates:
-            for c in cols:
-                if cand == c or cand in c: return c
-        return None
-
-    all_cols = [str(c).strip() for c in df_all.columns]
-    c_date = find_col(["納品日", "伝票日付", "売上日", "日付"], all_cols)
-    c_pcode = find_col(["商品コード", "商品CD", "品番"], all_cols)
-    c_pname = find_col(["商品名/入金内容", "商品名", "商品名_摘要", "品名"], all_cols)
-    c_cname = find_col(["得意先名称", "得意先名", "納品先", "得意先"], all_cols)
-    c_staff = find_col(["担当者コード", "担当者CD", "担当者名", "担当者", "担当", "営業担当"], all_cols)
-
-    res = pd.DataFrame()
-    if c_pcode: 
-        res["商品コード"] = df_all[c_pcode].astype(str).str.strip()
-    if c_pname:
-        res["元商品名"] = df_all[c_pname].astype(str).str.strip()
-        res["商品名"] = df_all[c_pname].astype(str).map(clean_product_name)
-    if c_cname: res["得意先名"] = df_all[c_cname].astype(str).str.strip().map(clean_cust_name)
-    else: res["得意先名"] = ""
-
-    if c_staff: res["担当者"] = df_all[c_staff].map(convert_staff_name).fillna("").replace("nan", "")
-    else: res["担当者"] = ""
-
-    res["数量"] = df_all["_auto_qty"].fillna(0).astype(int)
-    res["単価"] = df_all["_auto_price"].fillna(0).astype(int)
-    res["金額"] = df_all["_auto_amt"].fillna(res["数量"] * res["単価"]).astype(int)
-    if "_source_file" in df_all.columns: res["_source_file"] = df_all["_source_file"]
-
-    raw_s = df_all[c_date].astype(str).str.strip() if c_date else pd.Series([""] * len(df_all))
-    clean_date = raw_s.str.replace(r'\.0$', '', regex=True).str.replace(r'[-/.\s]', '', regex=True)
-    if "_fallback_date" in df_all.columns:
-        clean_date = clean_date.where(clean_date.str.len() == 8, df_all["_fallback_date"].astype(str))
-
-    dt = pd.to_datetime(clean_date, format="%Y%m%d", errors="coerce").fillna(pd.to_datetime(raw_s, errors="coerce"))
-    res["日付_dt"] = dt
-    res["日付"] = dt.dt.strftime('%Y/%m/%d').fillna("")
-    res["年月"] = dt.dt.strftime('%Y年%m月').fillna("")
-    if "商品名" in res.columns: res = res[~res["商品名"].str.contains("送料", na=False)].copy()
-    return res
-
+# ========================================================
+# ★ Supabase からデータを取得する関数
+# ========================================================
 @st.cache_data(show_spinner=False)
-def load_and_prep_data(force_reload=False):
-    cost_path, cost_mtime = get_cost_master_file_info()
-    cost_master = load_cost_master(cost_path, cost_mtime)
-
-    if not force_reload and os.path.exists(CACHE_FILE):
-        try:
-            cached_df = pd.read_parquet(CACHE_FILE)
-            if not cached_df.empty:
-                cached_df["日付_dt"] = pd.to_datetime(cached_df["日付_dt"])
-                cached_df = cached_df[cached_df["商品コード"] != "ABA-40"].copy()
-                cached_df["単価原価"] = cached_df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
-                cached_df["原価合計"] = (cached_df["数量"] * cached_df["単価原価"]).round().astype(int)
-                cached_df["粗利額"] = cached_df["金額"] - cached_df["原価合計"]
-                return cached_df, 1, cost_master, 0
-        except Exception: pass
-
-    csv_candidates = glob.glob(os.path.join(BASE_DIR, "**", "*.csv"), recursive=True)
-    csv_candidates = sorted(list(set(csv_candidates)))
-
-    yayoi_files = [f for f in csv_candidates if "yayoi" in f.lower()]
-    amz_files = [f for f in csv_candidates if "アマゾン売上" in f or "businessreport" in f.lower()]
-    if not yayoi_files: yayoi_files = [f for f in csv_candidates if f not in amz_files]
-
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        res_list = list(executor.map(_read_single_csv, yayoi_files))
-    valid_res = [d for d in res_list if d is not None and not d.empty]
-    new_df = _parse_raw_df_to_standard(pd.concat(valid_res, ignore_index=True)) if valid_res else pd.DataFrame()
-
-    amz_res = [_read_amazon_seller_csv(af) for af in amz_files]
-    valid_amz = [ad for ad in amz_res if ad is not None and not ad.empty]
-    new_amz_df = pd.concat(valid_amz, ignore_index=True) if valid_amz else pd.DataFrame()
-
-    valid_dfs = [d for d in [new_df, new_amz_df] if d is not None and not d.empty]
-    df = pd.concat(valid_dfs, ignore_index=True) if valid_dfs else pd.DataFrame()
-
-    if df.empty:
-        return pd.DataFrame(columns=["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付_dt", "日付", "年月", "単価原価", "原価合計", "粗利額"]), 0, cost_master, 0
-
-    if not df.empty and "商品コード" in df.columns:
-        df = df[df["商品コード"] != "ABA-40"].copy()
-
-    if not df.empty and "担当者" in df.columns and "得意先名" in df.columns:
-        valid_staff_df = df[df["担当者"].astype(str).str.strip().ne("")].sort_values("日付_dt")
-        if not valid_staff_df.empty:
-            cust_current_staff_map = valid_staff_df.groupby("得意先名")["担当者"].last().to_dict()
-            df["担当者"] = df["得意先名"].map(lambda c: cust_current_staff_map.get(c, ""))
-
-    if not df.empty and "商品コード" in df.columns:
-        df["単価原価"] = df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
-        df["原価合計"] = (df["数量"] * df["単価原価"]).round().astype(int)
-        df["粗利額"] = df["金額"] - df["原価合計"]
-
+def load_data_from_supabase():
     try:
-        if not df.empty: df.to_parquet(CACHE_FILE, index=False)
-    except Exception: pass
+        from supabase import create_client, Client
+        url = st.secrets.get("SUPABASE_URL", os.environ.get("SUPABASE_URL", ""))
+        key = st.secrets.get("SUPABASE_KEY", os.environ.get("SUPABASE_KEY", ""))
+        if not url or not key:
+            return pd.DataFrame()
+        
+        supabase: Client = create_client(url, key)
+        response = supabase.table("sales_data").select("*").execute()
+        data = response.data
+        if not data:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(data)
+        return df
+    except Exception as e:
+        st.error(f"Supabaseからのデータ取得に失敗しました: {e}")
+        return pd.DataFrame()
 
-    return df, len(csv_candidates), cost_master, len(csv_candidates)
+def prep_supabase_dataframe(df, cost_master):
+    if df.empty:
+        return pd.DataFrame(columns=["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付_dt", "日付", "年月", "単価原価", "原価合計", "粗利額"])
+
+    # スクリーンショットのカラム構造に合わせてマッピング (商品コード, 商品名, 得意先名, 数量, 単価, 金額, 日付 등)
+    col_map = {}
+    for c in df.columns:
+        c_str = str(c).strip()
+        if "商品コード" in c_str or "品番" in c_str: col_map[c] = "商品コード"
+        elif "商品名" in c_str or "品名" in c_str: col_map[c] = "商品名"
+        elif "得意先名" in c_str or "顧客" in c_str or "会社" in c_str: col_map[c] = "得意先名"
+        elif "担当" in c_str: col_map[c] = "担当者"
+        elif "数量" in c_str or "個数" in c_str: col_map[c] = "数量"
+        elif "単価" in c_str: col_map[c] = "単価"
+        elif "金額" in c_str or "売上" in c_str: col_map[c] = "金額"
+        elif "日付" in c_str or "日" in c_str: col_map[c] = "日付"
+
+    df = df.rename(columns=col_map)
+
+    # 必須列の補正
+    for req in ["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付"]:
+        if req not in df.columns:
+            df[req] = ""
+
+    df["商品コード"] = df["商品コード"].astype(str).str.strip()
+    df["商品名"] = df["商品名"].astype(str).map(clean_product_name)
+    df["得意先名"] = df["得意先名"].astype(str).map(clean_cust_name)
+    df["担当者"] = df["担当者"].map(convert_staff_name).fillna("").astype(str)
+    df["数量"] = df["数量"].apply(clean_num).astype(int)
+    df["単価"] = df["単価"].apply(clean_num).astype(int)
+    df["金額"] = df["金額"].apply(clean_num)
+    df["金額"] = df.apply(lambda r: int(r["金額"]) if r["金額"] > 0 else int(r["数量"] * r["単価"]), axis=1)
+
+    # 日付のパース
+    raw_date = df["日付"].astype(str).str.replace(r'[^0-9]', '', regex=True)
+    dt = pd.to_datetime(raw_date, format="%Y%m%d", errors="coerce")
+    df["日付_dt"] = dt
+    df["日付"] = dt.dt.strftime('%Y/%m/%d').fillna("")
+    df["年月"] = dt.dt.strftime('%Y年%m月').fillna("2026年01月")
+
+    # ABA-40除外
+    df = df[df["商品コード"] != "ABA-40"].copy()
+
+    # 原価計算
+    df["単価原価"] = df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
+    df["原価合計"] = (df["数量"] * df["単価原価"]).round().astype(int)
+    df["粗利額"] = df["金額"] - df["原価合計"]
+
+    return df
 
 def render_universal_table(df_data):
     if df_data.empty:
@@ -637,7 +395,12 @@ def generate_excel_bytes(data_df, title_str):
         data_df.to_excel(writer, index=False, sheet_name=title_str[:30])
     return output.getvalue()
 
-df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=False)
+# データマスター読込
+cost_path, cost_mtime = get_cost_master_file_info()
+cost_master = load_cost_master(cost_path, cost_mtime)
+
+raw_sup_df = load_data_from_supabase()
+df = prep_supabase_dataframe(raw_sup_df, cost_master)
 
 member_p_path, member_p_mtime = get_member_price_file_info()
 member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
@@ -652,35 +415,21 @@ hanko_bytes, hanko_file_path = get_hanko_bytes()
 
 col_status, col_refresh = st.columns([4, 1.2])
 with col_refresh:
-    if st.button("🔄 データを最新に再読み込み", key="btn_reload_top_main_unique"):
+    if st.button("🔄 Supabaseから最新データを再読込", key="btn_reload_supabase"):
         st.cache_data.clear()
-        if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
-        with st.spinner("最新データを読み込み中..."):
-            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
-            member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
-            jan_master_dict, jan_title_dict, jan_std_price_dict = load_jan_master_v2(jan_path, jan_mtime)
-            customer_master_df = load_customer_master(cust_path, cust_mtime)
-            hanko_bytes, hanko_file_path = get_hanko_bytes()
-        st.success("最新データに更新しました！")
-        time.sleep(0.5)
+        st.success("最新データを再取得しました！")
+        time.sleep(0.3)
         st.rerun()
 
 if df.empty:
-    col_err_ref, _ = st.columns([2, 2])
-    with col_err_ref:
-        if st.button("🔄 CSVからキャッシュを強制再生成する", key="btn_force_regen_empty_unique"):
-            st.cache_data.clear()
-            if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
-            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
-            st.rerun()
-    st.warning("⚠️ 売上データが空または見つかりませんでした。リポジトリに売上CSVファイルが含まれているか確認し、上のボタンを押してください。")
+    st.error("⚠️ Supabaseの `sales_data` テーブルからデータを取得できませんでした。Supabaseの接続設定（Secrets）やテーブル名をご確認ください。")
     st.stop()
 
-valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""]) if not df.empty else ["2026年01月"]
+valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
 desc_valid_ym = sorted(valid_ym, reverse=True)
 
-valid_dts = df["日付_dt"].dropna() if not df.empty and "日付_dt" in df.columns else pd.Series()
+valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
 
@@ -1168,9 +917,10 @@ def show_customer_top10_dialog(cust_name, cust_df, period_str):
         render_universal_table(top_a[cols_a])
 
 # ========================================================
-# ★ データロード
+# ★ データ読込 ＆ メイン画面描画
 # ========================================================
-df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=False)
+raw_sup_df = load_data_from_supabase()
+df = prep_supabase_dataframe(raw_sup_df, cost_master)
 
 member_p_path, member_p_mtime = get_member_price_file_info()
 member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
@@ -1185,35 +935,21 @@ hanko_bytes, hanko_file_path = get_hanko_bytes()
 
 col_status, col_refresh = st.columns([4, 1.2])
 with col_refresh:
-    if st.button("🔄 データを最新に再読み込み", key="btn_reload_top_main_unique_2"):
+    if st.button("🔄 Supabaseから最新データを再読込", key="btn_reload_supabase_main"):
         st.cache_data.clear()
-        if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
-        with st.spinner("最新データを読み込み中..."):
-            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
-            member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
-            jan_master_dict, jan_title_dict, jan_std_price_dict = load_jan_master_v2(jan_path, jan_mtime)
-            customer_master_df = load_customer_master(cust_path, cust_mtime)
-            hanko_bytes, hanko_file_path = get_hanko_bytes()
-        st.success("最新データに更新しました！")
-        time.sleep(0.5)
+        st.success("最新データを取得しました！")
+        time.sleep(0.3)
         st.rerun()
 
 if df.empty:
-    col_err_ref, _ = st.columns([2, 2])
-    with col_err_ref:
-        if st.button("🔄 CSVからキャッシュを強制再生成する", key="btn_force_regen_empty_unique_2"):
-            st.cache_data.clear()
-            if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
-            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
-            st.rerun()
-    st.warning("⚠️ 売上データが空または見つかりませんでした。リポジトリに売上CSVファイルが含まれているか確認し、上のボタンを押してください。")
+    st.error("⚠️ Supabaseの `sales_data` テーブルからデータを取得できませんでした。Supabaseの接続情報（Secrets）やテーブル名をご確認ください。")
     st.stop()
 
-valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""]) if not df.empty else ["2026年01月"]
+valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
 desc_valid_ym = sorted(valid_ym, reverse=True)
 
-valid_dts = df["日付_dt"].dropna() if not df.empty and "日付_dt" in df.columns else pd.Series()
+valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
 
@@ -2317,7 +2053,7 @@ if view_type == '🏢 得意先別ランキング':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "得意先別ランキング"), file_name="得意先別ランキング.xlsx", use_container_width=True, key="dl_btn_cust_rank")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "得意先別ランキング"), file_name="得意先別ランキング.xlsx", use_container_width=True, key="dl_btn_cust_rank_v2")
 
     st.info("👆 **表の行をクリックすると、その得意先の「売れ数・売上TOP10詳細」がポップアップ表示されます。**")
 
@@ -2366,7 +2102,7 @@ elif view_type == '📦 商品別売上ランキング':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "商品別売上ランキング"), file_name="商品別売上ランキング.xlsx", use_container_width=True, key="dl_btn_prod_rank")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "商品別売上ランキング"), file_name="商品別売上ランキング.xlsx", use_container_width=True, key="dl_btn_prod_rank_v2")
     render_universal_table(show_df)
 
 elif view_type == '👤 担当者別 売上＆目標達成分析':
@@ -2390,13 +2126,13 @@ elif view_type == '👤 担当者別 売上＆目標達成分析':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>全体売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "担当者別売上分析"), file_name="担当者別売上分析.xlsx", use_container_width=True, key="dl_btn_staff")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "担当者別売上分析"), file_name="担当者別売上分析.xlsx", use_container_width=True, key="dl_btn_staff_v2")
     render_universal_table(show_df)
 
 elif view_type == '📊 営業会議用：上位社 売上比較シート':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
     with col_m1: target_meeting_ym = st.selectbox("対象月度", desc_valid_ym, index=0, key="tgt_ym_1")
-    with col_m2: compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=3, key="compare_cust_count_sel")
+    with col_m2: compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=3, key="compare_cust_count_sel_v2")
 
     tgt_y = int(target_meeting_ym[:4]); tgt_m = int(target_meeting_ym[5:7])
     ly_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
@@ -2442,7 +2178,7 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
             file_name=f"営業会議_上位社売上比較シート_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
-            key="dl_btn_meeting_comp"
+            key="dl_btn_meeting_comp_v2"
         )
 
     st.markdown(f"#### 📊 {tgt_m}月度 上位{len(top_custs)}社 売上比較シート（担当: {sel_staff}）")
@@ -2457,7 +2193,7 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
 elif view_type == '📑 営業会議用：上位客先別売上実績':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
     with col_m1: target_meeting_ym = st.selectbox("対象月度", desc_valid_ym, index=0, key="tgt_ym_2")
-    with col_m2: meeting_cust_count = st.selectbox("表示上位数", [10, 20, 30, 50, 100], index=0, key="meeting_cust_count_sel")
+    with col_m2: meeting_cust_count = st.selectbox("表示上位数", [10, 20, 30, 50, 100], index=0, key="meeting_cust_count_sel_v2")
 
     tgt_y = int(target_meeting_ym[:4]); tgt_m = int(target_meeting_ym[5:7])
     ly_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
@@ -2524,7 +2260,7 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
             file_name=f"営業会議_{title_sheet}_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
-            key="dl_btn_top_cust"
+            key="dl_btn_top_cust_v2"
         )
 
     st.markdown(f"### {title_sheet}（担当: {sel_staff}）")
@@ -2548,7 +2284,7 @@ elif view_type == '📈 商品別 前年実績比較':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>当期売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "商品別前年比較"), file_name="商品別前年比較.xlsx", use_container_width=True, key="dl_btn_prod_ly")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "商品別前年比較"), file_name="商品別前年比較.xlsx", use_container_width=True, key="dl_btn_prod_ly_v2")
     render_universal_table(show_df)
 
 elif view_type == '📊 得意先別 前年実績比較':
@@ -2569,7 +2305,7 @@ elif view_type == '📊 得意先別 前年実績比較':
     with c_sum1:
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>当期売上合計:</b> ¥{int(total_sales):,}{growth_badge}</div>", unsafe_allow_html=True)
     with c_sum2:
-        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "得意先別前年比較"), file_name="得意先別前年比較.xlsx", use_container_width=True, key="dl_btn_cust_ly")
+        st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "得意先別前年比較"), file_name="得意先別前年比較.xlsx", use_container_width=True, key="dl_btn_cust_ly_v2")
     render_universal_table(show_df)
 
 elif view_type == '💤 滞留・未販売商品分析（売れてない商品）':
@@ -2595,7 +2331,7 @@ elif view_type == '💤 滞留・未販売商品分析（売れてない商品�
         res_d.insert(0, "番号", range(1, len(res_d) + 1))
     show_df = res_d[["番号", "商品コード", "商品名", "最終売上日", "累計数量", "累計売上", "単価原価"]].copy() if not res_d.empty else pd.DataFrame()
     if not show_df.empty and limit_val != "全件": show_df = show_df.head(int(limit_val))
-    st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "滞留未販売商品"), file_name="滞留未販売商品.xlsx", use_container_width=True, key="dl_btn_dormant")
+    st.download_button("📥 Excelで保存", data=generate_excel_bytes(show_df, "滞留未販売商品"), file_name="滞留未販売商品.xlsx", use_container_width=True, key="dl_btn_dormant_v2")
     render_universal_table(show_df)
 
 elif view_type == '✨ 新商品売上分析（直近1年）':
@@ -2607,7 +2343,7 @@ elif view_type == '✨ 新商品売上分析（直近1年）':
         agg_n = agg_n.sort_values(by="販売金額", ascending=False)
         agg_n.insert(0, "順位", range(1, len(agg_n) + 1))
         if limit_val != "全件": agg_n = agg_n.head(int(limit_val))
-    st.download_button("📥 Excelで保存", data=generate_excel_bytes(agg_n, "新商品売上分析"), file_name="新商品売上分析.xlsx", use_container_width=True, key="dl_btn_new_prod")
+    st.download_button("📥 Excelで保存", data=generate_excel_bytes(agg_n, "新商品売上分析"), file_name="新商品売上分析.xlsx", use_container_width=True, key="dl_btn_new_prod_v2")
     render_universal_table(agg_n)
 
 elif view_type == '🧩 得意先×商品 マトリクス':
@@ -2620,7 +2356,7 @@ elif view_type == '🧩 得意先×商品 マトリクス':
             piv = piv[piv[focus_unbought] == 0]
         piv.insert(0, "順位", range(1, len(piv) + 1))
         if limit_val != "全件": piv = piv.head(int(limit_val))
-    st.download_button("📥 Excelで保存", data=generate_excel_bytes(piv, "マトリクス分析"), file_name="得意先_商品マトリクス.xlsx", use_container_width=True, key="dl_btn_matrix")
+    st.download_button("📥 Excelで保存", data=generate_excel_bytes(piv, "マトリクス分析"), file_name="得意先_商品マトリクス.xlsx", use_container_width=True, key="dl_btn_matrix_v2")
     render_universal_table(piv)
 
 else:
@@ -2628,5 +2364,5 @@ else:
     if not disp_df.empty:
         disp_df.insert(0, "番号", range(1, len(disp_df) + 1))
         if limit_val != "全件": disp_df = disp_df.head(int(limit_val))
-    st.download_button("📥 明細をExcelで保存", data=generate_excel_bytes(disp_df, "明細一覧"), file_name="売上明細一覧.xlsx", use_container_width=True, key="dl_btn_details")
+    st.download_button("📥 明細をExcelで保存", data=generate_excel_bytes(disp_df, "明細一覧"), file_name="売上明細一覧.xlsx", use_container_width=True, key="dl_btn_details_v2")
     render_universal_table(disp_df)
