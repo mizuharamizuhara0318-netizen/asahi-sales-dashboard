@@ -568,9 +568,8 @@ def load_and_prep_data(force_reload=False):
     valid_dfs = [d for d in [new_df, new_amz_df] if d is not None and not d.empty]
     df = pd.concat(valid_dfs, ignore_index=True) if valid_dfs else pd.DataFrame()
 
-    # キャッシュファイルがない場合、CSVからも見つからないときはダミーや空のデータフレームではなく空のデータにするかフォールバックする
     if df.empty:
-        # 万が一CSVが見つからない場合の安全策として空のDFを返す
+        # キャッシュもCSVも見つからない場合のフォールバック（エラーで止めずに空のDFを返す）
         return pd.DataFrame(columns=["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付_dt", "日付", "年月", "単価原価", "原価合計", "粗利額"]), 0, cost_master, 0
 
     if not df.empty and "商品コード" in df.columns:
@@ -1193,14 +1192,13 @@ with col_refresh:
         st.rerun()
 
 if df.empty:
-    st.error("売上データ（sales_cache.parquet）が見つかりませんでした。リポジトリにファイルがあるか確認してください。")
-    st.stop()
+    st.warning("⚠️ 売上データが空または見つかりませんでした。リポジトリに売上CSVファイルが含まれているか確認し、上の「データを最新に再読み込み」ボタンを押してください。")
 
-valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
+valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""]) if not df.empty else ["2026年01月"]
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
 desc_valid_ym = sorted(valid_ym, reverse=True)
 
-valid_dts = df["日付_dt"].dropna()
+valid_dts = df["日付_dt"].dropna() if not df.empty and "日付_dt" in df.columns else pd.Series()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
 
@@ -2183,8 +2181,8 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     with c1: sel_cust = st.selectbox("得意先名", ["（すべて）"] + all_unique_custs)
     with c2: search_cust = st.text_input("得意先検索", placeholder="会社名の一部を入力...")
     with c3:
-        prod_pairs = df[["商品コード", "商品名"]].dropna().drop_duplicates()
-        prod_list = ["（すべて）"] + sorted([f"{r['商品コード']} : {r['商品名']}" for _, r in prod_pairs.iterrows()])
+        prod_pairs = df[["商品コード", "商品名"]].dropna().drop_duplicates() if not df.empty else pd.DataFrame(columns=["商品コード", "商品名"])
+        prod_list = ["（すべて）"] + sorted([f"{r['商品コード']} : {r['商品名']}" for _, r in prod_pairs.iterrows()]) if not prod_pairs.empty else ["（すべて）"]
         sel_prod = st.selectbox("商品選択", prod_list)
     with c4: search_prod = st.text_input("商品検索", placeholder="品番の一部を入力...")
 
@@ -2201,7 +2199,7 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
         m_col1, m_col2 = st.columns([2, 2])
         with m_col1: limit_val = st.selectbox("表示件数", [50, 100, 200, 500, "全件"], index=0)
         with m_col2:
-            top_codes = df.groupby("商品コード")["金額"].sum().nlargest(15).index.tolist()
+            top_codes = df.groupby("商品コード")["金額"].sum().nlargest(15).index.tolist() if not df.empty else []
             focus_unbought = st.selectbox("🎯 特定商品が『未購入（0円）』の得意先のみ抽出", ["（すべて表示）"] + top_codes)
     else:
         limit_col, _, _, _ = st.columns(4)
@@ -2219,52 +2217,53 @@ elif view_type in ['📑 営業会議用：上位客先別売上実績', '📊 �
     ly_filtered = pd.DataFrame()
     period_text = ""
 elif view_type == '✨ 新商品売上分析（直近1年）':
-    filtered = df[df["日付_dt"] >= one_year_ago_date].copy()
+    filtered = df[df["日付_dt"] >= one_year_ago_date].copy() if not df.empty else pd.DataFrame()
     ly_filtered = pd.DataFrame()
     period_text = f"{one_year_ago_date.strftime('%Y/%m/%d')} 〜 {max_date.strftime('%Y/%m/%d')}（直近1年間）"
 else:
     if date_mode == "年月で指定":
         s_ym, e_ym = (ym_end, ym_start) if ym_start > ym_end else (ym_start, ym_end)
-        filtered = df[(df["年月"] >= s_ym) & (df["年月"] <= e_ym)]
+        filtered = df[(df["年月"] >= s_ym) & (df["年月"] <= e_ym)] if not df.empty else pd.DataFrame()
         period_text = f"{s_ym} 〜 {e_ym}" if s_ym != e_ym else f"{s_ym}（単月）"
         s_y, s_m = int(s_ym[:4]), int(s_ym[5:7])
         e_y, e_m = int(e_ym[:4]), int(e_ym[5:7])
-        ly_filtered = df[(df["年月"] >= f"{s_y - 1}年{s_m:02d}月") & (df["年月"] <= f"{e_y - 1}年{e_m:02d}月")]
+        ly_filtered = df[(df["年月"] >= f"{s_y - 1}年{s_m:02d}月") & (df["年月"] <= f"{e_y - 1}年{e_m:02d}月")] if not df.empty else pd.DataFrame()
     else:
         dt_s, dt_e = pd.to_datetime(d_start), pd.to_datetime(d_end)
         if dt_s > dt_e: dt_s, dt_e = dt_e, dt_s
-        filtered = df[(df["日付_dt"] >= dt_s) & (df["日付_dt"] <= dt_e)]
+        filtered = df[(df["日付_dt"] >= dt_s) & (df["日付_dt"] <= dt_e)] if not df.empty else pd.DataFrame()
         period_text = f"{dt_s.strftime('%Y/%m/%d')} 〜 {dt_e.strftime('%Y/%m/%d')}"
-        ly_filtered = df[(df["日付_dt"] >= (dt_s - pd.DateOffset(years=1))) & (df["日付_dt"] <= (dt_e - pd.DateOffset(years=1)))]
+        ly_filtered = df[(df["日付_dt"] >= (dt_s - pd.DateOffset(years=1))) & (df["日付_dt"] <= (dt_e - pd.DateOffset(years=1)))] if not df.empty else pd.DataFrame()
 
 if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート']:
-    if sel_cust != "（すべて）":
-        filtered = filtered[filtered["得意先名"] == sel_cust]
-        if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["得意先名"] == sel_cust]
-    if search_cust.strip():
-        kw_clean = re.sub(r'[\s ]+', '', search_cust.strip())
-        if len(matched_custs) > 1 and not chosen_sub_branch.startswith("（該当する全"):
-            filtered = filtered[filtered["得意先名"] == chosen_sub_branch]
-            if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["得意先名"] == chosen_sub_branch]
-        else:
-            filtered = filtered[filtered["得意先名"].map(lambda x: kw_clean in re.sub(r'[\s ]+', '', str(x)))]
-            if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["得意先名"].map(lambda x: kw_clean in re.sub(r'[\s ]+', '', str(x)))]
+    if not filtered.empty:
+        if sel_cust != "（すべて）":
+            filtered = filtered[filtered["得意先名"] == sel_cust]
+            if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["得意先名"] == sel_cust]
+        if search_cust.strip():
+            kw_clean = re.sub(r'[\s ]+', '', search_cust.strip())
+            if len(matched_custs) > 1 and not chosen_sub_branch.startswith("（該当する全"):
+                filtered = filtered[filtered["得意先名"] == chosen_sub_branch]
+                if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["得意先名"] == chosen_sub_branch]
+            else:
+                filtered = filtered[filtered["得意先名"].map(lambda x: kw_clean in re.sub(r'[\s ]+', '', str(x)))]
+                if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["得意先名"].map(lambda x: kw_clean in re.sub(r'[\s ]+', '', str(x)))]
 
-    if sel_staff != "（すべて）":
-        filtered = filtered[filtered["担当者"] == sel_staff]
-        if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["担当者"] == sel_staff]
+        if sel_staff != "（すべて）":
+            filtered = filtered[filtered["担当者"] == sel_staff]
+            if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["担当者"] == sel_staff]
 
-    if sel_prod != "（すべて）":
-        code = sel_prod.split(" : ")[0]
-        filtered = filtered[filtered["商品コード"] == code]
-        if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["商品コード"] == code]
-    if search_prod.strip():
-        kw_p = search_prod.strip()
-        cond = filtered["商品名"].str.contains(kw_p, na=False) | filtered["商品コード"].str.contains(kw_p, na=False)
-        filtered = filtered[cond]
-        if not ly_filtered.empty:
-            ly_cond = ly_filtered["商品名"].str.contains(kw_p, na=False) | ly_filtered["商品コード"].str.contains(kw_p, na=False)
-            ly_filtered = ly_filtered[ly_cond]
+        if sel_prod != "（すべて）":
+            code = sel_prod.split(" : ")[0]
+            filtered = filtered[filtered["商品コード"] == code]
+            if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["商品コード"] == code]
+        if search_prod.strip():
+            kw_p = search_prod.strip()
+            cond = filtered["商品名"].str.contains(kw_p, na=False) | filtered["商品コード"].str.contains(kw_p, na=False)
+            filtered = filtered[cond]
+            if not ly_filtered.empty:
+                ly_cond = ly_filtered["商品名"].str.contains(kw_p, na=False) | ly_filtered["商品コード"].str.contains(kw_p, na=False)
+                ly_filtered = ly_filtered[ly_cond]
 
     total_sales = filtered["金額"].sum() if not filtered.empty else 0
     total_qty = filtered["数量"].sum() if not filtered.empty else 0
@@ -2394,7 +2393,7 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
-    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
+    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
     next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
     prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not df_scope.empty else pd.DataFrame()
 
@@ -2453,7 +2452,7 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
-    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
+    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
     cur_ytd_df = df_scope[(df_scope["年月"] >= term_start_ym) & (df_scope["年月"] <= target_meeting_ym)] if not df_scope.empty else pd.DataFrame()
     ly_ytd_df = df_scope[(df_scope["年月"] >= ly_term_start_ym) & (df_scope["年月"] <= ly_term_end_ym)] if not df_scope.empty else pd.DataFrame()
 
@@ -2515,7 +2514,7 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     render_universal_table(res_m_df_tot)
 
 elif view_type == '📈 商品別 前年実績比較':
-    code_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict()
+    code_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict() if not df.empty else {}
     cur_p = filtered.groupby("商品コード").agg(当期売上=("金額", "sum"), 当期数量=("数量", "sum"), 当期粗利=("粗利額", "sum")) if not filtered.empty else pd.DataFrame()
     ly_p = ly_filtered.groupby("商品コード").agg(前年売上=("金額", "sum"), 前年数量=("数量", "sum")) if not ly_filtered.empty else pd.DataFrame(columns=["前年売上", "前年数量"])
     comp_p = pd.concat([cur_p, ly_p], axis=1).fillna(0).reset_index() if not cur_p.empty else pd.DataFrame()
@@ -2559,6 +2558,7 @@ elif view_type == '📊 得意先別 前年実績比較':
 elif view_type == '💤 滞留・未販売商品分析（売れてない商品）':
     code_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict() if not df.empty else {}
     p_stats = df.groupby("商品コード").agg(最終売上日_dt=("日付_dt", "max"), 最終売上日=("日付", "max"), 累計売上=("金額", "sum"), 累計数量=("数量", "sum")).reset_index() if not df.empty else pd.DataFrame()
+    res_d = pd.DataFrame(columns=["商品コード", "商品名", "最終売上日", "累計数量", "累計売上", "単価原価"])
     if not p_stats.empty:
         if "半年" in dormant_mode:
             cutoff = pd.to_datetime(max_date) - pd.DateOffset(months=6)
