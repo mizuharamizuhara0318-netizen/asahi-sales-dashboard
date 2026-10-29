@@ -301,11 +301,12 @@ def prep_supabase_dataframe(df, cost_master):
     amt_series = pd.to_numeric(pd.Series(raw_amt_val).apply(clean_num), errors="coerce").fillna(0)
     new_df["金額"] = [int(a) if a > 0 else int(q * p) for a, q, p in zip(amt_series, new_df["数量"], new_df["単価"])]
 
-    raw_date = df[c_date].astype(str).str.replace(r'[^0-9]', '', regex=True) if c_date in df.columns else pd.Series([""] * len(df))
-    dt = pd.to_datetime(raw_date, format="%Y%m%d", errors="coerce")
+    # 🔴 チャッピーさんの指摘に対応：ISO形式やタイムスタンプ混在にも耐える安全な日付パース
+    raw_date = df[c_date] if c_date in df.columns else pd.Series([None] * len(df), index=df.index)
+    dt = pd.to_datetime(raw_date, errors="coerce")
     new_df["日付_dt"] = dt
-    new_df["日付"] = dt.dt.strftime('%Y/%m/%d').fillna("")
-    new_df["年月"] = dt.dt.strftime('%Y年%m月').fillna("2026年01月")
+    new_df["日付"] = dt.dt.strftime("%Y/%m/%d").fillna("")
+    new_df["年月"] = dt.dt.strftime("%Y年%m月").fillna("")
 
     new_df = new_df[new_df["商品コード"] != "ABA-40"].copy()
 
@@ -472,16 +473,18 @@ if df.empty:
     st.error("⚠️ Supabaseの `sales_data` テーブルからデータを取得できませんでした。Supabaseの接続情報（Secrets）やテーブル名をご確認ください。")
     st.stop()
 
-valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
-latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
-desc_valid_ym = sorted(valid_ym, reverse=True)
+# 有効年月リストの安全な作成
+valid_ym_set = sorted(list(set(df["年月"].dropna().astype(str).tolist())))
+valid_ym_set = [y for y in valid_ym_set if y and y != ""]
+latest_ym = valid_ym_set[-1] if valid_ym_set else "2026年01月"
+desc_valid_ym = sorted(valid_ym_set, reverse=True)
 
 valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
 
-curr_y = int(latest_ym[:4])
-curr_m = int(latest_ym[5:7])
+curr_y = int(latest_ym[:4]) if "年" in latest_ym else 2026
+curr_m = int(latest_ym.split("年")[1].replace("月", "")) if "年" in latest_ym and "月" in latest_ym else 1
 fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
 col_top1, col_top2 = st.columns([1.6, 2])
@@ -1058,30 +1061,38 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 # ========================================================
 # ★ 分析用モード（会議用資料・各種ランキング・期間ショートカット連動）
 # ========================================================
+# 🔴 正確な日時計算による期間ショートカット（前月が狂うバグを完全に修正）
+latest_dt = valid_dts.max() if not valid_dts.empty else pd.Timestamp(curr_y, curr_m, 1)
+
 if quick_choice == '当月':
-    s_def, e_def = latest_ym, latest_ym
-    s_date_calc = datetime(curr_y, curr_m, 1).date()
+    s_def = latest_dt.strftime('%Y年%m月')
+    e_def = s_def
+    s_date_calc = datetime(latest_dt.year, latest_dt.month, 1).date()
     e_date_calc = max_date
 elif quick_choice == '前月':
-    prev = desc_valid_ym[min(len(desc_valid_ym) - 1, desc_valid_ym.index(latest_ym) + 1)] if latest_ym in desc_valid_ym else latest_ym
-    s_def, e_def = prev, prev
-    py, pm = int(prev[:4]), int(prev[5:7])
-    s_date_calc = datetime(py, pm, 1).date()
-    e_date_calc = (pd.Timestamp(year=py, month=pm, day=1) + pd.offsets.MonthEnd(1)).date()
+    prev_dt = latest_dt - pd.DateOffset(months=1)
+    s_def = prev_dt.strftime('%Y年%m月')
+    e_def = s_def
+    s_date_calc = datetime(prev_dt.year, prev_dt.month, 1).date()
+    e_date_calc = (pd.Timestamp(year=prev_dt.year, month=prev_dt.month, day=1) + pd.offsets.MonthEnd(1)).date()
 elif quick_choice == '当期累計':
-    s_def, e_def = f"{fiscal_year}年07月", latest_ym
+    s_def = f"{fiscal_year}年07月"
+    e_def = latest_dt.strftime('%Y年%m月')
     s_date_calc = datetime(fiscal_year, 7, 1).date()
     e_date_calc = max_date
 elif quick_choice == '前期累計':
-    s_def, e_def = f"{fiscal_year - 1}年07月", f"{fiscal_year}年06月"
+    s_def = f"{fiscal_year - 1}年07月"
+    e_def = f"{fiscal_year}年06月"
     s_date_calc = datetime(fiscal_year - 1, 7, 1).date()
     e_date_calc = datetime(fiscal_year, 6, 30).date()
 elif quick_choice == '全データ累計':
-    s_def, e_def = desc_valid_ym[-1], desc_valid_ym[0]
+    s_def = desc_valid_ym[-1] if desc_valid_ym else latest_ym
+    e_def = desc_valid_ym[0] if desc_valid_ym else latest_ym
     s_date_calc = min_date
     e_date_calc = max_date
 else:
-    s_def, e_def = desc_valid_ym[-1], latest_ym
+    s_def = desc_valid_ym[-1] if desc_valid_ym else latest_ym
+    e_def = latest_ym
     s_date_calc = min_date
     e_date_calc = max_date
 
@@ -1111,7 +1122,7 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     
-    # ★ 全てのDataFrame変数を事前に安全に初期化（NameErrorを完全に防ぐ）
+    # 🔴 NameErrorを防ぐための事前の安全な初期化
     cur_m_df = pd.DataFrame()
     ly_m_df = pd.DataFrame()
     next_m_df = pd.DataFrame()
