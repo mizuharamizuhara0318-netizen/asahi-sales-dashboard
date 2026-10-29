@@ -66,7 +66,6 @@ st.markdown("""
 
 st.markdown('<div class="main-header">売上管理＆営業分析表</div>', unsafe_allow_html=True)
 
-# クラウド（GitHubリポジトリ直下）とローカルの両対応パス設定
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OTHER_DATA_DIR = os.path.join(BASE_DIR, "その他データ")
 CACHE_FILE = os.path.join(BASE_DIR, "sales_cache.parquet")
@@ -76,6 +75,11 @@ STAFF_MAP = {
     "1": "小泉", "2": "河端", "3": "安部", "4": "原",
     "5": "西山", "6": "萩原", "7": "田中", "8": "水原",
     "9": "川村", "10": "穴山", "11": "鈴木", "12": "松平"
+}
+
+# 品番の揺れ（ABA-40など）を吸収するエイリアス変換辞書
+SKU_ALIASES = {
+    "ABA-40": "ABA-40BK"
 }
 
 ORDER_CSV_COLUMNS = [
@@ -160,7 +164,11 @@ def load_cost_master(file_path, file_mtime):
                 for _, r in cdf.iterrows():
                     sk = str(r[sku_col]).strip()
                     co = clean_num(r[cost_col])
-                    if sk: cost_dict[sk] = co
+                    if sk:
+                        cost_dict[sk] = co
+                        # エイリアス対応
+                        if sk in SKU_ALIASES:
+                            cost_dict[SKU_ALIASES[sk]] = co
         except Exception: pass
     return cost_dict
 
@@ -186,12 +194,17 @@ def load_member_price_master_v2(file_path, file_mtime):
 
                 if 50 <= n_min_price < 90000:
                     default_min_map[sku] = n_min_price
+                    if sku in SKU_ALIASES:
+                        default_min_map[SKU_ALIASES[sku]] = n_min_price
 
                 if m_comp and m_comp not in ["nan", "None", "#N/A", ""]:
                     norm_comp = re.sub(r'[\s ]+', '', m_comp)
                     if 50 <= j_price < 90000:
                         cust_sku_map[(m_comp, sku)] = j_price
                         cust_sku_map[(norm_comp, sku)] = j_price
+                        if sku in SKU_ALIASES:
+                            cust_sku_map[(m_comp, SKU_ALIASES[sku])] = j_price
+                            cust_sku_map[(norm_comp, SKU_ALIASES[sku])] = j_price
         except Exception: pass
     return cust_sku_map, default_min_map
 
@@ -218,13 +231,24 @@ def load_jan_master_v2(file_path, file_mtime):
             for _, r in jdf.iterrows():
                 sk = str(r[s_col]).strip()
                 if not sk or sk == "nan": continue
+                
+                j_val = ""
                 if j_col and pd.notna(r[j_col]):
-                    try: jan_dict[sk] = str(int(float(r[j_col])))
-                    except: jan_dict[sk] = str(r[j_col]).replace(".0", "").strip()
-                if n_col and pd.notna(r[n_col]):
-                    full_title_dict[sk] = str(r[n_col]).strip()
-                if p_col and pd.notna(r[p_col]):
-                    std_price_dict[sk] = int(clean_num(r[p_col]))
+                    try: j_val = str(int(float(r[j_col])))
+                    except: j_val = str(r[j_col]).replace(".0", "").strip()
+                
+                n_val = str(r[n_col]).strip() if n_col and pd.notna(r[n_col]) else ""
+                p_val = int(clean_num(r[p_col])) if p_col and pd.notna(r[p_col]) else 0
+
+                jan_dict[sk] = j_val
+                full_title_dict[sk] = n_val
+                std_price_dict[sk] = p_val
+
+                if sk in SKU_ALIASES:
+                    alias = SKU_ALIASES[sk]
+                    jan_dict[alias] = j_val
+                    full_title_dict[alias] = n_val
+                    std_price_dict[alias] = p_val
         except Exception: pass
     return jan_dict, full_title_dict, std_price_dict
 
@@ -274,7 +298,7 @@ def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
     deliv_dt_str = (datetime.now() + timedelta(days=1)).strftime("%Y/%m/%d")
 
     for item in est_data.get("items", []):
-        sku = item.get("商品コード", "")
+        sku = SKU_ALIASES.get(item.get("商品コード", ""), item.get("商品コード", ""))
         qty = int(item.get("数量", 1))
         unit_p = int(item.get("見積単価", 0))
         line_amt = unit_p * qty
@@ -344,13 +368,6 @@ def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
         r_dict['送付先住所1'] = est_data.get("ship_addr1", est_data.get("cust_addr1", ""))
         r_dict['送付先住所2'] = est_data.get("ship_addr2", est_data.get("cust_addr2", ""))
         r_dict['お届け日'] = deliv_dt_str
-        r_dict['出力フラグ(受注伝票)'] = 0
-        r_dict['出力フラグ(お手紙)'] = 0
-        r_dict['出力フラグ(納品書)'] = 1
-        r_dict['出力フラグ(領収書)'] = 0
-        r_dict['出力フラグ(請求書)'] = 0
-        r_dict['出力フラグ(EMS)'] = 0
-        r_dict['出力フラグ(送り状)'] = 0
         for flag_col in [
             '出力済(受注伝票)', '出力済(お手紙)', '出力済(納品書)', '出力済(領収書)', '出力済(請求書)',
             '出力済(EMS)', '出力済(送り状)', '出力済(後払い取引登録)', '出力済(後払い出荷登録)',
@@ -442,7 +459,7 @@ def _read_amazon_seller_csv(f):
 
             qty_series = None
             for c in d.columns:
-                if any(k in str(c) for k in ['点数', '数量', '個数']):
+                if any(k in str(c) for k in ['点数', '數量', '個数']):
                     qty_series = d[c].apply(clean_num).astype(int)
                     break
             if qty_series is None:
@@ -488,7 +505,8 @@ def _parse_raw_df_to_standard(df_all):
     c_staff = find_col(["担当者コード", "担当者CD", "担当者名", "担当者", "担当", "営業担当"], all_cols)
 
     res = pd.DataFrame()
-    if c_pcode: res["商品コード"] = df_all[c_pcode].astype(str).str.strip()
+    if c_pcode: 
+        res["商品コード"] = df_all[c_pcode].astype(str).str.strip().map(lambda s: SKU_ALIASES.get(s, s))
     if c_pname:
         res["元商品名"] = df_all[c_pname].astype(str).str.strip()
         res["商品名"] = df_all[c_pname].astype(str).map(clean_product_name)
@@ -525,6 +543,7 @@ def load_and_prep_data(force_reload=False):
             cached_df = pd.read_parquet(CACHE_FILE)
             if not cached_df.empty:
                 cached_df["日付_dt"] = pd.to_datetime(cached_df["日付_dt"])
+                cached_df["商品コード"] = cached_df["商品コード"].map(lambda s: SKU_ALIASES.get(str(s).strip(), str(s).strip()))
                 cached_df["単価原価"] = cached_df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
                 cached_df["原価合計"] = (cached_df["数量"] * cached_df["単価原価"]).round().astype(int)
                 cached_df["粗利額"] = cached_df["金額"] - cached_df["原価合計"]
@@ -629,7 +648,7 @@ with col_refresh:
     if st.button("🔄 データを最新に再読み込み"):
         st.cache_data.clear()
         with st.spinner("最新データを読み込み中..."):
-            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=False)
+            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
             member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
             jan_master_dict, jan_title_dict, jan_std_price_dict = load_jan_master_v2(jan_path, jan_mtime)
             customer_master_df = load_customer_master(cust_path, cust_mtime)
@@ -677,7 +696,7 @@ with col_top2:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
 
 # ========================================================
-# ★ 🧮 簡易見積＆利益シミュレーター（全機能完全版）
+# ★ 🧮 簡易見積＆利益シミュレーター（完全版）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
@@ -706,6 +725,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     }
 
     def get_sku_details(sku_code, rank_selection="ロット単価", cust_comp_name=""):
+        sku_code = SKU_ALIASES.get(sku_code, sku_code)
         p_name = code_to_name_map.get(sku_code, "")
         if not p_name: p_name = jan_title_dict.get(sku_code, sku_code)
         p_jan = jan_master_dict.get(sku_code, "")
@@ -1745,7 +1765,7 @@ if view_type == '🏢 得意先別ランキング':
 # ★ 2. 📦 商品別売上ランキング
 # ========================================================
 elif view_type == '📦 商品別売上ランキング':
-    group_cols = [c for c in ["得意先名", "担当者", "商品コード", "商品名"] if c in filtered.columns] if sel_cust != "（すべて）" or search_cust.strip() else ["商品コード", "商品名"]
+    group_cols = [c for c in ["商品コード", "商品名"] if c in filtered.columns]
     valid_date_df = filtered[filtered["日付"].str.strip() != ""]
     date_agg = valid_date_df.groupby(group_cols).agg(開始日=("日付", "min"), 終了日=("日付", "max")).reset_index()
     agg = filtered.groupby(group_cols).agg(
@@ -1760,7 +1780,7 @@ elif view_type == '📦 商品別売上ランキング':
     agg = agg.sort_values(by="販売金額", ascending=False)
     agg.insert(0, "番号", range(1, len(agg) + 1))
     if limit_val != "全件": agg = agg.head(int(limit_val))
-    cols = ["番号", "得意先名", "担当者", "商品コード", "商品名", "数量", "販売価格帯", "単価原価", "販売金額", "原価合計", "粗利額", "粗利率", "構成比", "販売期間"]
+    cols = ["番号", "商品コード", "商品名", "数量", "販売価格帯", "単価原価", "販売金額", "原価合計", "粗利額", "粗利率", "構成比", "販売期間"]
     show_df = agg[[c for c in cols if c in agg.columns]].copy()
 
     c_sum1, c_sum2 = st.columns([4, 1.2])
