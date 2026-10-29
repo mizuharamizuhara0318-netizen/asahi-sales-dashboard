@@ -1422,7 +1422,7 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     
-    # 🔴 完全に安全な DataFrame 初期化（NameErrorを完全に防止）
+    # 🔴 NameErrorを防ぐ安全な初期化
     cur_m_df = pd.DataFrame()
     ly_m_df = pd.DataFrame()
     next_m_df = pd.DataFrame()
