@@ -61,24 +61,6 @@ st.markdown("""
         font-size: 11px;
         font-weight: bold;
     }
-    .modal-box-header {
-        background: linear-gradient(135deg, #1e3a8a, #2563eb);
-        color: white;
-        padding: 12px 18px;
-        border-radius: 6px 6px 0 0;
-        font-size: 16px;
-        font-weight: bold;
-        margin-bottom: 10px;
-    }
-    .modal-summary-box {
-        background-color: #fefce8;
-        border: 1px solid #fde047;
-        border-left: 6px solid #eab308;
-        padding: 10px 16px;
-        font-size: 13px;
-        margin-bottom: 12px;
-        border-radius: 4px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -648,7 +630,7 @@ def show_customer_top10_dialog(cust_name, sub_df, period_str):
         return
 
     p_agg = sub_df.groupby(["商品コード", "商品名"]).agg(
-        數量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")
+        数量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")
     ).reset_index().sort_values(by="販売金額", ascending=False).head(10)
 
     p_agg["粗利率"] = p_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
@@ -1440,7 +1422,7 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     
-    # 🔴 NameErrorを防ぐ安全な初期化
+    # 🔴 完全に安全な DataFrame 初期化（NameErrorを完全に防止）
     cur_m_df = pd.DataFrame()
     ly_m_df = pd.DataFrame()
     next_m_df = pd.DataFrame()
