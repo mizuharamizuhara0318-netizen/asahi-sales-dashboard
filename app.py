@@ -34,9 +34,10 @@ credentials = {
 
 
     # 以下、既存のダッシュボード処理
-    st.markdown("""
-    <style>
-        .main-header {
+    # ── 一番左に寄せる ──
+st.markdown("""
+<style>
+    .main-header {
             background-color: #2a75d3;
             color: white;
             padding: 8px 15px;
