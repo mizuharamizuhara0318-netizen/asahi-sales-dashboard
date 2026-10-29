@@ -361,23 +361,7 @@ def generate_excel_bytes(data_df, title_str):
         data_df.to_excel(writer, index=False, sheet_name=title_str[:30])
     return output.getvalue()
 
-def create_smaregi_order_csv_bytes(est_obj, raw_prod_map, std_p_dict):
-    out_buf = io.StringIO()
-    # シンプルなスマレジ注文CSVデータ出力用構造
-    out_buf.write("受注ID,顧客ID,要望等,合計額,購入明細商品コード,ご購入明細商品名,ご購入明細数量,ご購入明細金額\n")
-    q_no = est_obj.get("q_no", "001")
-    c_id = est_obj.get("cust_id", "1")
-    memo = est_obj.get("memo", "")
-    grand_tot = est_obj.get("grand_total", 0)
-    for itm in est_obj.get("items", []):
-        code = itm.get("商品コード", "")
-        name = itm.get("商品名", "")
-        qty = itm.get("数量", 1)
-        sub = itm.get("合計金額", 0)
-        out_buf.write(f'"{q_no}","{c_id}","{memo}","{grand_tot}","{code}","{name}","{qty}","{sub}"\n')
-    return out_buf.getvalue().encode('shift_jis', errors='ignore')
-
-def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, tgt_y, tgt_m, next_y, next_m, f_year):
+def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, tgt_y, tgt_m, next_y, next_m_val, f_year):
     cur_sales = int(cur_m[cur_m["得意先名"] == cust]["金額"].sum()) if not cur_m.empty else 0
     ly_sales = int(ly_m[ly_m["得意先名"] == cust]["金額"].sum()) if not ly_m.empty else 0
     next_sales = int(next_m[next_m["得意先名"] == cust]["金額"].sum()) if not next_m.empty else 0
@@ -392,7 +376,7 @@ def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, 
         "prev_fy_sales": prev_fy_sales,
         "next_diff": next_sales - prev_fy_sales,
         "tgt_m": tgt_m,
-        "next_m": next_m
+        "next_m": next_m_val
     }
 
 def render_meeting_card_html(card):
@@ -1054,8 +1038,8 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
-    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
-    next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
+    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
+    next_m_df = df_scope[df_scope["年月"] == next_ym] if not next_m_df.empty else pd.DataFrame()
     prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not prev_fy_df.empty else pd.DataFrame()
 
     cust_id_lookup = {}
