@@ -90,7 +90,8 @@ OTHER_DATA_DIR = BASE_DIR
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_FILE = os.path.join(BASE_DIR, "sales_cache.parquet")
-SAVED_QUOTES_FILE = os.path.join(BASE_SHARE, "saved_estimates.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SAVED_QUOTES_FILE = os.path.join(BASE_DIR, "saved_estimates.json")
 
 STAFF_MAP = {
     "1": "小泉", "2": "河端", "3": "安部", "4": "原",
