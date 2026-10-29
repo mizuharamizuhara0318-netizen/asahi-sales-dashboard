@@ -121,12 +121,12 @@ ORDER_CSV_COLUMNS = [
 EXCLUDE_RANK_PATTERN = re.compile(r"下代変更前|オ.*プン|ｵ.*ﾌﾟﾝ|open|サンプル|ｻﾝﾌﾟﾙ|99,?999", re.IGNORECASE)
 
 # ========================================================
-# ★ ユーティリティ関数の事前定義（NameError防止）
+# ★ 共通ユーティリティ・Excel出力関数（最上部に集約配置）
 # ========================================================
 def generate_excel_bytes(data_df, title_str):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        data_df.to_excel(writer, index=False, sheet_name=title_str[:30])
+        data_df.to_excel(writer, index=False, sheet_name=str(title_str)[:30])
     return output.getvalue()
 
 def is_invalid_rank_name(name_str):
@@ -614,7 +614,10 @@ def load_and_prep_data(force_reload=False):
     return df, len(csv_candidates), cost_master, len(csv_candidates)
 
 def render_universal_table(df_data):
-    center_cols = {"番号", "順位", "日付", "販売期間", "最終売上日", "初回売上日"}
+    if df_data is None or df_data.empty:
+        st.info("該当するデータがありません。")
+        return
+    center_cols = {"番号", "順位", "日付", "販売期間", "最終売上日", "初回売上日", "未販売期間"}
     left_cols = {"得意先名", "商品コード", "商品名", "商品番号", "ランク名", "担当者", "客先名", "販売価格帯"}
 
     header_html = "".join([f"<th style='border:1px solid #cbd5e1; padding:8px 10px; background:#f1f5f9; text-align:{('center' if c in center_cols else ('left' if c in left_cols else 'right'))}; white-space:nowrap;'>{c}</th>" for c in df_data.columns])
@@ -627,7 +630,7 @@ def render_universal_table(df_data):
             val_str = "" if pd.isna(val) else str(val)
             align = "center" if c in center_cols else ("left" if c in left_cols else "right")
             if isinstance(val, (int, float)) and c not in center_cols:
-                val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額"] else f"{int(val):,}"
+                val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額", "粗利増減"] else f"{int(val):,}"
 
             is_neg = False
             if isinstance(val, (int, float)) and val < 0: is_neg = True
@@ -662,7 +665,6 @@ def show_customer_top10_dialog(cust_name, sub_df, period_str):
 
     p_agg["粗利率"] = p_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
     p_agg.insert(0, "順位", range(1, len(p_agg) + 1))
-    
     show_p_df = p_agg[["順位", "商品コード", "商品名", "数量", "販売金額", "粗利額", "粗利率"]]
     
     tot_s = int(p_agg["販売金額"].sum())
@@ -670,56 +672,292 @@ def show_customer_top10_dialog(cust_name, sub_df, period_str):
     st.markdown(f"<div class='total-card'><b>TOP10商品売上合計:</b> ¥{tot_s:,} &nbsp;|&nbsp; <b>数量合計:</b> {tot_q:,} 個</div>", unsafe_allow_html=True)
     render_universal_table(show_p_df)
 
-def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, tgt_y, tgt_m, next_y, next_m_val, f_year):
-    cur_sales = int(cur_m[cur_m["得意先名"] == cust]["金額"].sum()) if not cur_m.empty else 0
-    ly_sales = int(ly_m[ly_m["得意先名"] == cust]["金額"].sum()) if not ly_m.empty else 0
-    next_sales = int(next_m[next_m["得意先名"] == cust]["金額"].sum()) if not next_m.empty else 0
-    prev_fy_sales = int(prev_fy[prev_fy["得意先名"] == cust]["金額"].sum()) if not prev_fy.empty else 0
+# ========================================================
+# ★ 営業会議用：上位社 売上比較シート（添付画像完全準拠の帳票生成）
+# ========================================================
+def _extract_top5_and_other(sub_df):
+    if sub_df is None or sub_df.empty:
+        return [{"sku": "", "price": "", "qty": "", "amt": ""} for _ in range(5)], 0, 0
+    agg = sub_df.groupby("商品コード").agg(
+        数量=("数量", "sum"),
+        金額=("金額", "sum")
+    ).reset_index().sort_values(by="金額", ascending=False)
+    total_amt = int(agg["金額"].sum())
+    top5_df = agg.head(5)
+    top5_sum = int(top5_df["金額"].sum())
+    other_amt = max(0, total_amt - top5_sum)
+    rows = []
+    for _, r in top5_df.iterrows():
+        q = int(r["数量"])
+        a = int(r["金額"])
+        u_p = int(round(a / q)) if q > 0 else 0
+        rows.append({"sku": str(r["商品コード"]), "price": u_p, "qty": q, "amt": a})
+    while len(rows) < 5:
+        rows.append({"sku": "", "price": "", "qty": "", "amt": ""})
+    return rows, other_amt, total_amt
+
+def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, tgt_y, tgt_m, next_y, next_m_val, f_year, max_dt_val=None):
+    c_cur = cur_m[cur_m["得意先名"] == cust] if not cur_m.empty else pd.DataFrame()
+    c_ly = ly_m[ly_m["得意先名"] == cust] if not ly_m.empty else pd.DataFrame()
+    c_next = next_m[next_m["得意先名"] == cust] if not next_m.empty else pd.DataFrame()
+    c_prev_fy = prev_fy[prev_fy["得意先名"] == cust] if not prev_fy.empty else pd.DataFrame()
+
+    ly_rows, ly_other, ly_total = _extract_top5_and_other(c_ly)
+    cur_rows, cur_other, cur_total = _extract_top5_and_other(c_cur)
+    next_rows, next_other, next_total = _extract_top5_and_other(c_next)
+    prev_fy_total = int(c_prev_fy["金額"].sum()) if not c_prev_fy.empty else 0
+
+    yoy_rate = f"{int(round(cur_total / ly_total * 100))}%" if ly_total > 0 else "-"
+    next_yoy_rate = f"{int(round(next_total / prev_fy_total * 100))}%" if prev_fy_total > 0 else "0%"
+
+    if not c_next.empty and "日付_dt" in c_next.columns and c_next["日付_dt"].notna().any():
+        max_n_dt = c_next["日付_dt"].max()
+        as_of_str = f"{next_y}年{next_m_val}月{max_n_dt.day}日現在"
+    else:
+        as_of_str = f"{next_y}年{next_m_val}月現在"
+
     return {
         "cust_name": cust,
         "cust_id": cid,
-        "cur_sales": cur_sales,
-        "ly_sales": ly_sales,
-        "diff": cur_sales - ly_sales,
-        "next_sales": next_sales,
-        "prev_fy_sales": prev_fy_sales,
-        "next_diff": next_sales - prev_fy_sales,
-        "tgt_m": tgt_m,
-        "next_m": next_m_val
+        "ly_label": f"{tgt_y - 1}年{tgt_m}月実績",
+        "cur_label": f"{tgt_y}年{tgt_m}月実績",
+        "next_label": f"{next_y}年{next_m_val}月売上進捗",
+        "prev_fy_label": f"{next_y - 1}年{next_m_val}度実績",
+        "as_of_label": as_of_str,
+        "ly_rows": ly_rows, "ly_other": ly_other, "ly_total": ly_total,
+        "cur_rows": cur_rows, "cur_other": cur_other, "cur_total": cur_total,
+        "yoy_rate": yoy_rate,
+        "next_rows": next_rows, "next_other": next_other, "next_total": next_total,
+        "prev_fy_total": prev_fy_total, "next_yoy_rate": next_yoy_rate,
+        "cur_sales": cur_total, "ly_sales": ly_total, "diff": cur_total - ly_total,
+        "next_sales": next_total, "prev_fy_sales": prev_fy_total, "next_diff": next_total - prev_fy_total,
+        "tgt_m": tgt_m, "next_m": next_m_val,
+        "activity_text": "", "plan_text": ""
     }
 
 def render_meeting_card_html(card):
-    diff_color = "#16a34a" if card["diff"] >= 0 else "#dc2626"
-    next_diff_color = "#16a34a" if card["next_diff"] >= 0 else "#dc2626"
+    def fmt_v(v):
+        if v == "" or v is None: return "&nbsp;"
+        return f"{int(v):,}" if isinstance(v, (int, float)) else str(v)
+
+    top_rows_html = ""
+    for i in range(5):
+        lr = card["ly_rows"][i]
+        cr = card["cur_rows"][i]
+        top_rows_html += f"""
+        <tr>
+            <td style="border:1px solid #333; padding:2px 4px; text-align:center; font-size:11px;">{fmt_v(lr['sku'])}</td>
+            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(lr['price'])}</td>
+            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(lr['qty'])}</td>
+            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(lr['amt'])}</td>
+            <td style="border:1px solid #333; border-left:2px solid #111; padding:2px 4px; text-align:center; font-size:11px;">{fmt_v(cr['sku'])}</td>
+            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(cr['price'])}</td>
+            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(cr['qty'])}</td>
+            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(cr['amt'])}</td>
+        </tr>
+        """
+
+    act_html = str(card.get("activity_text", "")).replace("\n", "<br>") if card.get("activity_text") else "&nbsp;"
+    plan_html = str(card.get("plan_text", "")).replace("\n", "<br>") if card.get("plan_text") else "&nbsp;"
+
+    next_rows_html = ""
+    for i in range(5):
+        nr = card["next_rows"][i]
+        if i == 0:
+            next_rows_html += f"""
+            <tr>
+                <td style="border:1px solid #333; padding:2px 4px; text-align:center; font-size:11px;">{fmt_v(nr['sku'])}</td>
+                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['price'])}</td>
+                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['qty'])}</td>
+                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['amt'])}</td>
+                <td colspan="4" rowspan="7" style="border:1px solid #333; border-left:2px solid #111; padding:4px 6px; vertical-align:top; font-size:11px; text-align:left;">{act_html}</td>
+            </tr>
+            """
+        else:
+            next_rows_html += f"""
+            <tr>
+                <td style="border:1px solid #333; padding:2px 4px; text-align:center; font-size:11px;">{fmt_v(nr['sku'])}</td>
+                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['price'])}</td>
+                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['qty'])}</td>
+                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['amt'])}</td>
+            </tr>
+            """
+
     return f"""
-    <div style="border:1px solid #cbd5e1; border-radius:6px; padding:12px; background:#fff; margin-bottom:12px;">
-        <div style="font-size:15px; font-weight:bold; color:#1e3a8a; border-bottom:1px solid #e2e8f0; padding-bottom:6px; margin-bottom:8px;">
-            🏢 {card['cust_name']} <span style="font-size:12px; color:#64748b;">(ID: {card['cust_id']})</span>
+    <div style="border:1px solid #94a3b8; padding:10px; background:#ffffff; margin-bottom:14px; font-family:'Yu Gothic','Meiryo',sans-serif; color:#111;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
+            <span style="font-size:15px; font-weight:bold; text-decoration:underline;">{card['cust_name']}</span>
+            <span style="font-size:12px; color:#333; margin-right:35%;">{card['cust_id']}</span>
         </div>
-        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:4px;">
-            <span><b>{card['tgt_m']}月実績:</b> ¥{card['cur_sales']:,}</span>
-            <span>(前年: ¥{card['ly_sales']:,})</span>
-            <span style="color:{diff_color}; font-weight:bold;">差額: ¥{card['diff']:,}</span>
+        <table style="width:100%; border-collapse:collapse; table-layout:fixed; margin-bottom:2px;">
+            <thead>
+                <tr style="background:#f8fafc;">
+                    <th colspan="4" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">{card['ly_label']}</th>
+                    <th colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">{card['cur_label']}</th>
+                </tr>
+                <tr style="background:#f1f5f9;">
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:14%;">品番</th>
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">単価</th>
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">数量</th>
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:16%;">金額</th>
+                    <th style="border:1px solid #333; border-left:2px solid #111; padding:2px; font-size:11px; width:14%;">品番</th>
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">単価</th>
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">数量</th>
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:16%;">金額</th>
+                </tr>
+            </thead>
+            <tbody>
+                {top_rows_html}
+                <tr>
+                    <td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">その他</td>
+                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['ly_other']:,}</td>
+                    <td colspan="3" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">その他</td>
+                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['cur_other']:,}</td>
+                </tr>
+                <tr style="font-weight:bold; background:#f8fafc;">
+                    <td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">合計</td>
+                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['ly_total']:,}</td>
+                    <td colspan="3" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">合計</td>
+                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['cur_total']:,}</td>
+                </tr>
+            </tbody>
+        </table>
+        <div style="text-align:right; font-size:11px; font-weight:bold; margin-bottom:8px; padding-right:4px;">
+            昨対比 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {card['yoy_rate']}
         </div>
-        <div style="display:flex; justify-content:space-between; font-size:13px;">
-            <span><b>来月({card['next_m']}月)予測:</b> ¥{card['next_sales']:,}</span>
-            <span>(前年同月: ¥{card['prev_fy_sales']:,})</span>
-            <span style="color:{next_diff_col}; font-weight:bold;">差額: ¥{card['next_diff']:,}</span>
-        </div>
+        <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
+            <thead>
+                <tr style="background:#f8fafc;">
+                    <th colspan="4" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">{card['next_label']}</th>
+                    <th colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">この1ヶ月の主な営業活動</th>
+                </tr>
+                <tr style="background:#f1f5f9;">
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:14%;">品番</th>
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">単価</th>
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">数量</th>
+                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:16%;">金額</th>
+                    <th colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:0; height:2px;"></th>
+                </tr>
+            </thead>
+            <tbody>
+                {next_rows_html}
+                <tr>
+                    <td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">その他</td>
+                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['next_other']:,}</td>
+                </tr>
+                <tr style="font-weight:bold; background:#f8fafc;">
+                    <td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">合計</td>
+                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['next_total']:,}</td>
+                </tr>
+                <tr>
+                    <td colspan="4" style="border:1px solid #333; padding:4px 6px; vertical-align:top; height:68px; font-size:11px;">
+                        <div style="color:#64748b; font-size:10px;">【今後の予定】</div>
+                        <div>{plan_html}</div>
+                    </td>
+                    <td colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:4px 6px; vertical-align:top; font-size:11px;">
+                        <div style="display:flex; justify-content:space-between;"><span>{card['prev_fy_label']}</span><span>{card['prev_fy_total']:,}</span></div>
+                        <div style="display:flex; justify-content:space-between;"><span>{card['as_of_label']}</span><span>{card['next_total']:,}</span></div>
+                        <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>昨対進捗</span><span>{card['next_yoy_rate']}</span></div>
+                        <div style="font-size:10px; color:#475569; margin-top:2px;">残り営業日数13日（3/16日程消化19%）</div>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
     </div>
     """
 
 def generate_meeting_comparison_excel(cards_data, tgt_ym):
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "上位社売上比較"
-    ws.cell(row=1, column=1, value=f"{tgt_ym} 営業会議 上位社売上比較シート").font = Font(size=14, bold=True)
-    row_idx = 3
-    for c in cards_data:
-        ws.cell(row=row_idx, column=1, value=f"得意先名: {c['cust_name']}")
-        ws.cell(row=row_idx+1, column=1, value=f"当月売上: {c['cur_sales']:,} 円")
-        ws.cell(row=row_idx+2, column=1, value=f"来月予測: {c['next_sales']:,} 円")
-        row_idx += 5
+    ws.title = "上位社売上比較シート"
+    font_b = Font(name="Yu Gothic", size=10, bold=True)
+    font_m = Font(name="Yu Gothic", size=9)
+    thin = Side(style='thin', color='333333')
+    bd = Border(left=thin, right=thin, top=thin, bottom=thin)
+    fill_h = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+
+    for idx, c in enumerate(cards_data):
+        grid_r = idx // 2
+        grid_c = idx % 2
+        base_r = 2 + grid_r * 21
+        base_c = 1 + grid_c * 9
+
+        ws.cell(row=base_r, column=base_c, value=c["cust_name"]).font = Font(name="Yu Gothic", size=11, bold=True, underline="single")
+        ws.cell(row=base_r, column=base_c + 2, value=c["cust_id"]).font = font_m
+
+        r_top = base_r + 1
+        ws.cell(row=r_top, column=base_c, value=c["ly_label"]).font = font_b
+        ws.cell(row=r_top, column=base_c + 4, value=c["cur_label"]).font = font_b
+
+        headers = ["品番", "単価", "数量", "金額", "品番", "単価", "数量", "金額"]
+        for h_i, h_t in enumerate(headers):
+            cell = ws.cell(row=r_top + 1, column=base_c + h_i, value=h_t)
+            cell.font = font_b; cell.border = bd; cell.fill = fill_h
+
+        for i in range(5):
+            curr_row = r_top + 2 + i
+            lr = c["ly_rows"][i]; cr = c["cur_rows"][i]
+            vals = [lr["sku"], lr["price"], lr["qty"], lr["amt"], cr["sku"], cr["price"], cr["qty"], cr["amt"]]
+            for v_i, v_val in enumerate(vals):
+                cell = ws.cell(row=curr_row, column=base_c + v_i, value=v_val if v_val != "" else None)
+                cell.font = font_m; cell.border = bd
+                if v_i in [1, 2, 3, 5, 6, 7] and isinstance(v_val, (int, float)):
+                    cell.number_format = '#,##0'
+
+        r_oth = r_top + 7
+        ws.cell(row=r_oth, column=base_c, value="その他").font = font_m
+        ws.cell(row=r_oth, column=base_c + 3, value=c["ly_other"]).number_format = '#,##0'
+        ws.cell(row=r_oth, column=base_c + 4, value="その他").font = font_m
+        ws.cell(row=r_oth, column=base_c + 7, value=c["cur_other"]).number_format = '#,##0'
+        for h_i in range(8): ws.cell(row=r_oth, column=base_c + h_i).border = bd
+
+        r_tot = r_top + 8
+        ws.cell(row=r_tot, column=base_c, value="合計").font = font_b
+        ws.cell(row=r_tot, column=base_c + 3, value=c["ly_total"]).number_format = '#,##0'
+        ws.cell(row=r_tot, column=base_c + 4, value="合計").font = font_b
+        ws.cell(row=r_tot, column=base_c + 7, value=c["cur_total"]).number_format = '#,##0'
+        for h_i in range(8): ws.cell(row=r_tot, column=base_c + h_i).border = bd
+
+        ws.cell(row=r_tot + 1, column=base_c + 5, value="昨対比").font = font_b
+        ws.cell(row=r_tot + 1, column=base_c + 7, value=c["yoy_rate"]).font = font_b
+
+        r_nx = r_tot + 2
+        ws.cell(row=r_nx, column=base_c, value=c["next_label"]).font = font_b
+        ws.cell(row=r_nx, column=base_c + 4, value="この1ヶ月の主な営業活動").font = font_b
+        for h_i, h_t in enumerate(["品番", "単価", "数量", "金額"]):
+            cell = ws.cell(row=r_nx + 1, column=base_c + h_i, value=h_t)
+            cell.font = font_b; cell.border = bd; cell.fill = fill_h
+
+        for i in range(5):
+            curr_row = r_nx + 2 + i
+            nr = c["next_rows"][i]
+            for v_i, v_val in enumerate([nr["sku"], nr["price"], nr["qty"], nr["amt"]]):
+                cell = ws.cell(row=curr_row, column=base_c + v_i, value=v_val if v_val != "" else None)
+                cell.font = font_m; cell.border = bd
+                if v_i in [1, 2, 3] and isinstance(v_val, (int, float)):
+                    cell.number_format = '#,##0'
+
+        ws.cell(row=r_nx + 2, column=base_c + 4, value=c.get("activity_text", "")).font = font_m
+
+        r_nx_oth = r_nx + 7
+        ws.cell(row=r_nx_oth, column=base_c, value="その他").font = font_m
+        ws.cell(row=r_nx_oth, column=base_c + 3, value=c["next_other"]).number_format = '#,##0'
+        for h_i in range(4): ws.cell(row=r_nx_oth, column=base_c + h_i).border = bd
+
+        r_nx_tot = r_nx + 8
+        ws.cell(row=r_nx_tot, column=base_c, value="合計").font = font_b
+        ws.cell(row=r_nx_tot, column=base_c + 3, value=c["next_total"]).number_format = '#,##0'
+        for h_i in range(4): ws.cell(row=r_nx_tot, column=base_c + h_i).border = bd
+
+        r_bot = r_nx + 9
+        ws.cell(row=r_bot, column=base_c, value=f"【今後の予定】 {c.get('plan_text', '')}").font = font_m
+        ws.cell(row=r_bot, column=base_c + 4, value=c["prev_fy_label"]).font = font_m
+        ws.cell(row=r_bot, column=base_c + 7, value=c["prev_fy_total"]).number_format = '#,##0'
+        ws.cell(row=r_bot + 1, column=base_c + 4, value=c["as_of_label"]).font = font_m
+        ws.cell(row=r_bot + 1, column=base_c + 7, value=c["next_total"]).number_format = '#,##0'
+        ws.cell(row=r_bot + 2, column=base_c + 4, value="昨対進捗").font = font_b
+        ws.cell(row=r_bot + 2, column=base_c + 7, value=c["next_yoy_rate"]).font = font_b
+
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -730,6 +968,9 @@ def generate_meeting_top_cust_excel(res_df, title_str):
         res_df.to_excel(writer, index=False, sheet_name="上位客先実績")
     return out.getvalue()
 
+# ========================================================
+# ★ データロード＆基本日付変数初期化（最上流で一括確定）
+# ========================================================
 df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=False)
 
 member_p_path, member_p_mtime = get_member_price_file_info()
@@ -743,7 +984,26 @@ customer_master_df = load_customer_master(cust_path, cust_mtime)
 
 hanko_bytes, hanko_file_path = get_hanko_bytes()
 
-valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
+col_status, col_refresh = st.columns([4, 1.2])
+with col_refresh:
+    if st.button("🔄 データを最新に再読み込み"):
+        st.cache_data.clear()
+        if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
+        with st.spinner("最新データを高速読み込み中..."):
+            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
+            member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
+            jan_master_dict, jan_title_dict, jan_std_price_dict = load_jan_master_v2(jan_path, jan_mtime)
+            customer_master_df = load_customer_master(cust_path, cust_mtime)
+            hanko_bytes, hanko_file_path = get_hanko_bytes()
+        st.success("最新データに更新しました！")
+        time.sleep(0.5)
+        st.rerun()
+
+if df.empty:
+    st.error(f"売上CSVデータが見つかりませんでした。`{BASE_SHARE}` フォルダを確認してください。")
+    st.stop()
+
+valid_ym = sorted([x for x in df["年月"].dropna().unique() if x and str(x).strip() != ""])
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
 desc_valid_ym = sorted(valid_ym, reverse=True)
 
@@ -751,8 +1011,8 @@ valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
 
-curr_y = int(latest_ym[:4])
-curr_m = int(latest_ym[5:7])
+curr_y = int(latest_ym[:4]) if len(latest_ym) >= 4 else 2026
+curr_m = int(latest_ym[5:7]) if len(latest_ym) >= 7 else 1
 fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
 col_top1, col_top2 = st.columns([1.6, 2])
@@ -763,6 +1023,7 @@ with col_top1:
         '📦 商品別売上ランキング',
         '📊 営業会議用：上位社 売上比較シート',
         '📑 営業会議用：上位客先別売上実績',
+        '🏷️ ランク価格マスタ一覧',
         '👤 担当者別 売上＆目標達成分析',
         '💤 滞留・未販売商品分析（売れてない商品）',
         '✨ 新商品売上分析（直近1年）',
@@ -782,7 +1043,7 @@ with col_top2:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
 
 # ========================================================
-# ★ 🧮 簡易見積＆利益シミュレーター
+# ★ 🧮 簡易見積＆利益シミュレーター（担当者選択・親SKU除外・Excel/CSV出力完全保持）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
@@ -873,28 +1134,8 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
         if p_price == 0: p_price = 99999
         return p_name, p_jan, p_price, p_cost, min_p, actual_rank_applied
 
-    if "load_target_estimate" in st.session_state and st.session_state["load_target_estimate"]:
-        loaded_est = st.session_state.pop("load_target_estimate")
-        st.session_state["in_cust_comp"] = loaded_est.get("cust_comp", "")
-        st.session_state["in_cust_person"] = loaded_est.get("cust_person", "")
-        st.session_state["in_cust_post"] = loaded_est.get("cust_post", "")
-        st.session_state["in_cust_addr"] = loaded_est.get("cust_addr", "")
-        st.session_state["in_ship_comp"] = loaded_est.get("ship_comp", "")
-        st.session_state["in_ship_person"] = loaded_est.get("ship_person", "")
-        st.session_state["in_ship_post"] = loaded_est.get("ship_post", "")
-        st.session_state["in_ship_addr"] = loaded_est.get("ship_addr", "")
-        st.session_state["in_ship_tel"] = loaded_est.get("ship_tel", "")
-        st.session_state["sel_cust_choice"] = loaded_est.get("cust_comp", "（手動入力）")
-        st.session_state.quotation_items = loaded_est.get("items", [])
-        st.session_state.editor_version += 1
-        st.session_state["est_active_tab"] = "📝 新規見積作成・シミュレーター"
-
-    if "quotation_items" not in st.session_state:
-        st.session_state.quotation_items = []
     if "saved_estimates" not in st.session_state:
         st.session_state.saved_estimates = load_saved_quotes()
-    if "editor_version" not in st.session_state:
-        st.session_state.editor_version = 0
 
     est_staff_list = list(STAFF_MAP.values()) + ["（すべて表示）"]
     col_menu_left, col_menu_right = st.columns([1.6, 2.0])
@@ -904,19 +1145,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             est_staff_list,
             index=7 if "水原" in est_staff_list else 0,
             key="est_staff_selector_box_v3"
-        )
-
-    staff_Filter_list = [
-        e for e in st.session_state.saved_estimates
-        if est_staff == "（すべて表示）" or e.get("staff", "") == est_staff or (est_staff in str(e.get("hitokoto", "")))
-    ]
-
-    with col_menu_left:
-        tab_choice = st.radio(
-            "見積機能メニュー",
-            ["📝 新規見積作成・シミュレーター", f"📋 保存済み見積一覧・スマレジ注文CSV出力（{len(staff_Filter_list)}件）"],
-            horizontal=True,
-            key="est_active_tab_v3"
         )
 
     s_key = est_staff
@@ -937,6 +1165,34 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     if k_ver not in st.session_state: st.session_state[k_ver] = 0
     for k_f in [k_comp, k_person, k_post, k_addr, k_s_comp, k_s_person, k_s_post, k_s_addr, k_s_tel]:
         if k_f not in st.session_state: st.session_state[k_f] = ""
+
+    if "load_target_estimate" in st.session_state and st.session_state["load_target_estimate"]:
+        loaded_est = st.session_state.pop("load_target_estimate")
+        st.session_state[k_comp] = loaded_est.get("cust_comp", "")
+        st.session_state[k_person] = loaded_est.get("cust_person", "")
+        st.session_state[k_post] = loaded_est.get("cust_post", "")
+        st.session_state[k_addr] = loaded_est.get("cust_addr", "")
+        st.session_state[k_s_comp] = loaded_est.get("ship_comp", "")
+        st.session_state[k_s_person] = loaded_est.get("ship_person", "")
+        st.session_state[k_s_post] = loaded_est.get("ship_post", "")
+        st.session_state[k_s_addr] = loaded_est.get("ship_addr", "")
+        st.session_state[k_s_tel] = loaded_est.get("ship_tel", "")
+        st.session_state[k_sel_c] = loaded_est.get("cust_comp", "（手動入力）")
+        st.session_state[k_items] = loaded_est.get("items", [])
+        st.session_state[k_ver] += 1
+
+    staff_Filter_list = [
+        e for e in st.session_state.saved_estimates
+        if est_staff == "（すべて表示）" or e.get("staff", "") == est_staff or (est_staff in str(e.get("hitokoto", "")))
+    ]
+
+    with col_menu_left:
+        tab_choice = st.radio(
+            "見積機能メニュー",
+            ["📝 新規見積作成・シミュレーター", f"📋 保存済み見積一覧・スマレジ注文CSV出力（{len(staff_Filter_list)}件）"],
+            horizontal=True,
+            key="est_active_tab_v3"
+        )
 
     if tab_choice.startswith("📝"):
         st.markdown(f"##### 🏢 提出先（得意先）の選択 &nbsp;<span style='font-size:13px; color:#2563eb;'>［作業担当: {est_staff}］</span>", unsafe_allow_html=True)
@@ -1179,6 +1435,19 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             </div>
             """, unsafe_allow_html=True)
 
+            row_cust_master = cust_lookup.get(q_cust_comp, {})
+            cust_id_val = str(row_cust_master.get("加盟店ID", row_cust_master.get("顧客ID", -1))).replace(".0", "") if isinstance(row_cust_master, pd.Series) else -1
+            cust_sei_val = str(row_cust_master.get("責任者姓", "ご担当者")).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("責任者姓")) else "ご担当者"
+            cust_mei_val = str(row_cust_master.get("責任者名", "様")).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("責任者名")) else "様"
+            cust_k_sei = str(row_cust_master.get("責任者姓カナ", "")).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("責任者姓カナ")) else ""
+            cust_k_mei = str(row_cust_master.get("責任者名カナ", "")).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("責任者名カナ")) else ""
+            cust_email_val = str(row_cust_master.get("メールアドレス", "")).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("メールアドレス")) else ""
+            cust_fax_val = str(row_cust_master.get("FAX番号", "")).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("FAX番号")) else ""
+            cust_pref_val = str(row_cust_master.get("都道府県", "")).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("都道府県")) else ""
+            cust_addr1_val = str(row_cust_master.get("住所１", q_cust_addr)).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("住所１")) else q_cust_addr
+            cust_addr2_val = str(row_cust_master.get("住所２", "")).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("住所２")) else ""
+            cust_rank_label = str(row_cust_master.get("加盟店ランク", "ロット単価")).strip() if isinstance(row_cust_master, pd.Series) and pd.notna(row_cust_master.get("加盟店ランク")) else "ロット単価"
+
             current_estimate_obj = {
                 "id": len(st.session_state.saved_estimates) + 840,
                 "q_no": q_no,
@@ -1187,16 +1456,34 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 "q_date": q_date.strftime("%Y/%m/%d"),
                 "q_exp_date": q_exp_date.strftime("%Y/%m/%d"),
                 "payment": q_payment,
+                "cust_id": cust_id_val,
                 "cust_comp": q_cust_comp,
                 "cust_person": q_cust_person,
+                "cust_sei": cust_sei_val,
+                "cust_mei": cust_mei_val,
+                "cust_kana_sei": cust_k_sei,
+                "cust_kana_mei": cust_k_mei,
                 "cust_post": q_cust_post,
+                "cust_pref": cust_pref_val,
                 "cust_addr": q_cust_addr,
+                "cust_addr1": cust_addr1_val,
+                "cust_addr2": cust_addr2_val,
+                "cust_tel": ship_cust_tel,
+                "cust_fax": cust_fax_val,
+                "cust_email": cust_email_val,
+                "rank_name": cust_rank_label,
                 "ship_comp": ship_cust_comp,
                 "ship_person": ship_cust_person,
+                "ship_sei": cust_sei_val,
+                "ship_mei": cust_mei_val,
                 "ship_post": ship_cust_post,
+                "ship_pref": cust_pref_val,
                 "ship_addr": ship_cust_addr,
+                "ship_addr1": ship_cust_addr,
+                "ship_addr2": "",
                 "ship_tel": ship_cust_tel,
                 "shipping_fee": q_shipping_fee,
+                "cod_fee": 0,
                 "sub_total": q_tot_sales,
                 "tax": q_tax,
                 "grand_total": q_grand_total,
@@ -1204,6 +1491,134 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 "hitokoto": q_staff_memo,
                 "items": updated_records
             }
+
+            def generate_quote_excel_exact_style(df_calc):
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "見積書"
+                ws.views.sheetView[0].showGridLines = True
+
+                font_title = Font(name="Yu Gothic", size=18, bold=True)
+                font_section = Font(name="Yu Gothic", size=11, bold=True)
+                font_main = Font(name="Yu Gothic", size=9)
+                font_bold = Font(name="Yu Gothic", size=9, bold=True)
+
+                thin = Side(style='thin', color='A0A0A0')
+                thick = Side(style='medium', color='000000')
+                border_cell = Border(left=thin, right=thin, top=thin, bottom=thin)
+                border_header = Border(left=thin, right=thin, top=thick, bottom=thick)
+                fill_gray = PatternFill(start_color="E9ECEF", end_color="E9ECEF", fill_type="solid")
+
+                ws.merge_cells("A2:F2")
+                t_cell = ws["A2"]
+                t_cell.value = "見 積 書"
+                t_cell.font = font_title
+                t_cell.alignment = Alignment(horizontal="center", vertical="center")
+                ws.row_dimensions[2].height = 30
+                for col_i in range(1, 7): ws.cell(row=3, column=col_i).border = Border(bottom=thick)
+
+                ws["A5"] = f"〒 {q_cust_post}" if q_cust_post else ""
+                ws["A6"] = q_cust_addr
+                ws["A7"] = q_cust_comp
+                ws["A8"] = q_cust_person
+                ws["A5"].font = font_main; ws["A6"].font = font_main
+                ws["A7"].font = font_section; ws["A8"].font = font_section
+
+                ws["D7"] = "スマイルキッズ株式会社"; ws["D7"].font = font_bold
+                ws["D8"] = "スマイルキッズ法人卸サイト"; ws["D8"].font = font_main
+                ws["D9"] = "住所: 〒537-0003 大阪市東成区神路4丁目3番18号"; ws["D9"].font = font_main
+                ws["D10"] = "TEL: 06-6976-1371  FAX: 06-6976-8940"; ws["D10"].font = font_main
+                ws["D11"] = "Mail: smilekids-company@smile-asahi.co.jp"; ws["D11"].font = font_main
+                ws["D12"] = "登録番号: T8120001247513"; ws["D12"].font = font_main
+
+                if hanko_bytes:
+                    try:
+                        img_stream = io.BytesIO(hanko_bytes)
+                        img = OpenpyxlImage(img_stream)
+                        img.width = 65; img.height = 65
+                        ws.add_image(img, "F7")
+                    except Exception: pass
+
+                ws.merge_cells("A14:F14")
+                c_box1 = ws["A14"]
+                c_box1.value = " 見積内容"
+                c_box1.font = font_section; c_box1.fill = fill_gray; c_box1.border = border_cell
+                ws.row_dimensions[14].height = 22
+
+                ws["A15"] = "■見積金額"; ws["B15"] = f":  {q_grand_total:,} 円 (税込)"
+                ws["A15"].font = font_bold; ws["B15"].font = font_bold
+                ws["A16"] = "■お支払い方法"; ws["B16"] = f":  {q_payment}"
+                ws["A16"].font = font_bold; ws["B16"].font = font_main
+
+                ws.merge_cells("A18:F18")
+                c_box2 = ws["A18"]
+                c_box2.value = " お見積り明細"
+                c_box2.font = font_section; c_box2.fill = fill_gray; c_box2.border = border_cell
+                ws.row_dimensions[18].height = 22
+
+                ws["A19"] = "■お届け先:"; ws["B19"] = f"〒 {ship_cust_post}" if ship_cust_post else ""
+                ws["B20"] = ship_cust_addr; ws["B21"] = ship_cust_comp; ws["B22"] = ship_cust_person
+                ws["B23"] = f"TEL: {ship_cust_tel}" if ship_cust_tel else ""
+                ws["A19"].font = font_bold
+                for r_i in range(19, 24): ws.cell(row=r_i, column=2).font = font_main
+
+                ws["D19"] = "■お見積日"; ws["E19"] = f": {q_date.strftime('%Y/%m/%d')}"
+                ws["D20"] = "■見積番号"; ws["E20"] = f": {q_no}"
+                ws["D21"] = "■見積有効期限"; ws["E21"] = f": {q_exp_date.strftime('%Y/%m/%d')}"
+                for r_i in range(19, 22):
+                    ws.cell(row=r_i, column=4).font = font_bold
+                    ws.cell(row=r_i, column=5).font = font_main
+
+                start_row = 25
+                headers = ["No.", "品名・規格", "JANコード", "数量", "単価", "金額"]
+                ws.row_dimensions[start_row].height = 24
+                for c_idx, h in enumerate(headers, 1):
+                    cell = ws.cell(row=start_row, column=c_idx, value=h)
+                    cell.font = font_bold; cell.fill = fill_gray; cell.border = border_header
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+
+                cur_r = start_row + 1
+                for idx_c, r in df_calc.iterrows():
+                    ws.row_dimensions[cur_r].height = 20
+                    ws.cell(row=cur_r, column=1, value=idx_c + 1).alignment = Alignment(horizontal="center")
+                    ws.cell(row=cur_r, column=2, value=f"{r['商品名']} ({r['商品コード']})").alignment = Alignment(horizontal="left")
+                    ws.cell(row=cur_r, column=3, value=str(r['JANコード'])).alignment = Alignment(horizontal="center")
+                    ws.cell(row=cur_r, column=4, value=r['数量']).number_format = '#,##0'
+                    ws.cell(row=cur_r, column=5, value=r['見積単価']).number_format = '#,##0'
+                    ws.cell(row=cur_r, column=6, value=r['合計金額']).number_format = '#,##0'
+                    for c_i in range(1, 7):
+                        c = ws.cell(row=cur_r, column=c_i); c.font = font_main; c.border = border_cell
+                    cur_r += 1
+
+                ws.row_dimensions[cur_r].height = 20
+                ws.merge_cells(start_row=cur_r, start_column=1, end_row=cur_r, end_column=3)
+                tot_sub_lbl = ws.cell(row=cur_r, column=1, value="小計 / 合計")
+                tot_sub_lbl.alignment = Alignment(horizontal="center", vertical="center")
+                tot_sub_lbl.font = font_bold; tot_sub_lbl.fill = fill_gray
+
+                c_tot_qty = ws.cell(row=cur_r, column=4, value=q_tot_qty); c_tot_qty.number_format = '#,##0'; c_tot_qty.font = font_bold; c_tot_qty.fill = fill_gray
+                c_tot_p = ws.cell(row=cur_r, column=5, value=q_tot_unit_price); c_tot_p.number_format = '#,##0'; c_tot_p.font = font_bold; c_tot_p.fill = fill_gray
+                c_tot_a = ws.cell(row=cur_r, column=6, value=q_tot_sales); c_tot_a.number_format = '#,##0'; c_tot_a.font = font_bold; c_tot_a.fill = fill_gray
+                for c_i in range(1, 7): ws.cell(row=cur_r, column=c_i).border = border_cell
+                cur_r += 1
+
+                for s_lbl, s_val in [("税抜金額合計", q_tot_sales), ("送料 (税抜)", q_shipping_fee), ("消費税 (10%)", q_tax), ("税込合計金額", q_grand_total)]:
+                    ws.row_dimensions[cur_r].height = 20
+                    ws.merge_cells(start_row=cur_r, start_column=4, end_row=cur_r, end_column=5)
+                    lbl_c = ws.cell(row=cur_r, column=4, value=s_lbl)
+                    lbl_c.alignment = Alignment(horizontal="center", vertical="center")
+                    lbl_c.font = font_bold; lbl_c.fill = fill_gray; lbl_c.border = border_cell
+                    ws.cell(row=cur_r, column=5).border = border_cell
+                    val_c = ws.cell(row=cur_r, column=6, value=s_val)
+                    val_c.number_format = '#,##0'; val_c.font = font_bold; val_c.border = border_cell
+                    cur_r += 1
+
+                ws.column_dimensions['A'].width = 6; ws.column_dimensions['B'].width = 38; ws.column_dimensions['C'].width = 16
+                ws.column_dimensions['D'].width = 12; ws.column_dimensions['E'].width = 13; ws.column_dimensions['F'].width = 15
+
+                out = io.BytesIO()
+                wb.save(out)
+                return out.getvalue()
 
             hanko_base64 = base64.b64encode(hanko_bytes).decode("utf-8") if hanko_bytes else ""
             pdf_rows_html = ""
@@ -1322,12 +1737,31 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             </html>
             """
 
-            btn_c1, _ = st.columns([1.4, 2.0])
+            file_prefix = q_cust_comp.replace(' ', '_') if q_cust_comp else "御見積書"
+            btn_c1, btn_c2, btn_c3 = st.columns([1.4, 1.4, 1.6])
             with btn_c1:
                 if st.button("💾 この見積を保存して一覧へ登録", use_container_width=True, key=f"save_btn_{s_key}"):
                     st.session_state.saved_estimates.insert(0, current_estimate_obj)
                     save_quotes_list(st.session_state.saved_estimates)
                     st.success("✅ 保存済み見積一覧に登録しました！")
+            with btn_c2:
+                st.download_button(
+                    label="📥 御見積書（Excel・角印付き）",
+                    data=generate_quote_excel_exact_style(calc_df),
+                    file_name=f"御見積書_{file_prefix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key=f"dl_excel_{s_key}"
+                )
+            with btn_c3:
+                st.download_button(
+                    label="🛒 注文確定：スマレジ取込用CSV出力",
+                    data=create_smaregi_order_csv_bytes(current_estimate_obj, raw_prod_title_map, jan_std_price_dict),
+                    file_name=f"order_{q_no}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key=f"dl_csv_{s_key}"
+                )
 
             st.write("")
             st.markdown("##### 👁️ PDFプレビュー表示＆ワンクリックPDF保存")
@@ -1338,27 +1772,120 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
         if not staff_Filter_list:
             st.info(f"担当「{est_staff}」の保存された見積もりはありません。")
         else:
+            search_est_kw = st.text_input("🔍 見積番号・会社名・商品名で絞り込み", placeholder="例: アーネスト, ABA-105...")
             for idx_q, est in enumerate(st.session_state.saved_estimates):
-                if est_staff != "（すべて表示）" and est.get("staff", "") != est_staff:
+                if est_staff != "（すべて表示）" and est.get("staff", "") != est_staff and (est_staff not in str(est.get("hitokoto", ""))):
                     continue
-                st.write(f"見積番号: {est.get('q_no')} | 宛先: {est.get('cust_comp')} | 合計: ¥{est.get('grand_total'):,}")
+                if search_est_kw.strip():
+                    if search_est_kw.strip() not in json.dumps(est, ensure_ascii=False):
+                        continue
+
+                st.markdown(f"""
+                <div class="est-card">
+                    <div class="est-header">
+                        <div>
+                            <span class="badge-green">店</span> &nbsp;
+                            <b>見積番号: {est.get('q_no', '')}</b> &nbsp;|&nbsp;
+                            <b>担当:</b> {est.get('staff', est_staff)} &nbsp;|&nbsp;
+                            <b>見積日時:</b> {est.get('created_at', '')}
+                        </div>
+                        <div>
+                            <b>税込見積総額:</b> <span style="color:#d93025; font-size:16px; font-weight:bold;">¥{int(est.get('grand_total', 0)):,}</span>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                c_info1, c_info2, c_items = st.columns([1.5, 1.5, 2.5])
+                with c_info1:
+                    st.markdown("**【宛先情報】**")
+                    st.write(f"🏢 **{est.get('cust_comp', '')}**")
+                    st.write(f"👤 {est.get('cust_person', '')}")
+                    st.write(f"〒{est.get('cust_post', '')} {est.get('cust_addr', '')}")
+                with c_info2:
+                    st.markdown("**【お届け先・備考】**")
+                    st.write(f"🏢 {est.get('ship_comp', '')}")
+                    if est.get('memo'): st.info(f"伝達事項: {est.get('memo')}")
+                with c_items:
+                    items_df = pd.DataFrame(est.get("items", []))
+                    if not items_df.empty:
+                        show_sub = items_df[[c for c in ["商品コード", "商品名", "数量", "見積単価", "合計金額"] if c in items_df.columns]].copy()
+                        st.dataframe(show_sub, use_container_width=True, hide_index=True)
+
+                b_col1, b_col2, b_col3, _ = st.columns([2.0, 1.6, 1.0, 2.0])
+                with b_col1:
+                    st.download_button(
+                        label="🛒 注文確定：スマレジ用CSV出力",
+                        data=create_smaregi_order_csv_bytes(est, raw_prod_title_map, jan_std_price_dict),
+                        file_name=f"order_{est.get('q_no')}_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key=f"dl_saved_csv_{idx_q}_{est.get('q_no')}"
+                    )
+                with b_col2:
+                    if st.button("✏️ 編集画面に読込", key=f"load_est_{idx_q}"):
+                        st.session_state["load_target_estimate"] = est
+                        st.rerun()
+                with b_col3:
+                    if st.button("🗑️ 削除", key=f"del_est_{idx_q}"):
+                        st.session_state.saved_estimates.pop(idx_q)
+                        save_quotes_list(st.session_state.saved_estimates)
+                        st.rerun()
+                st.markdown("<hr style='margin:12px 0; border:0; border-top:1px dashed #cbd5e1;'>", unsafe_allow_html=True)
 
     st.stop()
 
 # ========================================================
-# 期間設定（売上分析用）
+# ★ 🏷️ ランク価格マスタ一覧
 # ========================================================
-idx = valid_ym.index(latest_ym) if latest_ym in valid_ym else len(valid_ym) - 1
-curr_y = int(latest_ym[:4])
-curr_m = int(latest_ym[5:7])
-fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
+if view_type == '🏷️ ランク価格マスタ一覧':
+    raw_rank_path, raw_rank_mtime = find_file_multidir("*ランク価格*.xls*")
+    raw_rank_df = pd.read_excel(raw_rank_path) if raw_rank_path and os.path.exists(raw_rank_path) else pd.DataFrame()
+    if raw_rank_df.empty:
+        st.error(f"『ランク価格.xlsx』が見つかりませんでした。`{OTHER_DATA_DIR}` または `{BASE_SHARE}` フォルダを確認してください。")
+        st.stop()
+    code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
+    r_col1, r_col2, r_col3 = st.columns([1.5, 1.5, 1.0])
+    with r_col1:
+        unique_ranks = sorted([str(x).strip() for x in raw_rank_df["ランク名"].dropna().unique() if not is_invalid_rank_name(x)])
+        sel_rank = st.selectbox("🎯 ランクで絞り込み", ["（すべて）"] + unique_ranks)
+    with r_col2:
+        search_rank_prod = st.text_input("🔍 商品番号・商品名で検索", placeholder="例：ABO-03...")
+    with r_col3:
+        rank_limit_val = st.selectbox("表示件数", [50, 100, 200, 500, "全件"], index=0)
+
+    filt_rank_df = raw_rank_df.copy()
+    if sel_rank != "（すべて）": filt_rank_df = filt_rank_df[filt_rank_df["ランク名"] == sel_rank]
+    if "商品名" not in filt_rank_df.columns:
+        p_col = "商品番号" if "商品番号" in filt_rank_df.columns else filt_rank_df.columns[0]
+        filt_rank_df["商品名"] = filt_rank_df[p_col].astype(str).str.strip().map(lambda c: code_to_name_map.get(c, ""))
+    if search_rank_prod.strip():
+        kw_rp = search_rank_prod.strip()
+        filt_rank_df = filt_rank_df[filt_rank_df["商品番号"].astype(str).str.contains(kw_rp, na=False) | filt_rank_df["商品名"].astype(str).str.contains(kw_rp, na=False)]
+
+    filt_rank_df["ロット数"] = filt_rank_df["ロット数"].apply(clean_num).astype(int)
+    filt_rank_df["ロット単価"] = filt_rank_df["ロット単価"].apply(clean_num).astype(int)
+    filt_rank_df["原価"] = filt_rank_df["原価"].apply(clean_num).astype(int)
+    filt_rank_df["ロット粗利額"] = filt_rank_df["ロット単価"] - filt_rank_df["原価"]
+    filt_rank_df["粗利率"] = filt_rank_df.apply(lambda r: f"{(r['ロット粗利額'] / r['ロット単価'] * 100):.1f}%" if r['ロット単価'] > 0 else "-", axis=1)
+
+    disp_rank_cols = [c for c in ["商品番号", "商品名", "ランク名", "ロット数", "ロット単価", "原価", "ロット粗利額", "粗利率"] if c in filt_rank_df.columns]
+    out_rank_df = filt_rank_df[disp_rank_cols].copy()
+    out_rank_df.insert(0, "番号", range(1, len(out_rank_df) + 1))
+    if rank_limit_val != "全件": out_rank_df = out_rank_df.head(int(rank_limit_val))
+    render_universal_table(out_rank_df)
+    st.stop()
+
+# ========================================================
+# ★ 期間設定（売上分析用：ショートカット完全連動）
+# ========================================================
+idx_ym = valid_ym.index(latest_ym) if latest_ym in valid_ym else len(valid_ym) - 1
 
 if quick_choice == '当月':
     s_def, e_def = latest_ym, latest_ym
     s_date_calc = datetime(curr_y, curr_m, 1).date()
     e_date_calc = max_date
 elif quick_choice == '前月':
-    prev = valid_ym[max(0, idx - 1)]
+    prev = valid_ym[max(0, idx_ym - 1)]
     s_def, e_def = prev, prev
     py, pm = int(prev[:4]), int(prev[5:7])
     s_date_calc = datetime(py, pm, 1).date()
@@ -1380,12 +1907,24 @@ else:
     s_date_calc = min_date
     e_date_calc = max_date
 
+if "prev_quick_choice" not in st.session_state or st.session_state.prev_quick_choice != quick_choice:
+    st.session_state.prev_quick_choice = quick_choice
+    if quick_choice != "手動指定":
+        st.session_state["analysis_ym_start_v3"] = s_def if s_def in desc_valid_ym else desc_valid_ym[-1]
+        st.session_state["analysis_ym_end_v3"] = e_def if e_def in desc_valid_ym else desc_valid_ym[0]
+
+if "analysis_ym_start_v3" not in st.session_state:
+    st.session_state["analysis_ym_start_v3"] = s_def if s_def in desc_valid_ym else desc_valid_ym[0]
+if "analysis_ym_end_v3" not in st.session_state:
+    st.session_state["analysis_ym_end_v3"] = e_def if e_def in desc_valid_ym else desc_valid_ym[0]
+
 col_mode, col_p1, col_p2, col_staff = st.columns([1, 1.2, 1.2, 1.6])
-with col_mode: date_mode = st.radio("指定単位", ["年月で指定", "日で指定"], horizontal=True, key="date_mode_radio_analysis")
+with col_mode:
+    date_mode = st.radio("指定単位", ["年月で指定", "日で指定"], horizontal=True, key="date_mode_radio_analysis")
 
 if date_mode == "年月で指定":
-    with col_p1: ym_start = st.selectbox("開始年月", desc_valid_ym, index=0)
-    with col_p2: ym_end = st.selectbox("終了年月", desc_valid_ym, index=desc_valid_ym.index(latest_ym) if latest_ym in desc_valid_ym else 0)
+    with col_p1: ym_start = st.selectbox("開始年月", desc_valid_ym, key="analysis_ym_start_v3")
+    with col_p2: ym_end = st.selectbox("終了年月", desc_valid_ym, key="analysis_ym_end_v3")
 else:
     with col_p1: d_start = st.date_input("開始日", value=s_date_calc, min_value=min_date, max_value=max_date)
     with col_p2: d_end = st.date_input("終了日", value=e_date_calc, min_value=min_date, max_value=max_date)
@@ -1418,28 +1957,39 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
 
     limit_col, _, _, _ = st.columns(4)
     with limit_col: limit_val = st.selectbox("表示件数", [50, 100, 200, 500, "全件"], index=0)
+else:
+    sel_cust = "（すべて）"; search_cust = ""; sel_prod = "（すべて）"; search_prod = ""; limit_val = 50; matched_custs = []; chosen_sub_branch = ""
 
-one_year_ago_date = max_date - pd.DateOffset(years=1)
-active_months_in_range = []
+# 🔴 初回売上日の事前計算（新商品分析で1年以上前の定番品を除外するために使用）
+prod_first_seen_dt = df.groupby("商品コード")["日付_dt"].min().to_dict()
+prod_last_seen_dt = df.groupby("商品コード")["日付_dt"].max().to_dict()
+code_to_name = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
+
+one_year_ago_date = pd.Timestamp(max_date) - pd.DateOffset(years=1)
 
 if view_type in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート']:
     filtered = df.copy(); ly_filtered = pd.DataFrame(); period_text = ""
 elif view_type == '💤 滞留・未販売商品分析（売れてない商品）':
     filtered = df.copy(); period_text = f"基準日: {max_date.strftime('%Y/%m/%d')}"; ly_filtered = pd.DataFrame()
 elif view_type == '✨ 新商品売上分析（直近1年）':
-    filtered = df[df["日付_dt"] >= one_year_ago_date].copy(); period_text = f"{one_year_ago_date.strftime('%Y/%m/%d')} 〜 {max_date.strftime('%Y/%m/%d')}（直近1年間）"; ly_filtered = pd.DataFrame()
+    # 🔴 全期間で「初回売上日が直近1年以内」の真の新商品コードのみに絞り込む
+    true_new_skus = {sku for sku, f_dt in prod_first_seen_dt.items() if pd.notna(f_dt) and f_dt >= one_year_ago_date}
+    filtered = df[(df["日付_dt"] >= one_year_ago_date) & (df["商品コード"].isin(true_new_skus))].copy()
+    period_text = f"{one_year_ago_date.strftime('%Y/%m/%d')} 〜 {max_date.strftime('%Y/%m/%d')}（直近1年間に初登場した新商品）"
+    ly_filtered = pd.DataFrame()
 else:
     if date_mode == "年月で指定":
-        if ym_start > ym_end: ym_start, ym_end = ym_end, ym_start
-        filtered = df[(df["年月"] >= ym_start) & (df["年月"] <= ym_end)]
-        period_text = f"{ym_start} 〜 {ym_end}" if ym_start != ym_end else f"{ym_start}（単月）"
-        s_y, s_m = int(ym_start[:4]), int(ym_start[5:7])
-        e_y, e_m = int(ym_end[:4]), int(ym_end[5:7])
+        s_ym_calc, e_ym_calc = (ym_end, ym_start) if ym_start > ym_end else (ym_start, ym_end)
+        filtered = df[(df["年月"] >= s_ym_calc) & (df["年月"] <= e_ym_calc)]
+        period_text = f"{s_ym_calc} 〜 {e_ym_calc}" if s_ym_calc != e_ym_calc else f"{s_ym_calc}（単月）"
+        s_y, s_m = int(s_ym_calc[:4]), int(s_ym_calc[5:7])
+        e_y, e_m = int(e_ym_calc[:4]), int(e_ym_calc[5:7])
         ly_filtered = df[(df["年月"] >= f"{s_y - 1}年{s_m:02d}月") & (df["年月"] <= f"{e_y - 1}年{e_m:02d}月")]
     else:
         dt_s, dt_e = pd.to_datetime(d_start), pd.to_datetime(d_end)
+        if dt_s > dt_e: dt_s, dt_e = dt_e, dt_s
         filtered = df[(df["日付_dt"] >= dt_s) & (df["日付_dt"] <= dt_e)]
-        period_text = f"{d_start.strftime('%Y/%m/%d')} 〜 {d_end.strftime('%Y/%m/%d')}"
+        period_text = f"{dt_s.strftime('%Y/%m/%d')} 〜 {dt_e.strftime('%Y/%m/%d')}"
         ly_filtered = df[(df["日付_dt"] >= (dt_s - pd.DateOffset(years=1))) & (df["日付_dt"] <= (dt_e - pd.DateOffset(years=1)))]
 
 if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート']:
@@ -1471,22 +2021,23 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
             ly_cond = ly_filtered["商品名"].str.contains(kw_p, na=False) | ly_filtered["商品コード"].str.contains(kw_p, na=False)
             ly_filtered = ly_filtered[ly_cond]
 
-    total_sales = filtered["金額"].sum()
-
-code_to_name = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
+    total_sales = int(filtered["金額"].sum()) if not filtered.empty else 0
 
 # ========================================================
 # ★ 各種分析画面
 # ========================================================
 if view_type == '🏢 得意先別ランキング':
     group_cols = [c for c in ["得意先名", "担当者"] if c in filtered.columns]
-    agg = filtered.groupby(group_cols).agg(販売金額=("金額", "sum"), 数量=("数量", "sum"), 原価合計=("原価合計", "sum"), 粗利額=("粗利額", "sum"), 取扱品目数=("商品コード", "nunique")).reset_index()
-    agg["粗利率"] = agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
-    agg["構成比"] = (agg["販売金額"] / total_sales * 100).round(2).map(lambda x: f"{x:.2f}%") if total_sales > 0 else "0.00%"
-    agg = agg.sort_values(by="販売金額", ascending=False)
-    agg.insert(0, "順位", range(1, len(agg) + 1))
-    if limit_val != "全件": agg = agg.head(int(limit_val))
-    show_df = agg[["順位", "得意先名", "担当者", "販売金額", "粗利額", "粗利率", "原価合計", "数量", "取扱品目数", "構成比"]].copy()
+    agg = filtered.groupby(group_cols).agg(販売金額=("金額", "sum"), 数量=("数量", "sum"), 原価合計=("原価合計", "sum"), 粗利額=("粗利額", "sum"), 取扱品目数=("商品コード", "nunique")).reset_index() if not filtered.empty else pd.DataFrame()
+    if not agg.empty:
+        agg["粗利率"] = agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
+        agg["構成比"] = (agg["販売金額"] / total_sales * 100).round(2).map(lambda x: f"{x:.2f}%") if total_sales > 0 else "0.00%"
+        agg = agg.sort_values(by="販売金額", ascending=False)
+        agg.insert(0, "順位", range(1, len(agg) + 1))
+        if limit_val != "全件": agg = agg.head(int(limit_val))
+        show_df = agg[["順位", "得意先名", "担当者", "販売金額", "粗利額", "粗利率", "原価合計", "数量", "取扱品目数", "構成比"]].copy()
+    else:
+        show_df = pd.DataFrame()
 
     c_sum1, c_sum2 = st.columns([4, 1.2])
     with c_sum1:
@@ -1497,45 +2048,53 @@ if view_type == '🏢 得意先別ランキング':
         </div>
         """, unsafe_allow_html=True)
     with c_sum2:
-        st.download_button(
-            label="📥 Excelで保存",
-            data=generate_excel_bytes(show_df, "得意先別ランキング"),
-            file_name=f"得意先別ランキング_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+        if not show_df.empty:
+            st.download_button(
+                label="📥 Excelで保存",
+                data=generate_excel_bytes(show_df, "得意先別ランキング"),
+                file_name=f"得意先別ランキング_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
     st.write("")
-    event = st.dataframe(
-        show_df.style.format({"販売金額": "¥{:,}", "粗利額": "¥{:,}", "原価合計": "¥{:,}", "数量": "{:,}", "取扱品目数": "{:,}"}),
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        height=560
-    )
-    if event and event.selection and event.selection.rows:
-        sel_row_idx = event.selection.rows[0]
-        clicked_cust = show_df.iloc[sel_row_idx]["得意先名"]
-        cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
-        show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
+    if not show_df.empty:
+        st.info("👆 **表の行をクリック（選択）すると、その得意先の「売れ筋・売上TOP10詳細」がポップアップ表示されます。**")
+        event = st.dataframe(
+            show_df.style.format({"販売金額": "¥{:,}", "粗利額": "¥{:,}", "原価合計": "¥{:,}", "数量": "{:,}", "取扱品目数": "{:,}"}),
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            height=560
+        )
+        if event and event.selection and event.selection.rows:
+            sel_row_idx = event.selection.rows[0]
+            clicked_cust = show_df.iloc[sel_row_idx]["得意先名"]
+            cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
+            show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
+    else:
+        st.info("該当期間のデータがありません。")
     st.stop()
 
 elif view_type == '📦 商品別売上ランキング':
     group_cols = [c for c in ["得意先名", "担当者", "商品コード", "商品名"] if c in filtered.columns]
-    valid_date_df = filtered[filtered["日付"].str.strip() != ""]
-    date_agg = valid_date_df.groupby(group_cols).agg(開始日=("日付", "min"), 終了日=("日付", "max")).reset_index()
-    agg = filtered.groupby(group_cols).agg(販売金額=("金額", "sum"), 数量=("数量", "sum"), 単価原価=("単価原価", "first"), 原価合計=("原価合計", "sum"), 粗利額=("粗利額", "sum"), 単価_min=("単価", "min"), 単価_max=("単価", "max")).reset_index()
-    agg = pd.merge(agg, date_agg, on=group_cols, how="left")
-    agg["粗利率"] = agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
-    agg["販売価格帯"] = agg.apply(lambda r: f"{int(r['単価_min']):,} 〜 {int(r['単価_max']):,}" if pd.notna(r['単価_min']) else "-", axis=1)
-    agg["販売期間"] = agg.apply(lambda r: f"{r['開始日']} 〜 {r['終了日']}" if pd.notna(r['開始日']) else "-", axis=1)
-    agg["構成比"] = (agg["販売金額"] / total_sales * 100).round(2).map(lambda x: f"{x:.2f}%") if total_sales > 0 else "0.00%"
-    agg = agg.sort_values(by="販売金額", ascending=False)
-    agg.insert(0, "番号", range(1, len(agg) + 1))
-    if limit_val != "全件": agg = agg.head(int(limit_val))
-    cols = ["番号", "得意先名", "担当者", "商品コード", "商品名", "数量", "販売価格帯", "単価原価", "販売金額", "原価合計", "粗利額", "粗利率", "構成比", "販売期間"]
-    show_df = agg[[c for c in cols if c in agg.columns]].copy()
+    if not filtered.empty:
+        valid_date_df = filtered[filtered["日付"].str.strip() != ""]
+        date_agg = valid_date_df.groupby(group_cols).agg(開始日=("日付", "min"), 終了日=("日付", "max")).reset_index()
+        agg = filtered.groupby(group_cols).agg(販売金額=("金額", "sum"), 数量=("数量", "sum"), 単価原価=("単価原価", "first"), 原価合計=("原価合計", "sum"), 粗利額=("粗利額", "sum"), 単価_min=("単価", "min"), 単価_max=("単価", "max")).reset_index()
+        agg = pd.merge(agg, date_agg, on=group_cols, how="left")
+        agg["粗利率"] = agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
+        agg["販売価格帯"] = agg.apply(lambda r: f"{int(r['単価_min']):,} 〜 {int(r['単価_max']):,}" if pd.notna(r['単価_min']) else "-", axis=1)
+        agg["販売期間"] = agg.apply(lambda r: f"{r['開始日']} 〜 {r['終了日']}" if pd.notna(r['開始日']) else "-", axis=1)
+        agg["構成比"] = (agg["販売金額"] / total_sales * 100).round(2).map(lambda x: f"{x:.2f}%") if total_sales > 0 else "0.00%"
+        agg = agg.sort_values(by="販売金額", ascending=False)
+        agg.insert(0, "番号", range(1, len(agg) + 1))
+        if limit_val != "全件": agg = agg.head(int(limit_val))
+        cols = ["番号", "得意先名", "担当者", "商品コード", "商品名", "数量", "販売価格帯", "単価原価", "販売金額", "原価合計", "粗利額", "粗利率", "構成比", "販売期間"]
+        show_df = agg[[c for c in cols if c in agg.columns]].copy()
+    else:
+        show_df = pd.DataFrame()
 
     c_sum1, c_sum2 = st.columns([4, 1.2])
     with c_sum1:
@@ -1546,43 +2105,127 @@ elif view_type == '📦 商品別売上ランキング':
         </div>
         """, unsafe_allow_html=True)
     with c_sum2:
-        st.download_button(
-            label="📥 Excelで保存",
-            data=generate_excel_bytes(show_df, "商品別売上ランキング"),
-            file_name=f"商品別売上ランキング_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+        if not show_df.empty:
+            st.download_button(
+                label="📥 Excelで保存",
+                data=generate_excel_bytes(show_df, "商品別売上ランキング"),
+                file_name=f"商品別売上ランキング_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
     st.write("")
     render_universal_table(show_df)
     st.stop()
 
 elif view_type == '👤 担当者別 売上＆目標達成分析':
-    st.markdown("### 👤 担当者別 売上＆目標達成分析")
-    staff_agg = filtered.groupby("担当者").agg(販売金額=("金額", "sum"), 数量=("数量", "sum"), 粗利額=("粗利額", "sum"), 担当件数=("商品コード", "count")).reset_index()
-    staff_agg["粗利率"] = staff_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
-    staff_agg = staff_agg.sort_values(by="販売金額", ascending=False)
-    staff_agg.insert(0, "順位", range(1, len(staff_agg) + 1))
-    render_universal_table(staff_agg)
+    st.markdown(f"#### 👤 担当者別 売上＆目標達成分析（対象期間: {period_text}）")
+    if not filtered.empty:
+        staff_agg = filtered.groupby("担当者").agg(
+            販売金額=("金額", "sum"),
+            数量=("数量", "sum"),
+            原価合計=("原価合計", "sum"),
+            粗利額=("粗利額", "sum"),
+            担当得意先数=("得意先名", "nunique"),
+            取扱品目数=("商品コード", "nunique")
+        ).reset_index()
+        staff_agg = staff_agg[staff_agg["担当者"].astype(str).str.strip() != ""]
+
+        if not ly_filtered.empty:
+            ly_st = ly_filtered.groupby("担当者").agg(前年売上額=("金額", "sum"), 前年粗利額=("粗利額", "sum")).reset_index()
+            staff_agg = pd.merge(staff_agg, ly_st, on="担当者", how="left").fillna(0)
+        else:
+            staff_agg["前年売上額"] = 0
+            staff_agg["前年粗利額"] = 0
+
+        staff_agg["前年売上額"] = staff_agg["前年売上額"].astype(int)
+        staff_agg["増減額"] = staff_agg["販売金額"] - staff_agg["前年売上額"]
+        staff_agg["前年比"] = staff_agg.apply(lambda r: f"{(r['販売金額'] / r['前年売上額'] * 100):.1f}%" if r["前年売上額"] > 0 else "-", axis=1)
+        staff_agg["粗利率"] = staff_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
+        staff_agg["構成比"] = (staff_agg["販売金額"] / total_sales * 100).round(1).map(lambda x: f"{x:.1f}%") if total_sales > 0 else "0.0%"
+        staff_agg = staff_agg.sort_values(by="販売金額", ascending=False)
+        staff_agg.insert(0, "順位", range(1, len(staff_agg) + 1))
+
+        cols_st = ["順位", "担当者", "販売金額", "前年売上額", "前年比", "増減額", "粗利額", "粗利率", "数量", "担当得意先数", "取扱品目数", "構成比"]
+        show_st_df = staff_agg[[c for c in cols_st if c in staff_agg.columns]].copy()
+
+        tot_prof = int(staff_agg["粗利額"].sum())
+        tot_ly = int(staff_agg["前年売上額"].sum())
+        yoy_tot_str = f"{(total_sales / tot_ly * 100):.1f}%" if tot_ly > 0 else "-"
+
+        c_sum1, c_sum2 = st.columns([4, 1.2])
+        with c_sum1:
+            st.markdown(f"""
+            <div class="total-card" style="margin-bottom:0;">
+                <b>期間売上合計:</b> <span style="color:#d93025; font-size:16px; font-weight:bold;">¥{total_sales:,}</span> &nbsp;|&nbsp;
+                <b>前年同期合計:</b> ¥{tot_ly:,} (前年比: <b>{yoy_tot_str}</b>) &nbsp;|&nbsp;
+                <b>粗利合計:</b> <span style="color:#188038; font-weight:bold;">¥{tot_prof:,}</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with c_sum2:
+            st.download_button(
+                label="📥 Excelで保存",
+                data=generate_excel_bytes(show_st_df, "担当者別分析"),
+                file_name=f"担当者別売上分析_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        st.write("")
+        render_universal_table(show_st_df)
+    else:
+        st.info("該当期間のデータがありません。")
     st.stop()
 
 elif view_type == '✨ 新商品売上分析（直近1年）':
-    st.markdown("### ✨ 新商品売上分析（直近1年間）")
-    np_agg = filtered.groupby(["商品コード", "商品名"]).agg(販売金額=("金額", "sum"), 数量=("数量", "sum"), 粗利額=("粗利額", "sum"), 初回売上日=("日付", "min")).reset_index()
-    np_agg["粗利率"] = np_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
-    np_agg = np_agg.sort_values(by="販売金額", ascending=False)
-    np_agg.insert(0, "順位", range(1, len(np_agg) + 1))
-    render_universal_table(np_agg)
+    st.markdown(f"#### ✨ 新商品売上分析（{period_text}）")
+    st.caption("※全データ履歴の中で「初回売上日」が直近1年以内の新商品のみを自動抽出しています（1年以上前から販売実績のある既存定番品は除外されます）。")
+    if not filtered.empty:
+        np_agg = filtered.groupby(["商品コード", "商品名"]).agg(
+            販売金額=("金額", "sum"),
+            数量=("数量", "sum"),
+            単価原価=("単価原価", "first"),
+            原価合計=("原価合計", "sum"),
+            粗利額=("粗利額", "sum"),
+            導入社数=("得意先名", "nunique"),
+            最終売上日=("日付", "max")
+        ).reset_index()
+        np_agg["初回売上日"] = np_agg["商品コード"].map(lambda c: prod_first_seen_dt.get(c).strftime('%Y/%m/%d') if pd.notna(prod_first_seen_dt.get(c)) else "-")
+        np_agg["粗利率"] = np_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
+        np_agg = np_agg.sort_values(by="販売金額", ascending=False)
+        np_agg.insert(0, "順位", range(1, len(np_agg) + 1))
+        if limit_val != "全件": np_agg = np_agg.head(int(limit_val))
+        cols_np = ["順位", "商品コード", "商品名", "初回売上日", "最終売上日", "導入社数", "数量", "単価原価", "販売金額", "粗利額", "粗利率"]
+        show_np_df = np_agg[[c for c in cols_np if c in np_agg.columns]].copy()
+
+        c_sum1, c_sum2 = st.columns([4, 1.2])
+        with c_sum1:
+            st.markdown(f"""
+            <div class="total-card" style="margin-bottom:0;">
+                <b>新商品 該当品目数:</b> <span style="color:#1a73e8; font-weight:bold;">{len(show_np_df):,} 品目</span> &nbsp;|&nbsp;
+                <b>新商品 売上合計:</b> <span style="color:#d93025; font-size:16px; font-weight:bold;">¥{int(show_np_df['販売金額'].sum()):,}</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with c_sum2:
+            st.download_button(
+                label="📥 Excelで保存",
+                data=generate_excel_bytes(show_np_df, "新商品売上分析"),
+                file_name=f"新商品売上分析_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        st.write("")
+        render_universal_table(show_np_df)
+    else:
+        st.info("直近1年間に初登場した新商品の売上データはありません。")
     st.stop()
 
 elif view_type == '📊 営業会議用：上位社 売上比較シート':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
     with col_m1: target_meeting_ym = st.selectbox("対象月度", desc_valid_ym, index=0, key="tgt_ym_meeting_v3")
-    with col_m2: compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=3, key="compare_cust_count_meeting_v3")
+    with col_m2: compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=0, key="compare_cust_count_meeting_v3")
     with col_m3:
         staff_options_meeting = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
-        sel_staff = st.selectbox("担当者指定", staff_options_meeting, key="meeting_staff_sel_v3")
+        sel_staff_m = st.selectbox("担当者指定", staff_options_meeting, key="meeting_staff_sel_v3")
 
     tgt_y = int(target_meeting_ym[:4]); tgt_m = int(target_meeting_ym[5:7])
     ly_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
@@ -1592,11 +2235,13 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
     f_year = tgt_y if tgt_m >= 7 else tgt_y - 1
     prev_fy_ym = f"{next_y - 1}年{next_m:02d}月"
 
-    df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
+    df_scope = df if sel_staff_m == "（すべて）" else df[df["担当者"] == sel_staff_m]
+
+    # 🔴 自己参照を排除した完全に安全なDataFrame抽出
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
-    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
+    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
     next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
-    prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not prev_fy_df.empty else pd.DataFrame()
+    prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not df_scope.empty else pd.DataFrame()
 
     cust_id_lookup = {}
     if not customer_master_df.empty:
@@ -1616,9 +2261,27 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
         cid_s = cust_id_lookup.get(cust, "")
         cd = build_meeting_comparison_card_data(
             cust, cid_s, cur_m_df, ly_m_df, next_m_df, prev_fy_df,
-            tgt_y, tgt_m, next_y, next_m, f_year
+            tgt_y, tgt_m, next_y, next_m, f_year, max_date
         )
+        act_k = f"act_{target_meeting_ym}_{cust}"
+        pln_k = f"pln_{target_meeting_ym}_{cust}"
+        cd["activity_text"] = st.session_state.get(act_k, "")
+        cd["plan_text"] = st.session_state.get(pln_k, "")
         cards_data.append(cd)
+
+    with st.expander("📝 各社の「主な営業活動」「今後の予定」コメントを入力・編集する（帳票＆Excelに反映）"):
+        for c_item in cards_data:
+            cn = c_item["cust_name"]
+            ca1, ca2 = st.columns(2)
+            with ca1:
+                st.text_area(f"🏢 {cn}：この1ヶ月の主な営業活動", key=f"act_{target_meeting_ym}_{cn}", height=68)
+            with ca2:
+                st.text_area(f"🏢 {cn}：【今後の予定】", key=f"pln_{target_meeting_ym}_{cn}", height=68)
+
+    for c_item in cards_data:
+        cn = c_item["cust_name"]
+        c_item["activity_text"] = st.session_state.get(f"act_{target_meeting_ym}_{cn}", "")
+        c_item["plan_text"] = st.session_state.get(f"pln_{target_meeting_ym}_{cn}", "")
 
     st.download_button(
         label="📥 上位社 売上比較シートをExcel保存",
@@ -1628,7 +2291,7 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
         key="dl_btn_meeting_comp_v3"
     )
 
-    st.markdown(f"#### 📊 {tgt_m}月度 上位{len(top_custs)}社 売上比較シート（担当: {sel_staff}）")
+    st.markdown(f"#### 📊 {tgt_m}月度 上位{len(top_custs)}社 売上比較シート（担当: {sel_staff_m}）")
     for idx_c in range(0, len(cards_data), 2):
         cols_card = st.columns(2)
         for sub_i in range(2):
@@ -1643,7 +2306,7 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     with col_m2: meeting_cust_count = st.selectbox("表示上位数", [10, 20, 30, 50, 100], index=0, key="meeting_cust_count_v3")
     with col_m3:
         staff_options_topcust = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
-        sel_staff = st.selectbox("担当者指定", staff_options_topcust, key="topcust_staff_sel_v3")
+        sel_staff_tc = st.selectbox("担当者指定", staff_options_topcust, key="topcust_staff_sel_v3")
 
     tgt_y = int(target_meeting_ym[:4]); tgt_m = int(target_meeting_ym[5:7])
     ly_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
@@ -1652,11 +2315,13 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     ly_term_start_ym = f"{f_year - 1}年07月"
     ly_term_end_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
 
-    df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
+    df_scope = df if sel_staff_tc == "（すべて）" else df[df["担当者"] == sel_staff_tc]
+
+    # 🔴 自己参照を排除した完全に安全なDataFrame抽出
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
-    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
+    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
     cur_ytd_df = df_scope[(df_scope["年月"] >= term_start_ym) & (df_scope["年月"] <= target_meeting_ym)] if not df_scope.empty else pd.DataFrame()
-    ly_ytd_df = df_scope[(df_scope["年月"] >= ly_term_start_ym) & (df_scope["年月"] <= ly_term_end_ym)] if not ly_ytd_df.empty else pd.DataFrame()
+    ly_ytd_df = df_scope[(df_scope["年月"] >= ly_term_start_ym) & (df_scope["年月"] <= ly_term_end_ym)] if not df_scope.empty else pd.DataFrame()
 
     cur_cust_sales = cur_m_df.groupby("得意先名")["金額"].sum() if not cur_m_df.empty else pd.Series()
     ly_cust_sales = ly_m_df.groupby("得意先名")["金額"].sum() if not ly_m_df.empty else pd.Series()
@@ -1709,13 +2374,86 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
         key="dl_btn_top_cust_v3"
     )
 
-    st.markdown(f"### {title_sheet}（担当: {sel_staff}）")
+    st.markdown(f"### {title_sheet}（担当: {sel_staff_tc}）")
     render_universal_table(res_m_df_tot)
     st.stop()
 
+elif view_type == '📈 商品別 前年実績比較':
+    st.markdown(f"#### 📈 商品別 前年実績比較（対象期間: {period_text}）")
+    cur_p = filtered.groupby(["商品コード", "商品名"]).agg(当年数量=("数量", "sum"), 当年売上=("金額", "sum"), 当年粗利=("粗利額", "sum")).reset_index() if not filtered.empty else pd.DataFrame(columns=["商品コード", "商品名", "当年数量", "当年売上", "当年粗利"])
+    ly_p = ly_filtered.groupby(["商品コード"]).agg(前年数量=("数量", "sum"), 前年売上=("金額", "sum"), 前年粗利=("粗利額", "sum")).reset_index() if not ly_filtered.empty else pd.DataFrame(columns=["商品コード", "前年数量", "前年売上", "前年粗利"])
+    comp_p = pd.merge(cur_p, ly_p, on="商品コード", how="outer").fillna(0)
+    comp_p["商品名"] = comp_p.apply(lambda r: r["商品名"] if r["商品名"] not in [0, "0", ""] else code_to_name.get(r["商品コード"], r["商品コード"]), axis=1)
+    for col_int in ["当年数量", "前年数量", "当年売上", "前年売上", "当年粗利", "前年粗利"]:
+        comp_p[col_int] = comp_p[col_int].astype(int)
+    comp_p["増減額"] = comp_p["当年売上"] - comp_p["前年売上"]
+    comp_p["前年比"] = comp_p.apply(lambda r: f"{(r['当年売上'] / r['前年売上'] * 100):.1f}%" if r["前年売上"] > 0 else "-", axis=1)
+    comp_p = comp_p.sort_values(by="当年売上", ascending=False)
+    comp_p.insert(0, "順位", range(1, len(comp_p) + 1))
+    if limit_val != "全件": comp_p = comp_p.head(int(limit_val))
+    show_cp = comp_p[["順位", "商品コード", "商品名", "当年数量", "前年数量", "当年売上", "前年売上", "前年比", "増減額", "当年粗利"]].copy()
+    render_universal_table(show_cp)
+    st.stop()
+
+elif view_type == '📊 得意先別 前年実績比較':
+    st.markdown(f"#### 📊 得意先別 前年実績比較（対象期間: {period_text}）")
+    cur_c = filtered.groupby(["得意先名"]).agg(担当者=("担当者", "last"), 当年売上=("金額", "sum"), 当年粗利=("粗利額", "sum"), 当年数量=("数量", "sum")).reset_index() if not filtered.empty else pd.DataFrame(columns=["得意先名", "担当者", "当年売上", "当年粗利", "当年数量"])
+    ly_c = ly_filtered.groupby(["得意先名"]).agg(前年売上=("金額", "sum"), 前年粗利=("粗利額", "sum"), 前年数量=("数量", "sum")).reset_index() if not ly_filtered.empty else pd.DataFrame(columns=["得意先名", "前年売上", "前年粗利", "前年数量"])
+    comp_c = pd.merge(cur_c, ly_c, on="得意先名", how="outer").fillna(0)
+    comp_c["担当者"] = comp_c["担当者"].replace(0, "")
+    for col_int in ["当年売上", "前年売上", "当年粗利", "前年粗利", "当年数量", "前年数量"]:
+        comp_c[col_int] = comp_c[col_int].astype(int)
+    comp_c["増減額"] = comp_c["当年売上"] - comp_c["前年売上"]
+    comp_c["前年比"] = comp_c.apply(lambda r: f"{(r['当年売上'] / r['前年売上'] * 100):.1f}%" if r["前年売上"] > 0 else "-", axis=1)
+    comp_c = comp_c.sort_values(by="当年売上", ascending=False)
+    comp_c.insert(0, "順位", range(1, len(comp_c) + 1))
+    if limit_val != "全件": comp_c = comp_c.head(int(limit_val))
+    show_cc = comp_c[["順位", "得意先名", "担当者", "当年売上", "前年売上", "前年比", "増減額", "当年粗利", "当年数量"]].copy()
+    render_universal_table(show_cc)
+    st.stop()
+
+elif view_type == '🧩 得意先×商品 マトリクス':
+    st.markdown(f"#### 🧩 得意先×商品 売上マトリクス（対象期間: {period_text}）")
+    if not filtered.empty:
+        top_c_list = filtered.groupby("得意先名")["金額"].sum().nlargest(30).index.tolist()
+        top_p_list = filtered.groupby("商品コード")["金額"].sum().nlargest(20).index.tolist()
+        sub_mtx = filtered[filtered["得意先名"].isin(top_c_list) & filtered["商品コード"].isin(top_p_list)]
+        piv = sub_mtx.pivot_table(index="得意先名", columns="商品コード", values="金額", aggfunc="sum", fill_value=0)
+        piv["合計"] = piv.sum(axis=1)
+        piv = piv.sort_values(by="合計", ascending=False).reset_index()
+        render_universal_table(piv)
+    else:
+        st.info("該当期間のデータがありません。")
+    st.stop()
+
+elif view_type == '💤 滞留・未販売商品分析（売れてない商品）':
+    st.markdown(f"#### 💤 滞留・未販売商品分析（基準日: {max_date.strftime('%Y/%m/%d')}）")
+    cutoff_days = st.slider("直近何日間売れていない商品を抽出するか", min_value=30, max_value=365, value=90, step=30)
+    cutoff_dt = pd.Timestamp(max_date) - pd.Timedelta(days=cutoff_days)
+    dormant_rows = []
+    for sku, l_dt in prod_last_seen_dt.items():
+        if pd.notna(l_dt) and l_dt < cutoff_dt:
+            days_diff = (pd.Timestamp(max_date) - l_dt).days
+            dormant_rows.append({
+                "商品コード": sku,
+                "商品名": code_to_name.get(sku, sku),
+                "最終売上日": l_dt.strftime('%Y/%m/%d'),
+                "未販売期間": f"{days_diff} 日間",
+                "単価原価": int(cost_master_dict.get(sku, 0))
+            })
+    dorm_df = pd.DataFrame(dormant_rows)
+    if not dorm_df.empty:
+        dorm_df = dorm_df.sort_values(by="最終売上日", ascending=True).reset_index(drop=True)
+        dorm_df.insert(0, "番号", range(1, len(dorm_df) + 1))
+        if limit_val != "全件": dorm_df = dorm_df.head(int(limit_val))
+    render_universal_table(dorm_df)
+    st.stop()
+
 else:
-    disp_df = filtered.drop(columns=["年月", "日付_dt", "元商品名"], errors="ignore").sort_values(by="金額", ascending=False)
-    if "番号" not in disp_df.columns:
-        disp_df.insert(0, "番号", range(1, len(disp_df) + 1))
-    if limit_val != "全件": disp_df = disp_df.head(int(limit_val))
+    # 📋 明細一覧
+    disp_df = filtered.drop(columns=["年月", "日付_dt", "元商品名"], errors="ignore").sort_values(by="金額", ascending=False) if not filtered.empty else pd.DataFrame()
+    if not disp_df.empty:
+        if "番号" not in disp_df.columns:
+            disp_df.insert(0, "番号", range(1, len(disp_df) + 1))
+        if limit_val != "全件": disp_df = disp_df.head(int(limit_val))
     render_universal_table(disp_df)
