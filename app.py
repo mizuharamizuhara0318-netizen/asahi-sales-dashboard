@@ -301,7 +301,6 @@ def prep_supabase_dataframe(df, cost_master):
     amt_series = pd.to_numeric(pd.Series(raw_amt_val).apply(clean_num), errors="coerce").fillna(0)
     new_df["金額"] = [int(a) if a > 0 else int(q * p) for a, q, p in zip(amt_series, new_df["数量"], new_df["単価"])]
 
-    # 🔴 日付パースの完全修正（文字列フォーマットやISO形式の違いによる歯抜け・バグを完全解消）
     raw_date = df[c_date] if c_date in df.columns else pd.Series([None] * len(df), index=df.index)
     dt = pd.to_datetime(raw_date, errors="coerce")
     new_df["日付_dt"] = dt
@@ -473,12 +472,10 @@ if df.empty:
     st.error("⚠️ Supabaseの `sales_data` テーブルからデータを取得できませんでした。Supabaseの接続情報（Secrets）やテーブル名をご確認ください。")
     st.stop()
 
-# 正確な日時・年月の安全な算出（歯抜けを防止）
+# 有効年月の算出（歯抜け防止・完全な時系列ソート）
 valid_ym_set = sorted(list(set(df["年月"].dropna().astype(str).tolist())))
 valid_ym_set = [y for y in valid_ym_set if y and y != ""]
-latest_ym = valid_ym_set[-1] if valid_ym_set else "2026年01月"
 
-# 年月文字列（例: '2026年10月'）をパースして時系列に正しく降順ソート
 def parse_ym_to_datetime(ym_str):
     try:
         m = re.match(r'(\d{4})年(\d{1,2})月', ym_str)
@@ -489,6 +486,7 @@ def parse_ym_to_datetime(ym_str):
     return datetime(2026, 1, 1)
 
 desc_valid_ym = sorted(valid_ym_set, key=parse_ym_to_datetime, reverse=True)
+latest_ym = desc_valid_ym[0] if desc_valid_ym else "2026年01月"
 
 valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
@@ -528,11 +526,11 @@ with col_top2:
 # ★ 🧮 簡易見積＆利益シミュレーター（営業担当別切り替え対応）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
-    # 🔴 ABA-501やABA-507等の商品コードがJANマスタ等から確実に引けるよう、空白除去を徹底
+    # 🔴 ABA-501やABA-507等も含めてJANマスタ・売上から確実・安全に商品名マップを構成
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
     for k_t, v_t in jan_title_dict.items():
         sk_trim = str(k_t).strip()
-        if sk_trim not in code_to_name_map or not code_to_name_map[sk_trim]:
+        if sk_trim not in code_to_name_map or not code_to_name_map[sk_trim] or code_to_name_map[sk_trim] == "nan":
             code_to_name_map[sk_trim] = str(v_t).strip()
 
     raw_prod_title_map = {}
@@ -567,9 +565,10 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 
     def get_sku_details(sku_code, rank_selection="ロット単価", cust_comp_name=""):
         s_trim = str(sku_code).strip()
-        p_name = code_to_name_map.get(s_trim, "")
-        if not p_name or p_name == "nan": 
-            p_name = jan_title_dict.get(s_trim, s_trim)
+        # 🔴 JANマスタ（正式名称）を優先して取得し、ない場合は売上データから取得
+        p_name = jan_title_dict.get(s_trim, "")
+        if not p_name or p_name == "nan":
+            p_name = code_to_name_map.get(s_trim, s_trim)
         
         p_jan = jan_master_dict.get(s_trim, "")
         p_cost = int(cost_master.get(s_trim, 0.0))
@@ -945,7 +944,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 </tr>
                 """
 
-            hanko_img_tag = f'<img src="data:image/png;base64,{hanko_base64}" style="position:absolute; right:15px; top:5px; width:75px; height:75px; opacity:0.92;" />' if hanko_bytes else ''
+            hanko_img_tag = f'<img src="data:image/png;base64,{hanko_base64}" style="position:absolute; right:15px; top:5px; width:75px; height:75px; opacity:0.92;" />' if hanko_base64 else ''
 
             pdf_template_html = f"""
             <!DOCTYPE html>
@@ -1073,7 +1072,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 # ========================================================
 # ★ 分析用モード（会議用資料・各種ランキング・期間ショートカット連動）
 # ========================================================
-# 🔴 正確な日時ベースでの期間ショートカット（「前月」などが狂うバグを完全に根絶）
+# 🔴 正確な日時ベースでの期間ショートカット
 latest_dt = valid_dts.max() if not valid_dts.empty else pd.Timestamp(curr_y, curr_m, 1)
 
 if quick_choice == '当月':
