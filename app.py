@@ -61,24 +61,6 @@ st.markdown("""
         font-size: 11px;
         font-weight: bold;
     }
-    .modal-box-header {
-        background: linear-gradient(135deg, #1e3a8a, #2563eb);
-        color: white;
-        padding: 12px 18px;
-        border-radius: 6px 6px 0 0;
-        font-size: 16px;
-        font-weight: bold;
-        margin-bottom: 10px;
-    }
-    .modal-summary-box {
-        background-color: #fefce8;
-        border: 1px solid #fde047;
-        border-left: 6px solid #eab308;
-        padding: 10px 16px;
-        font-size: 13px;
-        margin-bottom: 12px;
-        border-radius: 4px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -740,6 +722,22 @@ customer_master_df = load_customer_master(cust_path, cust_mtime)
 
 hanko_bytes, hanko_file_path = get_hanko_bytes()
 
+valid_ym_set = sorted(list(set(df["年月"].dropna().astype(str).tolist())))
+valid_ym_set = [y for y in valid_ym_set if y and y != ""]
+
+def parse_ym_to_datetime(ym_str):
+    try:
+        m = re.match(r'(\d{4})年(\d{1,2})月', ym_str)
+        if m:
+            return datetime(int(m.group(1)), int(m.group(2)), 1)
+    except:
+        pass
+    return datetime(2026, 1, 1)
+
+desc_valid_ym = sorted(valid_ym_set, key=parse_ym_to_datetime, reverse=True)
+latest_ym = desc_valid_ym[0] if desc_valid_ym else "2026年01月"
+valid_ym = valid_ym_set
+
 col_status, col_refresh = st.columns([4, 1.2])
 with col_refresh:
     if st.button("🔄 データを最新に再読み込み"):
@@ -759,12 +757,13 @@ if df.empty:
     st.error(f"売上CSVデータが見つかりませんでした。`{BASE_SHARE}` フォルダを確認してください。")
     st.stop()
 
-valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
-latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
-
 valid_dts = df["日付_dt"].dropna()
 min_date = valid_dts.min().date() if not valid_dts.empty else datetime(2022, 1, 1).date()
 max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().date()
+
+curr_y = int(latest_ym[:4]) if "年" in latest_ym else 2026
+curr_m = int(latest_ym.split("年")[1].replace("月", "")) if "年" in latest_ym and "月" in latest_ym else 1
+fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
 col_top1, col_top2 = st.columns([1.6, 2])
 with col_top1:
@@ -793,7 +792,7 @@ with col_top2:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
 
 # ========================================================
-# ★ 🧮 簡易見積＆利益シミュレーター（担当者プルダウン ＆ 親SKU除外完備）
+# ★ 🧮 簡易見積＆利益シミュレーター
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
@@ -1401,8 +1400,6 @@ if "prev_quick_choice" not in st.session_state or st.session_state.prev_quick_ch
     if quick_choice != "手動指定":
         st.session_state["analysis_ym_start_v3"] = s_def if s_def in desc_valid_ym else desc_valid_ym[-1]
         st.session_state["analysis_ym_end_v3"] = e_def if e_def in desc_valid_ym else desc_valid_ym[0]
-
-desc_valid_ym = sorted(valid_ym, reverse=True)
 
 sel_staff = "（すべて）"
 
