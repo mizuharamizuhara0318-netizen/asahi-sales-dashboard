@@ -300,16 +300,17 @@ def prep_supabase_dataframe(df, cost_master):
         elif any(k in c_str for k in ["得意先名", "顧客", "会社", "customer"]): col_map[c] = "得意先名"
         elif any(k in c_str for k in ["担当", "staff"]): col_map[c] = "担当者"
         elif any(k in c_str for k in ["数量", "個数", "qty", "quantity"]): col_map[c] = "数量"
-        elif any(k in c_str for k in ["単価", "price", "unit_price"]): col_map[c] = "単価"
+        elif any(k in c_str for k in ["単価", "price", "unit_price", "unit"]): col_map[c] = "単価"
         elif any(k in c_str for k in ["金額", "売上", "amount", "total"]): col_map[c] = "金額"
         elif any(k in c_str for k in ["日付", "date", "day"]): col_map[c] = "日付"
 
     df = df.rename(columns=col_map)
 
-    # 必須列がなければ自動補完してKeyErrorを防止
+    # 必須列が存在しない場合は安全にSeriesとして初期化してKeyErrorを防止
     for req in ["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付"]:
         if req not in df.columns:
-            df[req] = 0 if req in ["数量", "単価", "金額"] else ""
+            default_val = 0 if req in ["数量", "単価", "金額"] else ""
+            df[req] = pd.Series([default_val] * len(df))
 
     df["商品コード"] = df["商品コード"].astype(str).str.strip()
     df["商品名"] = df["商品名"].astype(str).map(clean_product_name)
@@ -337,6 +338,7 @@ def prep_supabase_dataframe(df, cost_master):
     df["粗利額"] = df["金額"] - df["原価合計"]
 
     return df
+    
 def render_universal_table(df_data):
     if df_data.empty:
         st.info("該当するデータがありません。")
