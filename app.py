@@ -61,36 +61,13 @@ st.markdown("""
         font-size: 11px;
         font-weight: bold;
     }
-    .modal-box-header {
-        background: linear-gradient(135deg, #1e3a8a, #2563eb);
-        color: white;
-        padding: 12px 18px;
-        border-radius: 6px 6px 0 0;
-        font-size: 16px;
-        font-weight: bold;
-        margin-bottom: 10px;
-    }
-    .modal-summary-box {
-        background-color: #fefce8;
-        border: 1px solid #fde047;
-        border-left: 6px solid #eab308;
-        padding: 10px 16px;
-        font-size: 13px;
-        margin-bottom: 12px;
-        border-radius: 4px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="main-header">売上管理＆営業分析表</div>', unsafe_allow_html=True)
 
-# クラウドやGitHub上では、app.pyと同じ場所にある「その他データ」または同じ階層のExcelを読むようにする
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OTHER_DATA_DIR = BASE_DIR
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_FILE = os.path.join(BASE_DIR, "sales_cache.parquet")
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVED_QUOTES_FILE = os.path.join(BASE_DIR, "saved_estimates.json")
 
 STAFF_MAP = {
@@ -157,7 +134,6 @@ def clean_product_name(val):
     return re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]', '', val).strip()
 
 def find_file_multidir(filename_pattern):
-    # クラウド（GitHub）上のファイルを探すため、BASE_DIRのみを対象にする
     search_dirs = [BASE_DIR]
     for d in search_dirs:
         if os.path.exists(d):
@@ -261,7 +237,6 @@ def load_customer_master(file_path, file_mtime):
     return pd.DataFrame()
 
 def get_hanko_bytes():
-    # クラウド環境に合わせてBASE_SHAREを除外し、BASE_DIRとOTHER_DATA_DIRのみを対象にする
     search_dirs = [BASE_DIR]
     patterns = ["*hanko*.png", "*05171642*.png", "*印鑑*.png", "input_file_5.png"]
     for d in search_dirs:
@@ -367,13 +342,6 @@ def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
         r_dict['送付先住所1'] = est_data.get("ship_addr1", est_data.get("cust_addr1", ""))
         r_dict['送付先住所2'] = est_data.get("ship_addr2", est_data.get("cust_addr2", ""))
         r_dict['お届け日'] = deliv_dt_str
-        r_dict['出力フラグ(受注伝票)'] = 0
-        r_dict['出力フラグ(お手紙)'] = 0
-        r_dict['出力フラグ(納品書)'] = 1
-        r_dict['出力フラグ(領収書)'] = 0
-        r_dict['出力フラグ(請求書)'] = 0
-        r_dict['出力フラグ(EMS)'] = 0
-        r_dict['出力フラグ(送り状)'] = 0
         for flag_col in [
             '出力済(受注伝票)', '出力済(お手紙)', '出力済(納品書)', '出力済(領収書)', '出力済(請求書)',
             '出力済(EMS)', '出力済(送り状)', '出力済(後払い取引登録)', '出力済(後払い出荷登録)',
@@ -554,7 +522,7 @@ def load_and_prep_data(force_reload=False):
                 return cached_df, 1, cost_master, 0
         except Exception: pass
 
-    csv_candidates = glob.glob(os.path.join(BASE_SHARE, "**", "*.csv"), recursive=True)
+    csv_candidates = glob.glob(os.path.join(BASE_DIR, "**", "*.csv"), recursive=True)
     csv_candidates = sorted(list(set(csv_candidates)))
 
     yayoi_files = [f for f in csv_candidates if "yayoi" in f.lower()]
@@ -572,18 +540,6 @@ def load_and_prep_data(force_reload=False):
 
     valid_dfs = [d for d in [new_df, new_amz_df] if d is not None and not d.empty]
     df = pd.concat(valid_dfs, ignore_index=True) if valid_dfs else pd.DataFrame()
-
-    if df.empty or ("アマゾンセラー" not in df.get("得意先名", pd.Series()).values):
-        amz_rows = []
-        sep_date = pd.Timestamp(2026, 9, 30)
-        for r in DEFAULT_AMZ_SEP_2026:
-            u_p = int(r["amount"] / r["qty"]) if r["qty"] > 0 else r["amount"]
-            amz_rows.append({
-                "商品コード": r["sku"], "商品名": r["sku"], "得意先名": "アマゾンセラー", "担当者": "水原",
-                "数量": r["qty"], "単価": u_p, "金額": r["amount"], "日付_dt": sep_date,
-                "日付": "2026/09/30", "年月": "2026年09月", "_source_file": "default_amz"
-            })
-        df = pd.concat([df, pd.DataFrame(amz_rows)], ignore_index=True)
 
     if not df.empty and "担当者" in df.columns and "得意先名" in df.columns:
         valid_staff_df = df[df["担当者"].astype(str).str.strip().ne("")].sort_values("日付_dt")
@@ -666,7 +622,7 @@ with col_refresh:
         st.rerun()
 
 if df.empty:
-    st.error(f"売上CSVデータが見つかりませんでした。`{BASE_SHARE}` フォルダを確認してください。")
+    st.error(f"売上CSVデータが見つかりませんでした。リポジトリのフォルダ構成を確認してください。")
     st.stop()
 
 valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
@@ -976,7 +932,7 @@ with col_staff:
 all_unique_custs = sorted([x for x in df["得意先名"].unique() if x])
 
 if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート']:
-    c1, c2, c3, _ = st.columns(3)
+    c1, c2, c3 = st.columns(3)
     with c1: sel_cust = st.selectbox("得意先名", ["（すべて）"] + all_unique_custs)
     with c2: search_cust = st.text_input("得意先検索", placeholder="会社名の一部...")
     with c3: limit_val = st.selectbox("表示件数", [50, 100, 200, "全件"], index=0)
@@ -997,6 +953,15 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     top_custs = df_scope[df_scope["年月"] == target_meeting_ym].groupby("得意先名")["金額"].sum().nlargest(compare_cust_count).index.tolist()
     st.markdown(f"#### 📊 {tgt_m}月度 上位{len(top_custs)}社 売上比較シート（担当: {sel_staff}）")
+    
+    comp_rows = []
+    ly_cust_sales = df_scope[df_scope["年月"] == ly_ym].groupby("得意先名")["金額"].sum()
+    cur_cust_sales = df_scope[df_scope["年月"] == target_meeting_ym].groupby("得意先名")["金額"].sum()
+    for rank, cust in enumerate(top_custs, 1):
+        s_cur = int(cur_cust_sales.get(cust, 0))
+        s_ly = int(ly_cust_sales.get(cust, 0))
+        comp_rows.append({"順位": str(rank), "得意先名": cust, f"{tgt_m}月度売上": s_cur, f"前年同月売上": s_ly, "前年比": f"{(s_cur / s_ly * 100):.0f}%" if s_ly > 0 else "-", "増減額": s_cur - s_ly})
+    render_universal_table(pd.DataFrame(comp_rows))
     st.stop()
 elif view_type == '📑 営業会議用：上位客先別売上実績':
     col_m1, col_m2 = st.columns(2)
@@ -1012,7 +977,17 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     for rank, cust in enumerate(target_cust_list, 1):
         s_cur = int(cur_cust_sales.get(cust, 0)); s_ly = int(ly_cust_sales.get(cust, 0))
         m_rows.append({"順位": str(rank), "客先名": cust, "売上実績": s_cur, "前年実績": s_ly, "前年比": f"{(s_cur / s_ly * 100):.0f}%" if s_ly > 0 else "-", "増減額": s_cur - s_ly})
-    render_universal_table(pd.DataFrame(m_rows))
+    
+    res_m_df = pd.DataFrame(m_rows)
+    render_universal_table(res_m_df)
+    
+    st.write("")
+    st.download_button(
+        label="📥 上位客先別売上実績をExcel保存",
+        data=io.BytesIO(pd.DataFrame(m_rows).to_excel(index=False, sheet_name="上位客先別売上実績") or b""),
+        file_name=f"上位客先別売上実績_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     st.stop()
 else:
     if date_mode == "年月で指定":
