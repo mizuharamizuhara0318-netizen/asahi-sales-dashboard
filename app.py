@@ -488,6 +488,9 @@ with col_top2:
     else:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top_v3")
 
+# グローバルな担当者選択（分析モード用）
+staff_options_global = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
+
 # ========================================================
 # ★ 🧮 簡易見積＆利益シミュレーター（営業担当別切り替え対応）
 # ========================================================
@@ -1004,9 +1007,9 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                     save_quotes_list(st.session_state.saved_estimates)
                     st.success("✅ 保存済み見積一覧に登録しました！")
 
-        st.write("")
-        st.markdown("##### 👁️ PDFプレビュー表示＆ワンクリックPDF保存")
-        components.html(pdf_template_html, height=720, scrolling=True)
+            st.write("")
+            st.markdown("##### 👁️ PDFプレビュー表示＆ワンクリックPDF保存")
+            components.html(pdf_template_html, height=720, scrolling=True)
 
     elif tab_choice.startswith("📋"):
         st.markdown(f"##### 📋 保存済み見積一覧（担当: {est_staff}）")
@@ -1023,10 +1026,15 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 # ========================================================
 # ★ 分析用モード（会議用資料・各種ランキング）
 # ========================================================
+sel_staff = "（すべて）" # デフォルト定義
+
 if view_type == '📊 営業会議用：上位社 売上比較シート':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
     with col_m1: target_meeting_ym = st.selectbox("対象月度", desc_valid_ym, index=0, key="tgt_ym_meeting_v3")
     with col_m2: compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=3, key="compare_cust_count_meeting_v3")
+    with col_m3:
+        staff_options_meeting = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
+        sel_staff = st.selectbox("担当者指定", staff_options_meeting, key="meeting_staff_sel_v3")
 
     tgt_y = int(target_meeting_ym[:4]); tgt_m = int(target_meeting_ym[5:7])
     ly_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
@@ -1064,16 +1072,13 @@ if view_type == '📊 営業会議用：上位社 売上比較シート':
         )
         cards_data.append(cd)
 
-    with col_m3:
-        st.write("")
-        st.download_button(
-            label="📥 上位社 売上比較シートをExcel保存",
-            data=generate_meeting_comparison_excel(cards_data, target_meeting_ym),
-            file_name=f"営業会議_上位社売上比較シート_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            key="dl_btn_meeting_comp_v3"
-        )
+    st.download_button(
+        label="📥 上位社 売上比較シートをExcel保存",
+        data=generate_meeting_comparison_excel(cards_data, target_meeting_ym),
+        file_name=f"営業会議_上位社売上比較シート_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_btn_meeting_comp_v3"
+    )
 
     st.markdown(f"#### 📊 {tgt_m}月度 上位{len(top_custs)}社 売上比較シート（担当: {sel_staff}）")
     for idx_c in range(0, len(cards_data), 2):
@@ -1087,6 +1092,9 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
     with col_m1: target_meeting_ym = st.selectbox("対象月度", desc_valid_ym, index=0, key="tgt_ym_topcust_v3")
     with col_m2: meeting_cust_count = st.selectbox("表示上位数", [10, 20, 30, 50, 100], index=0, key="meeting_cust_count_v3")
+    with col_m3:
+        staff_options_topcust = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
+        sel_staff = st.selectbox("担当者指定", staff_options_topcust, key="topcust_staff_sel_v3")
 
     tgt_y = int(target_meeting_ym[:4]); tgt_m = int(target_meeting_ym[5:7])
     ly_ym = f"{tgt_y - 1}年{tgt_m:02d}月"
@@ -1144,16 +1152,13 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     res_m_df_tot = pd.concat([res_m_df, tot_row], ignore_index=True)
     title_sheet = f"{tgt_m}月度上位{len(target_cust_list)}社客先別売上実績"
 
-    with col_m3:
-        st.write("")
-        st.download_button(
-            label="📥 上位客先別売上実績をExcel保存",
-            data=generate_meeting_top_cust_excel(res_m_df_tot, title_sheet),
-            file_name=f"営業会議_{title_sheet}_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            key="dl_btn_top_cust_v3"
-        )
+    st.download_button(
+        label="📥 上位客先別売上実績をExcel保存",
+        data=generate_meeting_top_cust_excel(res_m_df_tot, title_sheet),
+        file_name=f"営業会議_{title_sheet}_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="dl_btn_top_cust_v3"
+    )
 
     st.markdown(f"### {title_sheet}（担当: {sel_staff}）")
     render_universal_table(res_m_df_tot)
