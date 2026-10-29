@@ -194,23 +194,26 @@ def load_member_price_master_v2(file_path, file_mtime):
         try:
             mdf = pd.read_excel(file_path)
             for _, r in mdf.iterrows():
-                sku = str(r.iloc[3]).strip() if len(r) > 3 else ""
-                if (not sku or sku == "nan") and len(r) > 4:
-                    sku = str(r.iloc[4]).strip()
-                if not sku or sku == "nan": continue
+                # 🔴 商品管理番号(col 3) と 商品番号(col 4) の両方をキーとしてマップに登録し、親コード・子コードどちらでも一発で引けるようにする
+                sku_mgmt = str(r.iloc[3]).strip() if len(r) > 3 else ""
+                sku_num = str(r.iloc[4]).strip() if len(r) > 4 else ""
+                
+                skus = [s for s in [sku_mgmt, sku_num] if s and s != "nan"]
+                if not skus: continue
 
                 j_price = int(clean_num(r.iloc[9])) if len(r) > 9 else 0
                 n_min_price = int(clean_num(r.iloc[13])) if len(r) > 13 else 0
                 m_comp = str(r.iloc[12]).strip() if len(r) > 12 else ""
 
-                if 50 <= n_min_price < 90000:
-                    default_min_map[sku] = n_min_price
+                for s in skus:
+                    if 50 <= n_min_price < 90000:
+                        default_min_map[s] = n_min_price
 
-                if m_comp and m_comp not in ["nan", "None", "#N/A", ""]:
-                    norm_comp = re.sub(r'[\s ]+', '', m_comp)
-                    if 50 <= j_price < 90000:
-                        cust_sku_map[(m_comp, sku)] = j_price
-                        cust_sku_map[(norm_comp, sku)] = j_price
+                    if m_comp and m_comp not in ["nan", "None", "#N/A", ""]:
+                        norm_comp = re.sub(r'[\s ]+', '', m_comp)
+                        if 50 <= j_price < 90000:
+                            cust_sku_map[(m_comp, s)] = j_price
+                            cust_sku_map[(norm_comp, s)] = j_price
         except Exception: pass
     return cust_sku_map, default_min_map
 
@@ -638,94 +641,6 @@ def render_universal_table(df_data):
     calc_h = min(620, 80 + len(df_data) * 36)
     components.html(table_html, height=calc_h, scrolling=True)
 
-@st.dialog("🏢 得意先別 売れ筋・売上TOP10詳細", width="large")
-def show_customer_top10_dialog(cust_name, sub_df, period_str):
-    st.markdown(f"#### 🎯 対象得意先: **{cust_name}**")
-    st.caption(f"指定期間: {period_str}")
-    if sub_df.empty:
-        st.info("該当期間の売上データはありません。")
-        return
-
-    p_agg = sub_df.groupby(["商品コード", "商品名"]).agg(
-        数量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")
-    ).reset_index().sort_values(by="販売金額", ascending=False).head(10)
-
-    p_agg["粗利率"] = p_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
-    p_agg.insert(0, "順位", range(1, len(p_agg) + 1))
-    
-    show_p_df = p_agg[["順位", "商品コード", "商品名", "数量", "販売金額", "粗利額", "粗利率"]]
-    
-    tot_s = int(p_agg["販売金額"].sum())
-    tot_q = int(p_agg["数量"].sum())
-    st.markdown(f"<div class='total-card'><b>TOP10商品売上合計:</b> ¥{tot_s:,} &nbsp;|&nbsp; <b>数量合計:</b> {tot_q:,} 個</div>", unsafe_allow_html=True)
-    render_universal_table(show_p_df)
-
-def generate_excel_bytes(data_df, title_str):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        data_df.to_excel(writer, index=False, sheet_name=title_str[:30])
-    return output.getvalue()
-
-def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, tgt_y, tgt_m, next_y, next_m_val, f_year):
-    cur_sales = int(cur_m[cur_m["得意先名"] == cust]["金額"].sum()) if not cur_m.empty else 0
-    ly_sales = int(ly_m[ly_m["得意先名"] == cust]["金額"].sum()) if not ly_m.empty else 0
-    next_sales = int(next_m[next_m["得意先名"] == cust]["金額"].sum()) if not next_m.empty else 0
-    prev_fy_sales = int(prev_fy[prev_fy["得意先名"] == cust]["金額"].sum()) if not prev_fy.empty else 0
-    return {
-        "cust_name": cust,
-        "cust_id": cid,
-        "cur_sales": cur_sales,
-        "ly_sales": ly_sales,
-        "diff": cur_sales - ly_sales,
-        "next_sales": next_sales,
-        "prev_fy_sales": prev_fy_sales,
-        "next_diff": next_sales - prev_fy_sales,
-        "tgt_m": tgt_m,
-        "next_m": next_m_val
-    }
-
-def render_meeting_card_html(card):
-    diff_color = "#16a34a" if card["diff"] >= 0 else "#dc2626"
-    next_diff_color = "#16a34a" if card["next_diff"] >= 0 else "#dc2626"
-    return f"""
-    <div style="border:1px solid #cbd5e1; border-radius:6px; padding:12px; background:#fff; margin-bottom:12px;">
-        <div style="font-size:15px; font-weight:bold; color:#1e3a8a; border-bottom:1px solid #e2e8f0; padding-bottom:6px; margin-bottom:8px;">
-            🏢 {card['cust_name']} <span style="font-size:12px; color:#64748b;">(ID: {card['cust_id']})</span>
-        </div>
-        <div style="display:flex; justify-content:space-between; font-size:13px; margin-bottom:4px;">
-            <span><b>{card['tgt_m']}月実績:</b> ¥{card['cur_sales']:,}</span>
-            <span>(前年: ¥{card['ly_sales']:,})</span>
-            <span style="color:{diff_color}; font-weight:bold;">差額: ¥{card['diff']:,}</span>
-        </div>
-        <div style="display:flex; justify-content:space-between; font-size:13px;">
-            <span><b>来月({card['next_m']}月)予測:</b> ¥{card['next_sales']:,}</span>
-            <span>(前年同月: ¥{card['prev_fy_sales']:,})</span>
-            <span style="color:{next_diff_color}; font-weight:bold;">差額: ¥{card['next_diff']:,}</span>
-        </div>
-    </div>
-    """
-
-def generate_meeting_comparison_excel(cards_data, tgt_ym):
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "上位社売上比較"
-    ws.cell(row=1, column=1, value=f"{tgt_ym} 営業会議 上位社売上比較シート").font = Font(size=14, bold=True)
-    row_idx = 3
-    for c in cards_data:
-        ws.cell(row=row_idx, column=1, value=f"得意先名: {c['cust_name']}")
-        ws.cell(row=row_idx+1, column=1, value=f"当月売上: {c['cur_sales']:,} 円")
-        ws.cell(row=row_idx+2, column=1, value=f"来月予測: {c['next_sales']:,} 円")
-        row_idx += 5
-    out = io.BytesIO()
-    wb.save(out)
-    return out.getvalue()
-
-def generate_meeting_top_cust_excel(res_df, title_str):
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine='openpyxl') as writer:
-        res_df.to_excel(writer, index=False, sheet_name="上位客先実績")
-    return out.getvalue()
-
 df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=False)
 
 member_p_path, member_p_mtime = get_member_price_file_info()
@@ -739,7 +654,7 @@ customer_master_df = load_customer_master(cust_path, cust_mtime)
 
 hanko_bytes, hanko_file_path = get_hanko_bytes()
 
-# 🔴 年月リストおよび desc_valid_ym をすべてのモード選択・ランク価格マスタ表示よりも前に確実に定義
+# 🔴 desc_valid_ym 等の定義を一番上に移動し、NameErrorを完全に根絶
 valid_ym_set = sorted(list(set(df["年月"].dropna().astype(str).tolist())))
 valid_ym_set = [y for y in valid_ym_set if y and y != ""]
 
@@ -853,9 +768,9 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     def get_sku_details(sku_code, rank_selection="ロット単価", cust_comp_name=""):
         s_trim = str(sku_code).strip()
         
-        # 🔴 ABA-507のようにカラー枝番がないコードでも、マスターから部分一致（前方一致）で安全に解決
+        # 🔴 ABA-507などの部分一致・親コード検索フォールバック
         matched_key = s_trim
-        if s_trim not in jan_title_dict and s_trim not in cost_master_dict:
+        if s_trim not in jan_title_dict and s_trim not in cost_master_dict and s_trim not in member_default_min_map:
             candidates = [k for k in jan_title_dict.keys() if str(k).strip().startswith(s_trim) or s_trim in str(k)]
             if candidates:
                 matched_key = str(candidates[0]).strip()
@@ -1701,90 +1616,13 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     st.stop()
 
 # ----------------------------------------------------
-# ランク価格マスタ一覧
-# ----------------------------------------------------
-if view_type == '🏷️ ランク価格マスタ一覧':
-    raw_rank_path, raw_rank_mtime = find_file_multidir("*ランク価格*.xls*")
-    raw_rank_df = pd.read_excel(raw_rank_path) if raw_rank_path and os.path.exists(raw_rank_path) else pd.DataFrame()
-
-    if raw_rank_df.empty:
-        st.error(f"『ランク価格.xlsx』が見つかりませんでした。`{OTHER_DATA_DIR}` または `{BASE_SHARE}` フォルダに配置してください。")
-        st.stop()
-
-    code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
-
-    r_col1, r_col2, r_col3 = st.columns([1.5, 1.5, 1.0])
-    with r_col1:
-        unique_ranks = sorted([str(x).strip() for x in raw_rank_df["ランク名"].dropna().unique() if not is_invalid_rank_name(x)])
-        sel_rank = st.selectbox("🎯 ランクで絞り込み", ["（すべて）"] + unique_ranks)
-    with r_col2:
-        search_rank_prod = st.text_input("🔍 商品番号・商品名で検索", placeholder="例：ABO-03, 耳かき...")
-    with r_col3:
-        rank_limit_val = st.selectbox("表示件数", [50, 100, 200, 500, "全件"], index=0)
-
-    filt_rank_df = raw_rank_df.copy()
-    if sel_rank != "（すべて）":
-        filt_rank_df = filt_rank_df[filt_rank_df["ランク名"] == sel_rank]
-
-    if "商品名" not in filt_rank_df.columns:
-        p_col = "商品番号" if "商品番号" in filt_rank_df.columns else filt_rank_df.columns[0]
-        filt_rank_df["商品名"] = filt_rank_df[p_col].astype(str).str.strip().map(lambda c: code_to_name_map.get(c, ""))
-
-    if search_rank_prod.strip():
-        kw_rp = search_rank_prod.strip()
-        cond_rp = filt_rank_df["商品番号"].astype(str).str.contains(kw_rp, na=False) | filt_rank_df["商品名"].astype(str).str.contains(kw_rp, na=False)
-        filt_rank_df = filt_rank_df[cond_rp]
-
-    filt_rank_df["ロット数"] = filt_rank_df["ロット数"].apply(clean_num).astype(int)
-    filt_rank_df["ロット単価"] = filt_rank_df["ロット単価"].apply(clean_num).astype(int)
-    filt_rank_df["原価"] = filt_rank_df["原価"].apply(clean_num).astype(int)
-    filt_rank_df["ロット粗利額"] = filt_rank_df["ロット単価"] - filt_rank_df["原価"]
-    filt_rank_df["粗利率"] = filt_rank_df.apply(lambda r: f"{(r['ロット粗利額'] / r['ロット単価'] * 100):.1f}%" if r['ロット単価'] > 0 else "-", axis=1)
-
-    disp_rank_cols = ["商品番号", "商品名", "ランク名", "ロット数", "ロット単価", "原価", "ロット粗利額", "粗利率"]
-    disp_rank_cols = [c for c in disp_rank_cols if c in filt_rank_df.columns]
-
-    out_rank_df = filt_rank_df[disp_rank_cols].copy()
-    out_rank_df.insert(0, "番号", range(1, len(out_rank_df) + 1))
-
-    def generate_rank_excel(data_df):
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            data_df.to_excel(writer, index=False, sheet_name="ランク価格")
-        return output.getvalue()
-
-    r_top_c1, r_top_c2 = st.columns([4, 1.5])
-    with r_top_c1:
-        st.markdown(f"""
-        <div class="total-card" style="margin-bottom:0;">
-            <b>対象ランク:</b> <span style="color:#1a73e8; font-weight:bold;">{sel_rank}</span> &nbsp;|&nbsp;
-            <b>該当件数:</b> <span style="font-size:16px; font-weight:bold; color:#d93025;">{len(out_rank_df):,} 件</span>
-        </div>
-        """, unsafe_allow_html=True)
-    with r_top_c2:
-        st.write("")
-        st.download_button(
-            label="📥 ランク価格一覧をExcel保存",
-            data=generate_rank_excel(out_rank_df),
-            file_name=f"ランク価格_{sel_rank}_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-    st.write("")
-    if rank_limit_val != "全件":
-        out_rank_df = out_rank_df.head(int(rank_limit_val))
-
-    render_universal_table(out_rank_df)
-    st.stop()
-
-# ----------------------------------------------------
 # 期間設定（売上分析用）
 # ----------------------------------------------------
 latest_dt = valid_dts.max() if not valid_dts.empty else pd.Timestamp(curr_y, curr_m, 1)
 
 if quick_choice == '当月':
-    s_def = latest_dt.strftime('%Y年%m月')
-    e_def = s_def
+    s_def = latest_ym
+    e_def = latest_ym
     s_date_calc = datetime(latest_dt.year, latest_dt.month, 1).date()
     e_date_calc = max_date
 elif quick_choice == '前月':
@@ -1798,7 +1636,7 @@ elif quick_choice == '前月':
     e_date_calc = (pd.Timestamp(year=prev_dt.year, month=prev_dt.month, day=1) + pd.offsets.MonthEnd(1)).date()
 elif quick_choice == '当期累計':
     s_def = f"{fiscal_year}年07月"
-    e_def = latest_dt.strftime('%Y年%m月')
+    e_def = latest_ym
     s_date_calc = datetime(fiscal_year, 7, 1).date()
     e_date_calc = max_date
 elif quick_choice == '前期累計':
@@ -2016,8 +1854,8 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff == "（すべて）" else df[df["担当者"] == sel_staff]
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
-    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
-    next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
+    ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
+    next_m_df = df_scope[df_scope["年月"] == next_ym] if not next_m_df.empty else pd.DataFrame()
     prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not prev_fy_df.empty else pd.DataFrame()
 
     cust_id_lookup = {}
@@ -2136,7 +1974,7 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     st.stop()
 
 else:
-    disp_df = filtered.drop(columns=["年月", "日付_dt", "元商品on名"], errors="ignore").sort_values(by="金額", ascending=False)
+    disp_df = filtered.drop(columns=["年月", "日付_dt", "元商品名"], errors="ignore").sort_values(by="金額", ascending=False)
     if "番号" not in disp_df.columns:
         disp_df.insert(0, "番号", range(1, len(disp_df) + 1))
     if limit_val != "全件": disp_df = disp_df.head(int(limit_val))
