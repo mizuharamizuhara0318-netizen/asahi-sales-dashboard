@@ -355,6 +355,28 @@ def render_universal_table(df_data):
     calc_h = min(620, 80 + len(df_data) * 36)
     components.html(table_html, height=calc_h, scrolling=True)
 
+@st.dialog("🏢 得意先別 売れ筋・売上TOP10詳細", width="large")
+def show_customer_top10_dialog(cust_name, sub_df, period_str):
+    st.markdown(f"#### 🎯 対象得意先: **{cust_name}**")
+    st.caption(f"指定期間: {period_str}")
+    if sub_df.empty:
+        st.info("該当期間の売上データはありません。")
+        return
+
+    p_agg = sub_df.groupby(["商品コード", "商品名"]).agg(
+        数量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")
+    ).reset_index().sort_values(by="販売金額", ascending=False).head(10)
+
+    p_agg["粗利率"] = p_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
+    p_agg.insert(0, "順位", range(1, len(p_agg) + 1))
+    
+    show_p_df = p_agg[["順位", "商品コード", "商品名", "数量", "販売金額", "粗利額", "粗利率"]]
+    
+    tot_s = int(p_agg["販売金額"].sum())
+    tot_q = int(p_agg["数量"].sum())
+    st.markdown(f"<div class='total-card'><b>TOP10商品売上合計:</b> ¥{tot_s:,} &nbsp;|&nbsp; <b>数量合計:</b> {tot_q:,} 個</div>", unsafe_allow_html=True)
+    render_universal_table(show_p_df)
+
 def generate_excel_bytes(data_df, title_str):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -492,7 +514,6 @@ with col_top2:
 # ★ 🧮 簡易見積＆利益シミュレーター（営業担当別切り替え対応）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
-    # 売上データからの商品名マップに加えて、JANマスタのタイトルも確実に統合する
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
     for k_t, v_t in jan_title_dict.items():
         sk_trim = str(k_t).strip()
@@ -507,7 +528,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
         if sk_trim not in raw_prod_title_map:
             raw_prod_title_map[sk_trim] = str(v_t).strip()
 
-    # すべてのマスタからコードを完全に収集（ABA-501やABA-507なども確実に含まれるようにする）
     all_calc_codes = sorted(list(set(
         [str(c).strip() for c in code_to_name_map.keys()] +
         [str(c).strip() for c in cost_master.keys()] +
@@ -532,7 +552,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 
     def get_sku_details(sku_code, rank_selection="ロット単価", cust_comp_name=""):
         s_trim = str(sku_code).strip()
-        # JANマスタや売上データ、商品名マップから優先順位をつけて正確に取得
         p_name = code_to_name_map.get(s_trim, "")
         if not p_name or p_name == "nan": 
             p_name = jan_title_dict.get(s_trim, s_trim)
@@ -1037,8 +1056,41 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     st.stop()
 
 # ========================================================
-# ★ 分析用モード（会議用資料・各種ランキング）
+# ★ 分析用モード（会議用資料・各種ランキング・期間ショートカット連動）
 # ========================================================
+if quick_choice == '当月':
+    s_def, e_def = latest_ym, latest_ym
+    s_date_calc = datetime(curr_y, curr_m, 1).date()
+    e_date_calc = max_date
+elif quick_choice == '前月':
+    prev = valid_ym[max(0, valid_ym.index(latest_ym) - 1)] if latest_ym in valid_ym else latest_ym
+    s_def, e_def = prev, prev
+    py, pm = int(prev[:4]), int(prev[5:7])
+    s_date_calc = datetime(py, pm, 1).date()
+    e_date_calc = (pd.Timestamp(year=py, month=pm, day=1) + pd.offsets.MonthEnd(1)).date()
+elif quick_choice == '当期累計':
+    s_def, e_def = f"{fiscal_year}年07月", latest_ym
+    s_date_calc = datetime(fiscal_year, 7, 1).date()
+    e_date_calc = max_date
+elif quick_choice == '前期累計':
+    s_def, e_def = f"{fiscal_year - 1}年07月", f"{fiscal_year}年06月"
+    s_date_calc = datetime(fiscal_year - 1, 7, 1).date()
+    e_date_calc = datetime(fiscal_year, 6, 30).date()
+elif quick_choice == '全データ累計':
+    s_def, e_def = valid_ym[0], valid_ym[-1]
+    s_date_calc = min_date
+    e_date_calc = max_date
+else:
+    s_def, e_def = valid_ym[0], latest_ym
+    s_date_calc = min_date
+    e_date_calc = max_date
+
+if "prev_quick_choice" not in st.session_state or st.session_state.prev_quick_choice != quick_choice:
+    st.session_state.prev_quick_choice = quick_choice
+    if quick_choice != "手動指定":
+        st.session_state["analysis_ym_start_v3"] = s_def if s_def in desc_valid_ym else desc_valid_ym[-1]
+        st.session_state["analysis_ym_end_v3"] = e_def if e_def in desc_valid_ym else desc_valid_ym[0]
+
 sel_staff = "（すべて）"
 
 if view_type == '📊 営業会議用：上位社 売上比較シート':
@@ -1179,8 +1231,8 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
 else:
     # 通常の分析・ランキング表示モード
     col_p1, col_p2, col_staff_sub = st.columns([1.2, 1.2, 1.6])
-    with col_p1: ym_start = st.selectbox("開始年月", desc_valid_ym, index=0, key="analysis_ym_start_v3")
-    with col_p2: ym_end = st.selectbox("終了年月", desc_valid_ym, index=0, key="analysis_ym_end_v3")
+    with col_p1: ym_start = st.selectbox("開始年月", desc_valid_ym, key="analysis_ym_start_v3")
+    with col_p2: ym_end = st.selectbox("終了年月", desc_valid_ym, key="analysis_ym_end_v3")
     with col_staff_sub:
         staff_options_sub = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
         sel_staff_sub = st.selectbox("担当者指定", staff_options_sub, key="analysis_staff_sel_v3")
@@ -1207,7 +1259,29 @@ else:
         show_df = agg[["順位", "得意先名", "担当者", "販売金額", "粗利額", "粗利率", "原価合計", "数量", "取扱品目数", "構成比"]].copy() if not agg.empty else pd.DataFrame()
 
         st.markdown(f"<div class='total-card'><b>抽出期間:</b> {period_text} &nbsp;|&nbsp; <b>売上合計:</b> ¥{int(total_sales):,}</div>", unsafe_allow_html=True)
-        render_universal_table(show_df)
+        st.info("👆 **表の行を選択し、以下のボタンを押すと、その得意先の「売れ数・売上TOP10詳細」がポップアップ表示されます。**")
+
+        event = st.dataframe(
+            show_df,
+            column_config={
+                "販売金額": st.column_config.NumberColumn("販売金額", format="¥%d"),
+                "粗利額": st.column_config.NumberColumn("粗利額", format="¥%d"),
+                "原価合計": st.column_config.NumberColumn("原価合計", format="¥%d"),
+                "数量": st.column_config.NumberColumn("数量", format="%d"),
+                "取扱品目数": st.column_config.NumberColumn("取扱品目数", format="%d"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            height=560
+        )
+
+        if event and event.selection and event.selection.rows:
+            sel_row_idx = event.selection.rows[0]
+            clicked_cust = show_df.iloc[sel_row_idx]["得意先名"]
+            cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
+            show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
 
     elif view_type == '📦 商品別売上ランキング':
         group_cols = [c for c in ["商品コード", "商品名"] if c in filtered.columns]
