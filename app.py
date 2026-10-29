@@ -291,6 +291,7 @@ def prep_supabase_dataframe(df, cost_master):
     if df.empty:
         return pd.DataFrame(columns=["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付_dt", "日付", "年月", "単価原価", "原価合計", "粗利額"])
 
+    # Supabaseのカラム名を柔軟にマッピング
     col_map = {}
     for c in df.columns:
         c_str = str(c).strip().lower()
@@ -305,6 +306,7 @@ def prep_supabase_dataframe(df, cost_master):
 
     df = df.rename(columns=col_map)
 
+    # 必須列がなければ自動補完してKeyErrorを防止
     for req in ["商品コード", "商品名", "得意先名", "担当者", "数量", "単価", "金額", "日付"]:
         if req not in df.columns:
             df[req] = 0 if req in ["数量", "単価", "金額"] else ""
@@ -314,6 +316,7 @@ def prep_supabase_dataframe(df, cost_master):
     df["得意先名"] = df["得意先名"].astype(str).map(clean_cust_name)
     df["担当者"] = df["担当者"].map(convert_staff_name).fillna("").astype(str)
     
+    # 安全な数値変換
     df["数量"] = pd.to_numeric(df["数量"].apply(clean_num), errors="coerce").fillna(0).astype(int)
     df["単価"] = pd.to_numeric(df["単価"].apply(clean_num), errors="coerce").fillna(0).astype(int)
     
@@ -334,7 +337,6 @@ def prep_supabase_dataframe(df, cost_master):
     df["粗利額"] = df["金額"] - df["原価合計"]
 
     return df
-
 def render_universal_table(df_data):
     if df_data.empty:
         st.info("該当するデータがありません。")
