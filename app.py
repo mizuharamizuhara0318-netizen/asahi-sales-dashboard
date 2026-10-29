@@ -1078,6 +1078,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             q_tot_qty = int(calc_df["数量"].sum())
             q_tot_unit_price = int(calc_df["見積単価"].sum())
             q_tot_sales = int(calc_df["合計金額"].sum())
+            q_tot_cost = int((calc_df["数量"] * calc_df["単価原価"]).sum())
             q_tot_profit = int(calc_df["粗利額"].sum())
             q_tot_margin = (q_tot_profit / q_tot_sales * 100) if q_tot_sales > 0 else 0.0
             q_tax = int(round((q_tot_sales + q_shipping_fee) * 0.10))
