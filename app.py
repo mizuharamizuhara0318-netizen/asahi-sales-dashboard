@@ -424,7 +424,8 @@ with col_top2:
         member_status = f"加盟店価格: **{len(member_default_min_map):,} 件**" if member_default_min_map else "⚠️ 加盟店価格未検出"
         st.info(f"📁 原価: **{len(cost_master):,} 件** | {member_status} | {jan_status} | {hanko_status}")
     else:
-        quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
+        # 重複キーエラーを防ぐため、キーを一意の "period_shortcut_radio_analysis_v2" に設定
+        quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_analysis_v2")
 
 if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
@@ -727,7 +728,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     if trigger_delete_selected or needs_rerun or len(updated_records) != len(st.session_state[k_items]):
         st.session_state[k_items] = updated_records
         st.session_state[k_ver] += 1
-        st.rerun()
+        st.reroun() if hasattr(st, "rerun") else st.experimental_rerun()
     else:
         st.session_state[k_items] = updated_records
 
@@ -820,9 +821,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 .company-name {{ font-size: 15px; font-weight: bold; }}
                 .section-header {{ background: #e5e7eb; border: 1px solid #9ca3af; padding: 4px 10px; font-weight: bold; font-size: 14px; margin-top: 15px; margin-bottom: 10px; }}
                 .content-box {{ font-size: 14px; line-height: 1.8; margin-left: 10px; }}
-                .detail-info-flex {{ display: flex; justify-content: space-between; font-size: 13px; line-height: 1.6; margin-left: 10px; margin-bottom: 15px; }}
-                .shipping-area {{ width: 55%; }}
-                .meta-area {{ width: 45%; padding-left: 20px; }}
                 .quote-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }}
                 .quote-table th {{ background: #f3f4f6; border: 1px solid #9ca3af; padding: 7px 6px; }}
                 .quote-table td {{ border: 1px solid #d1d5db; padding: 7px 8px; font-variant-numeric: tabular-nums; }}
@@ -914,8 +912,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
 # ========================================================
 # ★ 分析用期間フィルター設定
 # ========================================================
-quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
-
 valid_ym = sorted([x for x in df["年月"].unique() if x and str(x).strip() != ""])
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
 desc_valid_ym = sorted(valid_ym, reverse=True)
@@ -923,25 +919,13 @@ curr_y = int(latest_ym[:4])
 curr_m = int(latest_ym[5:7])
 fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
-if quick_choice == '当月':
-    s_def, e_def = latest_ym, latest_ym
-elif quick_choice == '前月':
-    s_def, e_def = valid_ym[max(0, valid_ym.index(latest_ym) - 1)], valid_ym[max(0, valid_ym.index(latest_ym) - 1)]
-elif quick_choice == '当期累計':
-    s_def, e_def = f"{fiscal_year}年07月", latest_ym
-elif quick_choice == '前期累計':
-    s_def, e_def = f"{fiscal_year - 1}年07月", f"{fiscal_year}年06月"
-elif quick_choice == '全データ累計':
-    s_def, e_def = valid_ym[0], valid_ym[-1]
-else:
-    s_def, e_def = valid_ym[0], latest_ym
-
+s_def, e_def = latest_ym, latest_ym
 col_p1, col_p2, col_staff = st.columns([1.2, 1.2, 1.6])
-with col_p1: ym_start = st.selectbox("開始年月", desc_valid_ym, index=desc_valid_ym.index(s_def) if s_def in desc_valid_ym else 0)
-with col_p2: ym_end = st.selectbox("終了年月", desc_valid_ym, index=0)
+with col_p1: ym_start = st.selectbox("開始年月", desc_valid_ym, index=0, key="analysis_ym_start")
+with col_p2: ym_end = st.selectbox("終了年月", desc_valid_ym, index=0, key="analysis_ym_end")
 with col_staff:
     staff_options = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
-    sel_staff = st.selectbox("担当者指定", staff_options)
+    sel_staff = st.selectbox("担当者指定", staff_options, key="analysis_staff_sel")
 
 s_ym, e_ym = (ym_end, ym_start) if ym_start > ym_end else (ym_start, ym_end)
 filtered = df[(df["年月"] >= s_ym) & (df["年月"] <= e_ym)] if not df.empty else pd.DataFrame()
