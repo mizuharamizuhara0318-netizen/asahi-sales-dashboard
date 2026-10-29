@@ -157,7 +157,8 @@ def clean_product_name(val):
     return re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]', '', val).strip()
 
 def find_file_multidir(filename_pattern):
-    search_dirs = [OTHER_DATA_DIR, BASE_SHARE, BASE_DIR]
+    # クラウド（GitHub）上のファイルを探すため、BASE_DIRのみを対象にする
+    search_dirs = [BASE_DIR]
     for d in search_dirs:
         if os.path.exists(d):
             fl = glob.glob(os.path.join(d, filename_pattern))
