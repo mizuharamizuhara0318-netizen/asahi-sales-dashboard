@@ -46,7 +46,6 @@ STAFF_MAP = {
     "9": "川村", "10": "穴山", "11": "鈴木", "12": "松平"
 }
 
-# 『今期目標.xlsx』のデフォルト内蔵マスタ（単位：円）
 DEFAULT_STAFF_TARGETS = {
     "小泉": {"monthly": {7: 8000000, 8: 8000000, 9: 7000000, 10: 7000000, 11: 7040000, 12: 8000000, 1: 6500000, 2: 6500000, 3: 6500000, 4: 5000000, 5: 5000000, 6: 5460000}, "h1": 45040000, "h2": 34960000, "annual": 80000000},
     "水原": {"monthly": {7: 15500000, 8: 15000000, 9: 16000000, 10: 16000000, 11: 15500000, 12: 17710000, 1: 13000000, 2: 13000000, 3: 13000000, 4: 12000000, 5: 11290000, 6: 12000000}, "h1": 95710000, "h2": 74290000, "annual": 170000000},
@@ -572,7 +571,7 @@ def render_universal_table(df_data):
     header_cells = []
     for c in df_data.columns:
         align = 'center' if c in center_cols else ('left' if c in left_cols else 'right')
-        w_style = "width: 52px; max-width: 60px;" if c in narrow_cols else ""
+        w_style = "width: 52px; min-width: 52px; max-width: 56px;" if c in narrow_cols else ""
         header_cells.append(f"<th style='border:1px solid #cbd5e1; padding:8px 10px; background:#f1f5f9; text-align:{align}; {w_style} white-space:nowrap;'>{c}</th>")
     header_html = "".join(header_cells)
 
@@ -584,7 +583,7 @@ def render_universal_table(df_data):
             val = row[c]
             val_str = "" if pd.isna(val) else str(val)
             align = "center" if c in center_cols else ("left" if c in left_cols else "right")
-            w_style = "width: 52px; max-width: 60px;" if c in narrow_cols else ""
+            w_style = "width: 52px; min-width: 52px; max-width: 56px;" if c in narrow_cols else ""
             if isinstance(val, (int, float)) and c not in center_cols:
                 val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額", "粗利増減"] else f"{int(val):,}"
             is_neg = (isinstance(val, (int, float)) and val < 0) or (isinstance(val_str, str) and (val_str.startswith("-") or val_str.startswith("▲-")))
@@ -601,6 +600,102 @@ def render_universal_table(df_data):
     </div>
     """
     components.html(table_html, height=min(620, 80 + len(df_data) * 36), scrolling=True)
+
+# 🔴 商品別売上ランキングと100%同じ美しいHTML表で、得意先名のクリックPOPにも対応する専用コンポーネント
+_CLICKABLE_TABLE_DIR = os.path.join(BASE_DIR, "_cust_table_comp")
+os.makedirs(_CLICKABLE_TABLE_DIR, exist_ok=True)
+_CLICKABLE_INDEX_HTML = os.path.join(_CLICKABLE_TABLE_DIR, "index.html")
+_COMP_HTML_CONTENT = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; background: transparent; }
+  .tbl-wrap { overflow-x: auto; max-height: 580px; border: 1px solid #cbd5e1; border-radius: 6px; background-color: #ffffff; }
+  table { width: 100%; border-collapse: collapse; }
+  th { border: 1px solid #cbd5e1; padding: 8px 10px; background: #f1f5f9; white-space: nowrap; position: sticky; top: 0; z-index: 1; color: #0f172a; }
+  td { border: 1px solid #e2e8f0; padding: 6px 10px; font-variant-numeric: tabular-nums; white-space: nowrap; color: #0f172a; }
+  tr:nth-child(even) { background: #f8fafc; }
+  tr:nth-child(odd) { background: #ffffff; }
+  tr:hover { background: #eff6ff !important; }
+  .cust-link { color: #1d4ed8; font-weight: bold; text-decoration: underline; cursor: pointer; }
+  .cust-link:hover { color: #1e40af; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+function sendMessageToStreamlitClient(type, data) {
+  var outData = Object.assign({ isStreamlitMessage: true, type: type }, data);
+  window.parent.postMessage(outData, "*");
+}
+function init() { sendMessageToStreamlitClient("streamlit:componentReady", {apiVersion: 1}); }
+function setFrameHeight(height) { sendMessageToStreamlitClient("streamlit:setFrameHeight", {height: height}); }
+function sendValue(value) { sendMessageToStreamlitClient("streamlit:setComponentValue", {value: value}); }
+
+window.addEventListener("message", function(event) {
+  if (event.data.type !== "streamlit:render") return;
+  var args = event.data.args;
+  var root = document.getElementById("root");
+  root.innerHTML = args.table_html || "";
+  var links = root.querySelectorAll(".cust-link");
+  links.forEach(function(el) {
+    el.addEventListener("click", function() {
+      var cname = this.getAttribute("data-cust");
+      sendValue({cust: cname, ts: Date.now()});
+    });
+  });
+  setFrameHeight(args.height || 595);
+});
+init();
+</script>
+</body>
+</html>"""
+if not os.path.exists(_CLICKABLE_INDEX_HTML):
+    try:
+        with open(_CLICKABLE_INDEX_HTML, "w", encoding="utf-8") as _f:
+            _f.write(_COMP_HTML_CONTENT)
+    except Exception:
+        pass
+_clickable_cust_table_func = components.declare_component("clickable_cust_table", path=_CLICKABLE_TABLE_DIR)
+
+def render_clickable_customer_table(df_data):
+    if df_data is None or df_data.empty:
+        st.info("該当するデータがありません。")
+        return None
+    center_cols = {"番号", "順位", "日付", "販売期間", "最終売上日", "初回売上日", "未販売期間", "目標達成率", "通期進捗率", "前年比", "粗利率", "構成比"}
+    left_cols = {"得意先名", "商品コード", "商品名", "商品番号", "ランク名", "担当者", "客先名", "販売価格帯"}
+    narrow_cols = {"番号", "順位"}
+
+    header_cells = []
+    for c in df_data.columns:
+        align = 'center' if c in center_cols else ('left' if c in left_cols else 'right')
+        w_style = "width: 52px; min-width: 52px; max-width: 56px;" if c in narrow_cols else ""
+        header_cells.append(f"<th style='text-align:{align}; {w_style}'>{c}</th>")
+
+    body_rows = []
+    for _, row in df_data.iterrows():
+        cells = []
+        for c in df_data.columns:
+            val = row[c]
+            val_str = "" if pd.isna(val) else str(val)
+            align = "center" if c in center_cols else ("left" if c in left_cols else "right")
+            w_style = "width: 52px; min-width: 52px; max-width: 56px;" if c in narrow_cols else ""
+            if isinstance(val, (int, float)) and c not in center_cols:
+                val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額", "粗利増減"] else f"{int(val):,}"
+            is_neg = (isinstance(val, (int, float)) and val < 0) or (isinstance(val_str, str) and (val_str.startswith("-") or val_str.startswith("▲-")))
+            style_extra = "color: #dc2626; font-weight: bold;" if is_neg else ""
+
+            if c == "得意先名":
+                safe_c = val_str.replace('"', '&quot;')
+                cells.append(f"<td style='text-align:left;'><span class='cust-link' data-cust=\"{safe_c}\">🔍 {val_str}</span></td>")
+            else:
+                cells.append(f"<td style='text-align:{align}; {w_style} {style_extra}'>{val_str}</td>")
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    full_html = f"<div class='tbl-wrap'><table><thead><tr>{''.join(header_cells)}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>"
+    calc_h = min(600, 75 + len(df_data) * 35)
+    return _clickable_cust_table_func(table_html=full_html, height=calc_h, key="cust_rank_clickable_tbl")
 
 @st.dialog("🏢 得意先別 売れ筋・売上TOP10詳細", width="large")
 def show_customer_top10_dialog(cust_name, sub_df, period_str):
@@ -1047,7 +1142,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     for k_f in [k_comp, k_person, k_post, k_addr, k_s_comp, k_s_person, k_s_post, k_s_addr, k_s_tel]:
         if k_f not in st.session_state: st.session_state[k_f] = ""
 
-    # 🔴 「✏️ 編集画面に読込」クリック時にデータをセットし、タブも新規見積作成画面へ確実に切り替える
+    # 🔴 ラジオボタン描画前のタイミングで安全にタブを切り替える（StreamlitWidgetAlreadyInstantiatedError完全回避）
     if "load_target_estimate" in st.session_state and st.session_state["load_target_estimate"]:
         loaded_est = st.session_state.pop("load_target_estimate")
         st.session_state[k_comp] = loaded_est.get("cust_comp", "")
@@ -1512,7 +1607,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 with b_col2:
                     if st.button("✏️ 編集画面に読込", key=f"load_est_{idx_q}"):
                         st.session_state["load_target_estimate"] = est
-                        st.session_state["est_active_tab_v3"] = "📝 新規見積作成・シミュレーター"
                         st.rerun()
                 with b_col3:
                     if st.button("🗑️ 削除", key=f"del_est_{idx_q}"):
@@ -1734,7 +1828,7 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     total_sales = int(filtered["金額"].sum()) if not filtered.empty else 0
 
 # ========================================================
-# ★ 🏢 得意先別ランキング（行クリックでTOP10詳細POP完全固定＆順位幅コンパクト）
+# ★ 🏢 得意先別ランキング（商品別売上ランキングと同じ綺麗なHTML表＋得意先名クリックでPOP表示）
 # ========================================================
 if view_type == '🏢 得意先別ランキング':
     group_cols = [c for c in ["得意先名", "担当者"] if c in filtered.columns]
@@ -1758,25 +1852,16 @@ if view_type == '🏢 得意先別ランキング':
 
     st.write("")
     if not show_df.empty:
-        st.info("👆 **表の行（得意先名）をクリックすると、その得意先の「売れ筋・売上TOP10詳細」がポップアップ表示されます。**")
-        event = st.dataframe(
-            show_df.style.format({"販売金額": "¥{:,}", "粗利額": "¥{:,}", "原価合計": "¥{:,}", "数量": "{:,}", "取扱品目数": "{:,}"}),
-            column_config={
-                "順位": st.column_config.NumberColumn("順位", width="small", format="%d"),
-                "得意先名": st.column_config.TextColumn("得意先名", width="large"),
-                "担当者": st.column_config.TextColumn("担当者", width="small"),
-            },
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            height=560
-        )
-        if event and event.selection and event.selection.rows:
-            sel_row_idx = event.selection.rows[0]
-            clicked_cust = show_df.iloc[sel_row_idx]["得意先名"]
-            cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
-            show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
+        st.caption("💡 表内の **「🔍 得意先名」** をクリックすると、その得意先の「売れ筋・売上TOP10詳細」がポップアップ表示されます。")
+        clicked_res = render_clickable_customer_table(show_df)
+        if clicked_res and isinstance(clicked_res, dict) and clicked_res.get("cust"):
+            last_ts = st.session_state.get("_last_cust_click_ts", 0)
+            cur_ts = clicked_res.get("ts", 0)
+            if cur_ts != last_ts:
+                st.session_state["_last_cust_click_ts"] = cur_ts
+                clicked_cust = clicked_res["cust"]
+                cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
+                show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
     else:
         st.info("該当期間のデータがありません。")
     st.stop()
