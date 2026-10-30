@@ -119,7 +119,7 @@ ORDER_CSV_COLUMNS = [
     'ご購入明細金額', 'ご購入明細定期区分', 'ご購入明細標準販売価格', 'ご購入明細JANコード', 'ご購入明細ロットNO', '消費税計算区分'
 ]
 
-EXCLUDE_RANK_PATTERN = re.compile(r"下代変更前|オ.*プン|ｵ.*ﾌﾟﾝ|open|サンプル|ｻﾝﾌﾟﾙ|99,?999", re.IGNORECASE)
+EXCLUDE_RANK_PATTERN = re.compile(r"オ.*プン|ｵ.*ﾌﾟﾝ|open|サンプル|ｻﾝﾌﾟﾙ|99,?999", re.IGNORECASE)
 
 # ========================================================
 # ★ 共通ユーティリティ・Excel出力関数
@@ -1600,7 +1600,7 @@ if view_type == '🏷️ ランク価格マスタ一覧':
         unique_ranks = sorted([str(x).strip() for x in work_rk["ランク名"].dropna().unique() if str(x).strip() != ""])
         sel_rank = st.selectbox("🎯 ランク・取引先で絞り込み", ["（すべて）"] + unique_ranks)
     with r_col2:
-        search_rank_prod = st.text_input("🔍 商品番号・商品名で検索", placeholder="例：ABO-03...")
+        search_rank_prod = st.text_input("🔍 商品番号・商品名で検索", placeholder="例：ABO-03, 耳かき...")
     with r_col3:
         rank_limit_val = st.selectbox("表示件数", [50, 100, 200, 500, "全件"], index=0)
 
@@ -2034,7 +2034,7 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
     ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not ly_m_df.empty else pd.DataFrame()
     next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
-    prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not df_scope.empty else pd.DataFrame()
+    prev_fy_df = df_scope[df_scope["年月"] == prev_fy_ym] if not prev_fy_df.empty else pd.DataFrame()
 
     cust_id_lookup = {}
     if not customer_master_df.empty:
