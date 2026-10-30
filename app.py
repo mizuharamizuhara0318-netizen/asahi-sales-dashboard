@@ -91,6 +91,8 @@ OTHER_DATA_DIR = os.path.join(BASE_SHARE, "その他データ")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_FILE = os.path.join(BASE_DIR, "sales_cache.parquet")
 SAVED_QUOTES_FILE = os.path.join(BASE_SHARE, "saved_estimates.json")
+SAVED_MEETING_FILE = os.path.join(BASE_SHARE, "saved_meeting_sheet.json")
+LOCAL_MEETING_FILE = os.path.join(BASE_DIR, "saved_meeting_sheet.json")
 
 STAFF_MAP = {
     "1": "小泉", "2": "河端", "3": "安部", "4": "原",
@@ -119,7 +121,6 @@ ORDER_CSV_COLUMNS = [
     'ご購入明細金額', 'ご購入明細定期区分', 'ご購入明細標準販売価格', 'ご購入明細JANコード', 'ご購入明細ロットNO', '消費税計算区分'
 ]
 
-# 🔴 ユーザー指定の厳密な12種類のランク名
 ALLOWED_EXACT_RANKS = [
     "1.1倍", "1.15倍", "1.2倍", "1.25倍", "1.3倍", "1.35倍",
     "1.4倍", "1.45倍", "1.5倍", "0.9倍", "1.05倍", "1.07倍"
@@ -317,120 +318,30 @@ def save_quotes_list(q_list):
             json.dump(q_list, f, ensure_ascii=False, indent=2)
     except Exception: pass
 
-def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
-    rows = []
-    pay_map = {"銀行振込": 3, "代金引換": 2, "現行通り": 3, "掛け払い（月末締め翌月末払い）": 3}
-    pay_id = pay_map.get(est_data.get("payment", ""), 3)
-    now_dt_str = datetime.now().strftime("%Y/%m/%d %H:%M")
-    ship_dt_str = datetime.now().strftime("%Y/%m/%d")
-    deliv_dt_str = (datetime.now() + timedelta(days=1)).strftime("%Y/%m/%d")
+def load_saved_meeting_sheet_data():
+    for f in [SAVED_MEETING_FILE, LOCAL_MEETING_FILE]:
+        if os.path.exists(f):
+            try:
+                with open(f, "r", encoding="utf-8") as fp:
+                    return json.load(fp)
+            except Exception:
+                pass
+    return {}
 
-    for item in est_data.get("items", []):
-        sku = item.get("商品コード", "")
-        qty = int(item.get("数量", 1))
-        unit_p = int(item.get("見積単価", 0))
-        line_amt = unit_p * qty
-        unit_tax = int(round(unit_p * 0.10))
-        unit_tax_in = unit_p + unit_tax
-        jan = item.get("JANコード", "")
-        clean_name = item.get("商品名", "")
-        full_prod_name = raw_title_map.get(sku, f"【{sku}】{clean_name}（{jan}）" if jan else f"【{sku}】{clean_name}")
-        std_p = std_price_map.get(sku, "")
-
-        r_dict = {col: "" for col in ORDER_CSV_COLUMNS}
-        r_dict['顧客ID'] = est_data.get("cust_id", -1)
-        r_dict['要望等'] = est_data.get("memo", "")
-        r_dict['注文者お名前(姓)'] = est_data.get("cust_sei", "ご担当者")
-        r_dict['注文者お名前(名)'] = est_data.get("cust_mei", "様")
-        r_dict['注文者お名前(フリガナ・姓)'] = est_data.get("cust_kana_sei", "")
-        r_dict['注文者お名前(フリガナ名)'] = est_data.get("cust_kana_mei", "")
-        r_dict['注文者会社名'] = est_data.get("cust_comp", "")
-        r_dict['注文者メールアドレス'] = est_data.get("cust_email", "")
-        r_dict['注文者メールアドレスタイプ'] = 1
-        r_dict['注文者電話番号'] = est_data.get("cust_tel", "")
-        r_dict['注文者FAX'] = est_data.get("cust_fax", "")
-        r_dict['注文者郵便番号'] = est_data.get("cust_post", "")
-        r_dict['注文者都道府県'] = est_data.get("cust_pref", "")
-        r_dict['注文者住所1'] = est_data.get("cust_addr1", "")
-        r_dict['注文者住所2'] = est_data.get("cust_addr2", "")
-        r_dict['注文者性別ID'] = 1
-        r_dict['注文者性別'] = "男性"
-        r_dict['注文者職種'] = est_data.get("cust_job_id", "")
-        r_dict['商品合計'] = line_amt
-        r_dict['調整額'] = 0
-        r_dict['うち割引額１'] = 0
-        r_dict['うち割引額２'] = 0
-        r_dict['うち割引額３'] = 0
-        r_dict['うちその他調整額'] = 0
-        r_dict['合計額'] = line_amt
-        r_dict['送料（税別）'] = est_data.get("shipping_fee", 0)
-        r_dict['手数料（税別）'] = est_data.get("cod_fee", 0)
-        r_dict['クーポン名'] = str(est_data.get("rank_name", "")).split(":")[0].strip()
-        r_dict['クーポン利用'] = 0
-        r_dict['ポイント利用'] = 0
-        r_dict['請求額'] = line_amt
-        r_dict['消費税額'] = unit_tax
-        r_dict['入金額'] = 0
-        r_dict['EC種類'] = 16
-        r_dict['EC注文番号'] = est_data.get("q_no", "").replace("-", "")
-        r_dict['EC店舗ID'] = 1000
-        r_dict['EC店舗名'] = "旭電機化成"
-        r_dict['販売ルートID'] = 1
-        r_dict['受注ステータス'] = 1
-        r_dict['支払方法ID'] = pay_id
-        r_dict['決済ステータス'] = 0
-        r_dict['配送方法ID'] = 1
-        r_dict['配送区分'] = 0
-        r_dict['申込番号種類'] = 0
-        r_dict['注文日時'] = est_data.get("created_at", now_dt_str)
-        r_dict['出荷予定日'] = ship_dt_str
-        r_dict['ひとことメモ'] = est_data.get("hitokoto", "")
-        r_dict['伝達事項'] = est_data.get("memo", "")
-        r_dict['再計算フラグ'] = 1
-        r_dict['送付先お名前(姓)'] = est_data.get("ship_sei", est_data.get("cust_sei", "ご担当者"))
-        r_dict['送付先お名前(名)'] = est_data.get("ship_mei", est_data.get("cust_mei", "様"))
-        r_dict['送付先会社名'] = est_data.get("ship_comp", est_data.get("cust_comp", ""))
-        r_dict['送付先電話番号'] = est_data.get("ship_tel", est_data.get("cust_tel", ""))
-        r_dict['送付先郵便番号'] = est_data.get("ship_post", est_data.get("cust_post", ""))
-        r_dict['送付先都道府県'] = est_data.get("ship_pref", est_data.get("cust_pref", ""))
-        r_dict['送付先住所1'] = est_data.get("ship_addr1", est_data.get("cust_addr1", ""))
-        r_dict['送付先住所2'] = est_data.get("ship_addr2", est_data.get("cust_addr2", ""))
-        r_dict['お届け日'] = deliv_dt_str
-        r_dict['出力フラグ(受注伝票)'] = 0
-        r_dict['出力フラグ(お手紙)'] = 0
-        r_dict['出力フラグ(納品書)'] = 1
-        r_dict['出力フラグ(領収書)'] = 0
-        r_dict['出力フラグ(請求書)'] = 0
-        r_dict['出力フラグ(EMS)'] = 0
-        r_dict['出力フラグ(送り状)'] = 0
-        for flag_col in [
-            '出力済(受注伝票)', '出力済(お手紙)', '出力済(納品書)', '出力済(領収書)', '出力済(請求書)',
-            '出力済(EMS)', '出力済(送り状)', '出力済(後払い取引登録)', '出力済(後払い出荷登録)',
-            '出力済(配送指示伝票)', '出力済(モール連携出荷)', '出力済(モール連携処理済)',
-            'メール送信済(サンクス)', 'メール送信済(入金確認)', 'メール送信済(発送完了)',
-            'メール送信済(フォロー)', 'メール送信済(その他１)', 'メール送信済(その他２)'
-        ]:
-            r_dict[flag_col] = 0
-
-        r_dict['ご購入明細商品コード'] = sku
-        r_dict['ご購入明細商品名'] = full_prod_name
-        r_dict['ご購入明細消費税区分'] = "別"
-        r_dict['ご購入明細消費税課税規則'] = 3
-        r_dict['ご購入明細送料区分'] = "別"
-        r_dict['ご購入明細手数料区分'] = "別"
-        r_dict['ご購入明細税抜単価'] = unit_p
-        r_dict['ご購入明細税込単価'] = unit_tax_in
-        r_dict['ご購入明細消費税'] = unit_tax
-        r_dict['ご購入明細消費税率'] = 10
-        r_dict['ご購入明細数量'] = qty
-        r_dict['ご購入明細金額'] = line_amt
-        r_dict['ご購入明細定期区分'] = "商品"
-        r_dict['ご購入明細標準販売価格'] = std_p
-        r_dict['消費税計算区分'] = "伝票単位(B)"
-        rows.append(r_dict)
-
-    out_df = pd.DataFrame(rows, columns=ORDER_CSV_COLUMNS)
-    return out_df.to_csv(index=False, encoding="cp932", errors="replace").encode("cp932")
+def save_meeting_sheet_data(data_dict):
+    target_f = SAVED_MEETING_FILE
+    target_dir = os.path.dirname(target_f)
+    if not os.path.exists(target_dir):
+        target_f = LOCAL_MEETING_FILE
+    try:
+        with open(target_f, "w", encoding="utf-8") as fp:
+            json.dump(data_dict, fp, ensure_ascii=False, indent=2)
+    except Exception:
+        try:
+            with open(LOCAL_MEETING_FILE, "w", encoding="utf-8") as fp:
+                json.dump(data_dict, fp, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
 def _read_single_csv(f):
     path_date = None
@@ -696,7 +607,7 @@ def show_customer_top10_dialog(cust_name, sub_df, period_str):
     render_universal_table(show_p_df)
 
 # ========================================================
-# ★ 営業会議用：上位社 売上比較シート（HTMLインデント除去＆Excel完全調整）
+# ★ 営業会議用：上位社 売上比較シート（文言削除＆手動記載・保存機能）
 # ========================================================
 def _extract_top5_and_other(sub_df):
     if sub_df is None or sub_df.empty:
@@ -719,7 +630,7 @@ def _extract_top5_and_other(sub_df):
         rows.append({"sku": "", "price": "", "qty": "", "amt": ""})
     return rows, other_amt, total_amt
 
-def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, tgt_y, tgt_m, next_y, next_m_val, f_year, max_dt_val=None):
+def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, tgt_y, tgt_m, next_y, next_m_val, f_year, saved_dict=None):
     c_cur = cur_m[cur_m["得意先名"] == cust] if not cur_m.empty else pd.DataFrame()
     c_ly = ly_m[ly_m["得意先名"] == cust] if not ly_m.empty else pd.DataFrame()
     c_next = next_m[next_m["得意先名"] == cust] if not next_m.empty else pd.DataFrame()
@@ -727,7 +638,19 @@ def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, 
 
     ly_rows, ly_other, ly_total = _extract_top5_and_other(c_ly)
     cur_rows, cur_other, cur_total = _extract_top5_and_other(c_cur)
-    next_rows, next_other, next_total = _extract_top5_and_other(c_next)
+
+    # 保存データがある場合は手動入力を優先反映
+    saved_cust_data = (saved_dict or {}).get(cust, {})
+    if "custom_next_rows" in saved_cust_data and saved_cust_data["custom_next_rows"]:
+        next_rows = saved_cust_data["custom_next_rows"]
+        while len(next_rows) < 5:
+            next_rows.append({"sku": "", "price": "", "qty": "", "amt": ""})
+        next_other = int(saved_cust_data.get("custom_next_other", 0))
+        next_row_sum = sum(int(r.get("amt", 0)) for r in next_rows if str(r.get("amt", "")).strip() != "")
+        next_total = next_row_sum + next_other
+    else:
+        next_rows, next_other, next_total = _extract_top5_and_other(c_next)
+
     prev_fy_total = int(c_prev_fy["金額"].sum()) if not c_prev_fy.empty else 0
 
     yoy_rate = f"{int(round(cur_total / ly_total * 100))}%" if ly_total > 0 else "-"
@@ -752,10 +675,8 @@ def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, 
         "yoy_rate": yoy_rate,
         "next_rows": next_rows, "next_other": next_other, "next_total": next_total,
         "prev_fy_total": prev_fy_total, "next_yoy_rate": next_yoy_rate,
-        "cur_sales": cur_total, "ly_sales": ly_total, "diff": cur_total - ly_total,
-        "next_sales": next_total, "prev_fy_sales": prev_fy_total, "next_diff": next_total - prev_fy_total,
-        "tgt_m": tgt_m, "next_m": next_m_val,
-        "activity_text": "", "plan_text": ""
+        "activity_text": saved_cust_data.get("activity", ""),
+        "plan_text": saved_cust_data.get("plan", "")
     }
 
 def render_meeting_card_html(card):
@@ -883,7 +804,6 @@ def render_meeting_card_html(card):
 <div style="display:flex; justify-content:space-between;"><span>{card['prev_fy_label']}</span><span>{card['prev_fy_total']:,}</span></div>
 <div style="display:flex; justify-content:space-between;"><span>{card['as_of_label']}</span><span>{card['next_total']:,}</span></div>
 <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>昨対進捗</span><span>{card['next_yoy_rate']}</span></div>
-<div style="font-size:10px; color:#475569; margin-top:2px;">残り営業日数13日（3/16日程消化19%）</div>
 </td>
 </tr>
 </tbody>
@@ -988,18 +908,20 @@ def generate_meeting_comparison_excel(cards_data, tgt_ym):
         r_nx_oth = r_nx + 7
         ws.cell(row=r_nx_oth, column=base_c, value="その他").font = font_m
         ws.cell(row=r_nx_oth, column=base_c + 3, value=c["next_other"]).number_format = '#,##0'
+        ws.cell(row=r_nx_oth, column=base_c + 3).font = font_m
         for h_i in range(4): ws.cell(row=r_nx_oth, column=base_c + h_i).border = bd
 
         r_nx_tot = r_nx + 8
         ws.cell(row=r_nx_tot, column=base_c, value="合計").font = font_b
         ws.cell(row=r_nx_tot, column=base_c + 3, value=c["next_total"]).number_format = '#,##0'
+        ws.cell(row=r_nx_tot, column=base_c + 3).font = font_b
         for h_i in range(4): ws.cell(row=r_nx_tot, column=base_c + h_i).border = bd
 
         r_bot = r_nx + 9
-        ws.merge_cells(start_row=r_bot, start_column=base_c, end_row=r_bot + 3, end_column=base_c + 3)
+        ws.merge_cells(start_row=r_bot, start_column=base_c, end_row=r_bot + 2, end_column=base_c + 3)
         pln_c = ws.cell(row=r_bot, column=base_c, value=f"【今後の予定】\n{c.get('plan_text', '')}")
         pln_c.font = font_m; pln_c.alignment = Alignment(vertical="top", wrap_text=True)
-        for rr in range(r_bot, r_bot + 4):
+        for rr in range(r_bot, r_bot + 3):
             for cc in range(base_c, base_c + 4):
                 ws.cell(row=rr, column=cc).border = bd
 
@@ -1015,8 +937,7 @@ def generate_meeting_comparison_excel(cards_data, tgt_ym):
         c_nyoy = ws.cell(row=r_bot + 2, column=base_c + 7, value=c["next_yoy_rate"])
         c_nyoy.font = font_b; c_nyoy.alignment = Alignment(horizontal="right")
 
-        ws.cell(row=r_bot + 3, column=base_c + 4, value="残り営業日数13日（3/16日程消化19%）").font = Font(name="Yu Gothic", size=8)
-        for rr in range(r_bot, r_bot + 4):
+        for rr in range(r_bot, r_bot + 3):
             for cc in range(base_c + 4, base_c + 8):
                 ws.cell(row=rr, column=cc).border = bd
 
@@ -1046,25 +967,6 @@ customer_master_df = load_customer_master(cust_path, cust_mtime)
 
 hanko_bytes, hanko_file_path = get_hanko_bytes()
 
-col_status, col_refresh = st.columns([4, 1.2])
-with col_refresh:
-    if st.button("🔄 データを最新に再読み込み"):
-        st.cache_data.clear()
-        if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
-        with st.spinner("最新データを高速読み込み中..."):
-            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
-            member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
-            jan_master_dict, jan_title_dict, jan_std_price_dict = load_jan_master_v2(jan_path, jan_mtime)
-            customer_master_df = load_customer_master(cust_path, cust_mtime)
-            hanko_bytes, hanko_file_path = get_hanko_bytes()
-        st.success("最新データに更新しました！")
-        time.sleep(0.5)
-        st.rerun()
-
-if df.empty:
-    st.error(f"売上CSVデータが見つかりませんでした。`{BASE_SHARE}` フォルダを確認してください。")
-    st.stop()
-
 valid_ym = sorted([x for x in df["年月"].dropna().unique() if x and str(x).strip() != ""])
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
 desc_valid_ym = sorted(valid_ym, reverse=True)
@@ -1077,23 +979,26 @@ curr_y = int(latest_ym[:4]) if len(latest_ym) >= 4 else 2026
 curr_m = int(latest_ym[5:7]) if len(latest_ym) >= 7 else 1
 fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
+# 🔴 ご指定通りの表示モード並び順
+VIEW_MODES = [
+    '🏢 得意先別ランキング',
+    '📦 商品別売上ランキング',
+    '🧮 簡易見積＆利益シミュレーター',
+    '📊 営業会議用：上位社 売上比較シート',
+    '📑 営業会議用：上位客先別売上実績',
+    '🏷️ ランク価格マスタ一覧',
+    '👤 担当者別 売上＆目標達成分析',
+    '💤 滞留・未販売商品分析（売れてない商品）',
+    '✨ 新商品売上分析（直近1年）',
+    '📈 商品別 前年実績比較',
+    '📊 得意先別 前年実績比較',
+    '🧩 得意先×商品 マトリクス',
+    '📋 明細一覧'
+]
+
 col_top1, col_top2 = st.columns([1.6, 2])
 with col_top1:
-    view_type = st.selectbox("表示モード", [
-        '🧮 簡易見積＆利益シミュレーター',
-        '🏢 得意先別ランキング',
-        '📦 商品別売上ランキング',
-        '📊 営業会議用：上位社 売上比較シート',
-        '📑 営業会議用：上位客先別売上実績',
-        '🏷️ ランク価格マスタ一覧',
-        '👤 担当者別 売上＆目標達成分析',
-        '💤 滞留・未販売商品分析（売れてない商品）',
-        '✨ 新商品売上分析（直近1年）',
-        '📈 商品別 前年実績比較',
-        '📊 得意先別 前年実績比較',
-        '🧩 得意先×商品 マトリクス',
-        '📋 明細一覧'
-    ])
+    view_type = st.selectbox("表示モード", VIEW_MODES)
 with col_top2:
     if view_type == '🧮 簡易見積＆利益シミュレーター':
         st.write("")
@@ -1528,6 +1433,12 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 "cust_post": q_cust_post,
                 "cust_pref": cust_pref_val,
                 "cust_addr": q_cust_addr,
+                "cust_addr1": cust_addr1_val,
+                "cust_addr2": cust_addr2_val,
+                "cust_tel": ship_cust_tel,
+                "cust_fax": cust_fax_val,
+                "cust_email": cust_email_val,
+                "rank_name": cust_rank_label,
                 "ship_comp": ship_cust_comp,
                 "ship_person": ship_cust_person,
                 "ship_sei": cust_sei_val,
@@ -1939,7 +1850,6 @@ if view_type == '🏷️ ランク価格マスタ一覧':
 
     r_col1, r_col2, r_col3 = st.columns([1.5, 1.5, 1.0])
     with r_col1:
-        # 指定された12種類順でプルダウン表示
         avail_ranks = [rk for rk in ALLOWED_EXACT_RANKS if rk in work_rk["ランク名"].values]
         sel_rank = st.selectbox("🎯 ランクで絞り込み", ["（すべて）"] + avail_ranks)
     with r_col2:
@@ -2144,7 +2054,7 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     total_sales = int(filtered["金額"].sum()) if not filtered.empty else 0
 
 # ========================================================
-# ★ 🏢 得意先別ランキング（行クリックでTOP10詳細POP完全復元）
+# ★ 🏢 得意先別ランキング（行クリックでTOP10詳細POP完全維持）
 # ========================================================
 if view_type == '🏢 得意先別ランキング':
     group_cols = [c for c in ["得意先名", "担当者"] if c in filtered.columns]
@@ -2399,32 +2309,82 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
     cur_cust_sales = cur_m_df.groupby("得意先名")["金額"].sum() if not cur_m_df.empty else pd.Series()
     top_custs = cur_cust_sales.nlargest(compare_cust_count).index.tolist() if not cur_cust_sales.empty else []
 
+    all_saved_meeting_dict = load_saved_meeting_sheet_data()
+    month_saved_dict = all_saved_meeting_dict.get(target_meeting_ym, {})
+
     cards_data = []
     for cust in top_custs:
         cid_s = cust_id_lookup.get(cust, "")
         cd = build_meeting_comparison_card_data(
             cust, cid_s, cur_m_df, ly_m_df, next_m_df, prev_fy_df,
-            tgt_y, tgt_m, next_y, next_m, f_year, max_date
+            tgt_y, tgt_m, next_y, next_m, f_year, month_saved_dict
         )
-        act_k = f"act_{target_meeting_ym}_{cust}"
-        pln_k = f"pln_{target_meeting_ym}_{cust}"
-        cd["activity_text"] = st.session_state.get(act_k, "")
-        cd["plan_text"] = st.session_state.get(pln_k, "")
         cards_data.append(cd)
 
-    with st.expander("📝 各社の「主な営業活動」「今後の予定」コメントを入力・編集する（帳票＆Excelに反映）"):
+    # 🔴 ご要望：青枠部分（営業活動・今後の予定・翌月売上進捗5行＋その他）の手動入力＆永続保存枠[cite: 5]
+    with st.expander("📝 各社の「主な営業活動」「今後の予定」「売上進捗手動入力」を編集・保存する（帳票＆Excelに完全反映）", expanded=False):
+        st.caption("※手動で入力・修正した内容は「💾 入力内容を保存する」ボタンを押すと永続保存され、次回起動時やExcel出力にも反映されます。")
         for c_item in cards_data:
             cn = c_item["cust_name"]
+            st.markdown(f"##### 🏢 **{cn}**")
             ca1, ca2 = st.columns(2)
             with ca1:
-                st.text_area(f"🏢 {cn}：この1ヶ月の主な営業活動", key=f"act_{target_meeting_ym}_{cn}", height=68)
+                cur_act = st.text_area(f"この1ヶ月の主な営業活動", value=c_item.get("activity_text", ""), key=f"inp_act_{target_meeting_ym}_{cn}", height=70)
             with ca2:
-                st.text_area(f"🏢 {cn}：【今後の予定】", key=f"pln_{target_meeting_ym}_{cn}", height=68)
+                cur_pln = st.text_area(f"【今後の予定】", value=c_item.get("plan_text", ""), key=f"inp_pln_{target_meeting_ym}_{cn}", height=70)
 
-    for c_item in cards_data:
-        cn = c_item["cust_name"]
-        c_item["activity_text"] = st.session_state.get(f"act_{target_meeting_ym}_{cn}", "")
-        c_item["plan_text"] = st.session_state.get(f"pln_{target_meeting_ym}_{cn}", "")
+            # 翌月進捗の手動上書き用エディタ[cite: 5]
+            st.caption("▼ 翌月売上進捗の上書き・手動修正（未入力の場合は売上データから自動集計されます）")
+            cur_next_items = c_item.get("next_rows", [])
+            edit_items_df = pd.DataFrame(cur_next_items)
+            for c_col in ["sku", "price", "qty", "amt"]:
+                if c_col not in edit_items_df.columns:
+                    edit_items_df[c_col] = ""
+            edit_res = st.data_editor(
+                edit_items_df[["sku", "price", "qty", "amt"]],
+                column_config={
+                    "sku": st.column_config.TextColumn("品番"),
+                    "price": st.column_config.NumberColumn("単価", format="¥%d"),
+                    "qty": st.column_config.NumberColumn("数量", format="%d"),
+                    "amt": st.column_config.NumberColumn("金額", format="¥%d")
+                },
+                use_container_width=True,
+                hide_index=True,
+                key=f"next_edit_tbl_{target_meeting_ym}_{cn}"
+            )
+            c_oth_val = st.number_input(f"「その他」金額", value=int(c_item.get("next_other", 0)), step=1000, key=f"inp_oth_{target_meeting_ym}_{cn}")
+            st.markdown("---")
+
+        if st.button("💾 この月度の入力内容を保存する", type="primary", use_container_width=True):
+            if target_meeting_ym not in all_saved_meeting_dict:
+                all_saved_meeting_dict[target_meeting_ym] = {}
+            for c_item in cards_data:
+                cn = c_item["cust_name"]
+                t_key = f"next_edit_tbl_{target_meeting_ym}_{cn}"
+                o_key = f"inp_oth_{target_meeting_ym}_{cn}"
+                act_k = f"inp_act_{target_meeting_ym}_{cn}"
+                pln_k = f"inp_pln_{target_meeting_ym}_{cn}"
+
+                t_data = st.session_state.get(t_key, pd.DataFrame())
+                rows_to_save = []
+                if isinstance(t_data, pd.DataFrame) and not t_data.empty:
+                    for _, r in t_data.iterrows():
+                        rows_to_save.append({
+                            "sku": str(r.get("sku", "")).strip(),
+                            "price": int(clean_num(r.get("price", 0))),
+                            "qty": int(clean_num(r.get("qty", 0))),
+                            "amt": int(clean_num(r.get("amt", 0)))
+                        })
+                all_saved_meeting_dict[target_meeting_ym][cn] = {
+                    "activity": st.session_state.get(act_k, ""),
+                    "plan": st.session_state.get(pln_k, ""),
+                    "custom_next_rows": rows_to_save,
+                    "custom_next_other": int(st.session_state.get(o_key, 0))
+                }
+            save_meeting_sheet_data(all_saved_meeting_dict)
+            st.success("✅ 入力内容を保存しました！次回もこの内容が自動で読み込まれます。")
+            time.sleep(0.5)
+            st.rerun()
 
     st.download_button(
         label=f"📥 上位社 売上比較シート（{target_meeting_ym}）をExcel保存",
