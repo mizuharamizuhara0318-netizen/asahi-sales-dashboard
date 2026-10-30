@@ -15,6 +15,7 @@ import plotly.express as px
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.drawing.image import Image as OpenpyxlImage
+from openpyxl.utils import get_column_letter
 
 warnings.filterwarnings("ignore")
 
@@ -121,7 +122,7 @@ ORDER_CSV_COLUMNS = [
 EXCLUDE_RANK_PATTERN = re.compile(r"下代変更前|オ.*プン|ｵ.*ﾌﾟﾝ|open|サンプル|ｻﾝﾌﾟﾙ|99,?999", re.IGNORECASE)
 
 # ========================================================
-# ★ 共通ユーティリティ・Excel出力関数（最上部に集約配置）
+# ★ 共通ユーティリティ・Excel出力関数
 # ========================================================
 def generate_excel_bytes(data_df, title_str):
     output = io.BytesIO()
@@ -164,11 +165,15 @@ def clean_product_name(val):
     return re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]', '', val).strip()
 
 def find_file_multidir(filename_pattern):
-    search_dirs = [OTHER_DATA_DIR, BASE_SHARE, BASE_DIR]
+    # GitHubリポジトリ直下(BASE_DIR)やサブフォルダも確実に探索
+    search_dirs = [BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
     for d in search_dirs:
         if os.path.exists(d):
             fl = glob.glob(os.path.join(d, filename_pattern))
-            if fl: return fl[0], os.path.getmtime(fl[0])
+            if not fl:
+                fl = glob.glob(os.path.join(d, "**", filename_pattern), recursive=True)
+            if fl:
+                return fl[0], os.path.getmtime(fl[0])
     return None, 0
 
 def get_cost_master_file_info():
@@ -224,6 +229,30 @@ def load_member_price_master_v2(file_path, file_mtime):
         except Exception: pass
     return cust_sku_map, default_min_map
 
+def get_rank_price_file_info():
+    for pat in ["*ランク価格*.xls*", "*ランク価格*.csv", "*ランク*.xls*", "*ランク*.csv"]:
+        p, mt = find_file_multidir(pat)
+        if p:
+            return p, mt
+    return None, 0
+
+@st.cache_data(show_spinner=False)
+def load_rank_price_master(file_path, file_mtime):
+    if not file_path or not os.path.exists(file_path):
+        return pd.DataFrame()
+    try:
+        if file_path.lower().endswith(".csv"):
+            for enc in ["utf-8-sig", "cp932", "shift_jis", "utf-8"]:
+                try:
+                    return pd.read_csv(file_path, encoding=enc, low_memory=False)
+                except Exception:
+                    continue
+        else:
+            return pd.read_excel(file_path)
+    except Exception:
+        pass
+    return pd.DataFrame()
+
 def get_jan_file_info():
     return find_file_multidir("*JAN*.xls*")
 
@@ -268,7 +297,7 @@ def load_customer_master(file_path, file_mtime):
     return pd.DataFrame()
 
 def get_hanko_bytes():
-    search_dirs = [OTHER_DATA_DIR, BASE_SHARE, BASE_DIR]
+    search_dirs = [BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
     patterns = ["*hanko*.png", "*05171642*.png", "*印鑑*.png", "input_file_5.png"]
     for d in search_dirs:
         if os.path.exists(d):
@@ -673,7 +702,7 @@ def show_customer_top10_dialog(cust_name, sub_df, period_str):
     render_universal_table(show_p_df)
 
 # ========================================================
-# ★ 営業会議用：上位社 売上比較シート（添付画像完全準拠の帳票生成）
+# ★ 営業会議用：上位社 売上比較シート（HTMLインデント除去＆Excel列幅・行間隔完全調整）
 # ========================================================
 def _extract_top5_and_other(sub_df):
     if sub_df is None or sub_df.empty:
@@ -722,7 +751,7 @@ def build_meeting_comparison_card_data(cust, cid, cur_m, ly_m, next_m, prev_fy, 
         "ly_label": f"{tgt_y - 1}年{tgt_m}月実績",
         "cur_label": f"{tgt_y}年{tgt_m}月実績",
         "next_label": f"{next_y}年{next_m_val}月売上進捗",
-        "prev_fy_label": f"{next_y - 1}年{next_m_val}度実績",
+        "prev_fy_label": f"{next_y - 1}年{next_m_val}月度実績",
         "as_of_label": as_of_str,
         "ly_rows": ly_rows, "ly_other": ly_other, "ly_total": ly_total,
         "cur_rows": cur_rows, "cur_other": cur_other, "cur_total": cur_total,
@@ -740,131 +769,134 @@ def render_meeting_card_html(card):
         if v == "" or v is None: return "&nbsp;"
         return f"{int(v):,}" if isinstance(v, (int, float)) else str(v)
 
-    top_rows_html = ""
+    top_rows_list = []
     for i in range(5):
         lr = card["ly_rows"][i]
         cr = card["cur_rows"][i]
-        top_rows_html += f"""
-        <tr>
-            <td style="border:1px solid #333; padding:2px 4px; text-align:center; font-size:11px;">{fmt_v(lr['sku'])}</td>
-            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(lr['price'])}</td>
-            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(lr['qty'])}</td>
-            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(lr['amt'])}</td>
-            <td style="border:1px solid #333; border-left:2px solid #111; padding:2px 4px; text-align:center; font-size:11px;">{fmt_v(cr['sku'])}</td>
-            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(cr['price'])}</td>
-            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(cr['qty'])}</td>
-            <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(cr['amt'])}</td>
-        </tr>
-        """
+        top_rows_list.append(
+            f"<tr>"
+            f"<td style='border:1px solid #333; padding:2px 4px; text-align:center; font-size:11px;'>{fmt_v(lr['sku'])}</td>"
+            f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(lr['price'])}</td>"
+            f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(lr['qty'])}</td>"
+            f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(lr['amt'])}</td>"
+            f"<td style='border:1px solid #333; border-left:2px solid #111; padding:2px 4px; text-align:center; font-size:11px;'>{fmt_v(cr['sku'])}</td>"
+            f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(cr['price'])}</td>"
+            f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(cr['qty'])}</td>"
+            f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(cr['amt'])}</td>"
+            f"</tr>"
+        )
+    top_rows_html = "".join(top_rows_list)
 
     act_html = str(card.get("activity_text", "")).replace("\n", "<br>") if card.get("activity_text") else "&nbsp;"
     plan_html = str(card.get("plan_text", "")).replace("\n", "<br>") if card.get("plan_text") else "&nbsp;"
 
-    next_rows_html = ""
+    next_rows_list = []
     for i in range(5):
         nr = card["next_rows"][i]
         if i == 0:
-            next_rows_html += f"""
-            <tr>
-                <td style="border:1px solid #333; padding:2px 4px; text-align:center; font-size:11px;">{fmt_v(nr['sku'])}</td>
-                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['price'])}</td>
-                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['qty'])}</td>
-                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['amt'])}</td>
-                <td colspan="4" rowspan="7" style="border:1px solid #333; border-left:2px solid #111; padding:4px 6px; vertical-align:top; font-size:11px; text-align:left;">{act_html}</td>
-            </tr>
-            """
+            next_rows_list.append(
+                f"<tr>"
+                f"<td style='border:1px solid #333; padding:2px 4px; text-align:center; font-size:11px;'>{fmt_v(nr['sku'])}</td>"
+                f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(nr['price'])}</td>"
+                f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(nr['qty'])}</td>"
+                f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(nr['amt'])}</td>"
+                f"<td colspan='4' rowspan='7' style='border:1px solid #333; border-left:2px solid #111; padding:4px 6px; vertical-align:top; font-size:11px; text-align:left;'>{act_html}</td>"
+                f"</tr>"
+            )
         else:
-            next_rows_html += f"""
-            <tr>
-                <td style="border:1px solid #333; padding:2px 4px; text-align:center; font-size:11px;">{fmt_v(nr['sku'])}</td>
-                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['price'])}</td>
-                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['qty'])}</td>
-                <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{fmt_v(nr['amt'])}</td>
-            </tr>
-            """
+            next_rows_list.append(
+                f"<tr>"
+                f"<td style='border:1px solid #333; padding:2px 4px; text-align:center; font-size:11px;'>{fmt_v(nr['sku'])}</td>"
+                f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(nr['price'])}</td>"
+                f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(nr['qty'])}</td>"
+                f"<td style='border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;'>{fmt_v(nr['amt'])}</td>"
+                f"</tr>"
+            )
+    next_rows_html = "".join(next_rows_list)
 
-    return f"""
-    <div style="border:1px solid #94a3b8; padding:10px; background:#ffffff; margin-bottom:14px; font-family:'Yu Gothic','Meiryo',sans-serif; color:#111;">
-        <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
-            <span style="font-size:15px; font-weight:bold; text-decoration:underline;">{card['cust_name']}</span>
-            <span style="font-size:12px; color:#333; margin-right:35%;">{card['cust_id']}</span>
-        </div>
-        <table style="width:100%; border-collapse:collapse; table-layout:fixed; margin-bottom:2px;">
-            <thead>
-                <tr style="background:#f8fafc;">
-                    <th colspan="4" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">{card['ly_label']}</th>
-                    <th colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">{card['cur_label']}</th>
-                </tr>
-                <tr style="background:#f1f5f9;">
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:14%;">品番</th>
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">単価</th>
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">数量</th>
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:16%;">金額</th>
-                    <th style="border:1px solid #333; border-left:2px solid #111; padding:2px; font-size:11px; width:14%;">品番</th>
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">単価</th>
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">数量</th>
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:16%;">金額</th>
-                </tr>
-            </thead>
-            <tbody>
-                {top_rows_html}
-                <tr>
-                    <td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">その他</td>
-                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['ly_other']:,}</td>
-                    <td colspan="3" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">その他</td>
-                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['cur_other']:,}</td>
-                </tr>
-                <tr style="font-weight:bold; background:#f8fafc;">
-                    <td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">合計</td>
-                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['ly_total']:,}</td>
-                    <td colspan="3" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">合計</td>
-                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['cur_total']:,}</td>
-                </tr>
-            </tbody>
-        </table>
-        <div style="text-align:right; font-size:11px; font-weight:bold; margin-bottom:8px; padding-right:4px;">
-            昨対比 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {card['yoy_rate']}
-        </div>
-        <table style="width:100%; border-collapse:collapse; table-layout:fixed;">
-            <thead>
-                <tr style="background:#f8fafc;">
-                    <th colspan="4" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">{card['next_label']}</th>
-                    <th colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">この1ヶ月の主な営業活動</th>
-                </tr>
-                <tr style="background:#f1f5f9;">
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:14%;">品番</th>
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">単価</th>
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">数量</th>
-                    <th style="border:1px solid #333; padding:2px; font-size:11px; width:16%;">金額</th>
-                    <th colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:0; height:2px;"></th>
-                </tr>
-            </thead>
-            <tbody>
-                {next_rows_html}
-                <tr>
-                    <td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">その他</td>
-                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['next_other']:,}</td>
-                </tr>
-                <tr style="font-weight:bold; background:#f8fafc;">
-                    <td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">合計</td>
-                    <td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['next_total']:,}</td>
-                </tr>
-                <tr>
-                    <td colspan="4" style="border:1px solid #333; padding:4px 6px; vertical-align:top; height:68px; font-size:11px;">
-                        <div style="color:#64748b; font-size:10px;">【今後の予定】</div>
-                        <div>{plan_html}</div>
-                    </td>
-                    <td colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:4px 6px; vertical-align:top; font-size:11px;">
-                        <div style="display:flex; justify-content:space-between;"><span>{card['prev_fy_label']}</span><span>{card['prev_fy_total']:,}</span></div>
-                        <div style="display:flex; justify-content:space-between;"><span>{card['as_of_label']}</span><span>{card['next_total']:,}</span></div>
-                        <div style="display:flex; justify-content:space-between; font-weight:bold;"><span>昨対進捗</span><span>{card['next_yoy_rate']}</span></div>
-                        <div style="font-size:10px; color:#475569; margin-top:2px;">残り営業日数13日（3/16日程消化19%）</div>
-                    </td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-    """
+    raw_html = f"""
+<div style="border:1px solid #94a3b8; padding:10px; background:#ffffff; margin-bottom:14px; font-family:'Yu Gothic','Meiryo',sans-serif; color:#111;">
+<div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
+<span style="font-size:15px; font-weight:bold; text-decoration:underline;">{card['cust_name']}</span>
+<span style="font-size:12px; color:#333; margin-right:35%;">{card['cust_id']}</span>
+</div>
+<table style="width:100%; border-collapse:collapse; table-layout:fixed; margin-bottom:2px;">
+<thead>
+<tr style="background:#f8fafc;">
+<th colspan="4" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">{card['ly_label']}</th>
+<th colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">{card['cur_label']}</th>
+</tr>
+<tr style="background:#f1f5f9;">
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:14%;">品番</th>
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">単価</th>
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">数量</th>
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:16%;">金額</th>
+<th style="border:1px solid #333; border-left:2px solid #111; padding:2px; font-size:11px; width:14%;">品番</th>
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">単価</th>
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">数量</th>
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:16%;">金額</th>
+</tr>
+</thead>
+<tbody>
+{top_rows_html}
+<tr>
+<td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">その他</td>
+<td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['ly_other']:,}</td>
+<td colspan="3" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">その他</td>
+<td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['cur_other']:,}</td>
+</tr>
+<tr style="font-weight:bold; background:#f8fafc;">
+<td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">合計</td>
+<td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['ly_total']:,}</td>
+<td colspan="3" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">合計</td>
+<td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['cur_total']:,}</td>
+</tr>
+</tbody>
+</table>
+<div style="text-align:right; font-size:11px; font-weight:bold; margin-bottom:8px; padding-right:4px;">
+昨対比 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; {card['yoy_rate']}
+</div>
+<table style="width:100%; border-collapse:collapse; table-layout:fixed;">
+<thead>
+<tr style="background:#f8fafc;">
+<th colspan="4" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">{card['next_label']}</th>
+<th colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:2px 5px; text-align:left; font-size:11px;">この1ヶ月の主な営業活動</th>
+</tr>
+<tr style="background:#f1f5f9;">
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:14%;">品番</th>
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">単価</th>
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:10%;">数量</th>
+<th style="border:1px solid #333; padding:2px; font-size:11px; width:16%;">金額</th>
+<th colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:0; height:2px;"></th>
+</tr>
+</thead>
+<tbody>
+{next_rows_html}
+<tr>
+<td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">その他</td>
+<td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['next_other']:,}</td>
+</tr>
+<tr style="font-weight:bold; background:#f8fafc;">
+<td colspan="3" style="border:1px solid #333; padding:2px 5px; text-align:left; font-size:11px;">合計</td>
+<td style="border:1px solid #333; padding:2px 4px; text-align:right; font-size:11px;">{card['next_total']:,}</td>
+</tr>
+<tr>
+<td colspan="4" style="border:1px solid #333; padding:4px 6px; vertical-align:top; height:68px; font-size:11px;">
+<div style="color:#64748b; font-size:10px;">【今後の予定】</div>
+<div>{plan_html}</div>
+</td>
+<td colspan="4" style="border:1px solid #333; border-left:2px solid #111; padding:4px 6px; vertical-align:top; font-size:11px;">
+<div style="display:flex; justify-content:space-between;"><span>{card['prev_fy_label']}</span><span>{card['prev_fy_total']:,}</span></div>
+<div style="display:flex; justify-content:space-between;"><span>{card['as_of_label']}</span><span>{card['next_total']:,}</span></div>
+<div style="display:flex; justify-content:space-between; font-weight:bold;"><span>昨対進捗</span><span>{card['next_yoy_rate']}</span></div>
+<div style="font-size:10px; color:#475569; margin-top:2px;">残り営業日数13日（3/16日程消化19%）</div>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+"""
+    return "\n".join(line.strip() for line in raw_html.splitlines() if line.strip())
 
 def generate_meeting_comparison_excel(cards_data, tgt_ym):
     wb = openpyxl.Workbook()
@@ -876,10 +908,20 @@ def generate_meeting_comparison_excel(cards_data, tgt_ym):
     bd = Border(left=thin, right=thin, top=thin, bottom=thin)
     fill_h = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
 
+    # 列幅を事前に広く設定し、`########` の発生を完全に防止
+    col_widths = {
+        1: 15, 2: 9, 3: 9, 4: 14, 5: 15, 6: 9, 7: 9, 8: 14,
+        9: 4,
+        10: 15, 11: 9, 12: 9, 13: 14, 14: 15, 15: 9, 16: 9, 17: 14
+    }
+    for col_idx, width_val in col_widths.items():
+        ws.column_dimensions[get_column_letter(col_idx)].width = width_val
+
     for idx, c in enumerate(cards_data):
         grid_r = idx // 2
         grid_c = idx % 2
-        base_r = 2 + grid_r * 21
+        # 1カードあたり26行間隔を確保し、上下のカードの重なりを完全防止
+        base_r = 2 + grid_r * 26
         base_c = 1 + grid_c * 9
 
         ws.cell(row=base_r, column=base_c, value=c["cust_name"]).font = Font(name="Yu Gothic", size=11, bold=True, underline="single")
@@ -893,6 +935,7 @@ def generate_meeting_comparison_excel(cards_data, tgt_ym):
         for h_i, h_t in enumerate(headers):
             cell = ws.cell(row=r_top + 1, column=base_c + h_i, value=h_t)
             cell.font = font_b; cell.border = bd; cell.fill = fill_h
+            cell.alignment = Alignment(horizontal="center")
 
         for i in range(5):
             curr_row = r_top + 2 + i
@@ -907,19 +950,24 @@ def generate_meeting_comparison_excel(cards_data, tgt_ym):
         r_oth = r_top + 7
         ws.cell(row=r_oth, column=base_c, value="その他").font = font_m
         ws.cell(row=r_oth, column=base_c + 3, value=c["ly_other"]).number_format = '#,##0'
+        ws.cell(row=r_oth, column=base_c + 3).font = font_m
         ws.cell(row=r_oth, column=base_c + 4, value="その他").font = font_m
         ws.cell(row=r_oth, column=base_c + 7, value=c["cur_other"]).number_format = '#,##0'
+        ws.cell(row=r_oth, column=base_c + 7).font = font_m
         for h_i in range(8): ws.cell(row=r_oth, column=base_c + h_i).border = bd
 
         r_tot = r_top + 8
         ws.cell(row=r_tot, column=base_c, value="合計").font = font_b
         ws.cell(row=r_tot, column=base_c + 3, value=c["ly_total"]).number_format = '#,##0'
+        ws.cell(row=r_tot, column=base_c + 3).font = font_b
         ws.cell(row=r_tot, column=base_c + 4, value="合計").font = font_b
         ws.cell(row=r_tot, column=base_c + 7, value=c["cur_total"]).number_format = '#,##0'
+        ws.cell(row=r_tot, column=base_c + 7).font = font_b
         for h_i in range(8): ws.cell(row=r_tot, column=base_c + h_i).border = bd
 
         ws.cell(row=r_tot + 1, column=base_c + 5, value="昨対比").font = font_b
-        ws.cell(row=r_tot + 1, column=base_c + 7, value=c["yoy_rate"]).font = font_b
+        c_yoy = ws.cell(row=r_tot + 1, column=base_c + 7, value=c["yoy_rate"])
+        c_yoy.font = font_b; c_yoy.alignment = Alignment(horizontal="right")
 
         r_nx = r_tot + 2
         ws.cell(row=r_nx, column=base_c, value=c["next_label"]).font = font_b
@@ -927,6 +975,7 @@ def generate_meeting_comparison_excel(cards_data, tgt_ym):
         for h_i, h_t in enumerate(["品番", "単価", "数量", "金額"]):
             cell = ws.cell(row=r_nx + 1, column=base_c + h_i, value=h_t)
             cell.font = font_b; cell.border = bd; cell.fill = fill_h
+            cell.alignment = Alignment(horizontal="center")
 
         for i in range(5):
             curr_row = r_nx + 2 + i
@@ -937,26 +986,49 @@ def generate_meeting_comparison_excel(cards_data, tgt_ym):
                 if v_i in [1, 2, 3] and isinstance(v_val, (int, float)):
                     cell.number_format = '#,##0'
 
-        ws.cell(row=r_nx + 2, column=base_c + 4, value=c.get("activity_text", "")).font = font_m
+        ws.merge_cells(start_row=r_nx + 1, start_column=base_c + 4, end_row=r_nx + 8, end_column=base_c + 7)
+        act_c = ws.cell(row=r_nx + 1, column=base_c + 4, value=c.get("activity_text", ""))
+        act_c.font = font_m; act_c.alignment = Alignment(vertical="top", wrap_text=True)
+        for rr in range(r_nx + 1, r_nx + 9):
+            for cc in range(base_c + 4, base_c + 8):
+                ws.cell(row=rr, column=cc).border = bd
 
         r_nx_oth = r_nx + 7
         ws.cell(row=r_nx_oth, column=base_c, value="その他").font = font_m
         ws.cell(row=r_nx_oth, column=base_c + 3, value=c["next_other"]).number_format = '#,##0'
+        ws.cell(row=r_nx_oth, column=base_c + 3).font = font_m
         for h_i in range(4): ws.cell(row=r_nx_oth, column=base_c + h_i).border = bd
 
         r_nx_tot = r_nx + 8
         ws.cell(row=r_nx_tot, column=base_c, value="合計").font = font_b
         ws.cell(row=r_nx_tot, column=base_c + 3, value=c["next_total"]).number_format = '#,##0'
+        ws.cell(row=r_nx_tot, column=base_c + 3).font = font_b
         for h_i in range(4): ws.cell(row=r_nx_tot, column=base_c + h_i).border = bd
 
         r_bot = r_nx + 9
-        ws.cell(row=r_bot, column=base_c, value=f"【今後の予定】 {c.get('plan_text', '')}").font = font_m
+        ws.merge_cells(start_row=r_bot, start_column=base_c, end_row=r_bot + 3, end_column=base_c + 3)
+        pln_c = ws.cell(row=r_bot, column=base_c, value=f"【今後の予定】\n{c.get('plan_text', '')}")
+        pln_c.font = font_m; pln_c.alignment = Alignment(vertical="top", wrap_text=True)
+        for rr in range(r_bot, r_bot + 4):
+            for cc in range(base_c, base_c + 4):
+                ws.cell(row=rr, column=cc).border = bd
+
         ws.cell(row=r_bot, column=base_c + 4, value=c["prev_fy_label"]).font = font_m
-        ws.cell(row=r_bot, column=base_c + 7, value=c["prev_fy_total"]).number_format = '#,##0'
+        c_pfy = ws.cell(row=r_bot, column=base_c + 7, value=c["prev_fy_total"])
+        c_pfy.number_format = '#,##0'; c_pfy.font = font_m
+
         ws.cell(row=r_bot + 1, column=base_c + 4, value=c["as_of_label"]).font = font_m
-        ws.cell(row=r_bot + 1, column=base_c + 7, value=c["next_total"]).number_format = '#,##0'
+        c_ nxt = ws.cell(row=r_bot + 1, column=base_c + 7, value=c["next_total"])
+        c_nxt.number_format = '#,##0'; c_nxt.font = font_m
+
         ws.cell(row=r_bot + 2, column=base_c + 4, value="昨対進捗").font = font_b
-        ws.cell(row=r_bot + 2, column=base_c + 7, value=c["next_yoy_rate"]).font = font_b
+        c_nyoy = ws.cell(row=r_bot + 2, column=base_c + 7, value=c["next_yoy_rate"])
+        c_nyoy.font = font_b; c_nyoy.alignment = Alignment(horizontal="right")
+
+        ws.cell(row=r_bot + 3, column=base_c + 4, value="残り営業日数13日（3/16日程消化19%）").font = Font(name="Yu Gothic", size=8)
+        for rr in range(r_bot, r_bot + 4):
+            for cc in range(base_c + 4, base_c + 8):
+                ws.cell(row=rr, column=cc).border = bd
 
     out = io.BytesIO()
     wb.save(out)
@@ -969,7 +1041,7 @@ def generate_meeting_top_cust_excel(res_df, title_str):
     return out.getvalue()
 
 # ========================================================
-# ★ データロード＆基本日付変数初期化（最上流で一括確定）
+# ★ データロード＆基本日付変数初期化
 # ========================================================
 df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=False)
 
@@ -1043,7 +1115,7 @@ with col_top2:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
 
 # ========================================================
-# ★ 🧮 簡易見積＆利益シミュレーター（担当者選択・親SKU除外・Excel/CSV出力完全保持）
+# ★ 🧮 簡易見積＆利益シミュレーター（完全維持）
 # ========================================================
 if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
@@ -1835,48 +1907,102 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     st.stop()
 
 # ========================================================
-# ★ 🏷️ ランク価格マスタ一覧
+# ★ 🏷️ ランク価格マスタ一覧（GitHub直下＆加盟店価格フォールバック対応）
 # ========================================================
 if view_type == '🏷️ ランク価格マスタ一覧':
-    raw_rank_path, raw_rank_mtime = find_file_multidir("*ランク価格*.xls*")
-    raw_rank_df = pd.read_excel(raw_rank_path) if raw_rank_path and os.path.exists(raw_rank_path) else pd.DataFrame()
+    raw_rank_path, raw_rank_mtime = get_rank_price_file_info()
+    raw_rank_df = load_rank_price_master(raw_rank_path, raw_rank_mtime)
+
+    # もし専用ファイルが見つからない場合でも、加盟店価格.xlsx があればそこから自動構築
+    if raw_rank_df.empty and member_p_path and os.path.exists(member_p_path):
+        raw_rank_df = load_rank_price_master(member_p_path, member_p_mtime)
+
     if raw_rank_df.empty:
-        st.error(f"『ランク価格.xlsx』が見つかりませんでした。`{OTHER_DATA_DIR}` または `{BASE_SHARE}` フォルダを確認してください。")
+        st.error("ランク価格データが見つかりませんでした。GitHubまたは共有フォルダに『ランク価格.xlsx』等を配置し、「🔄 データを最新に再読み込み」を押してください。")
         st.stop()
+
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
+    for k_t, v_t in jan_title_dict.items():
+        if str(k_t).strip() not in code_to_name_map:
+            code_to_name_map[str(k_t).strip()] = str(v_t).strip()
+
+    # 列名の柔軟な自動判別
+    cols_str = [str(c).strip() for c in raw_rank_df.columns]
+    rank_col = next((c for c in raw_rank_df.columns if any(k in str(c) for k in ["ランク名", "ランク", "会社名", "取引先", "グループ"])), None)
+    sku_col = next((c for c in raw_rank_df.columns if any(k in str(c) for k in ["商品番号", "商品コード", "商品管理番号", "SKU", "品番"])), raw_rank_df.columns[0])
+    lot_col = next((c for c in raw_rank_df.columns if "ロット数" in str(c) or "入数" in str(c)), None)
+    price_col = next((c for c in raw_rank_df.columns if any(k in str(c) for k in ["ロット単価", "単価", "下代", "価格"])), None)
+    cost_col = next((c for c in raw_rank_df.columns if "原価" in str(c)), None)
+
+    work_rk = pd.DataFrame()
+    work_rk["商品番号"] = raw_rank_df[sku_col].astype(str).str.strip()
+    work_rk = work_rk[~work_rk["商品番号"].isin(["", "nan", "None"])].copy()
+
+    if "商品名" in raw_rank_df.columns:
+        work_rk["商品名"] = raw_rank_df["商品名"].astype(str).str.strip()
+    else:
+        work_rk["商品名"] = work_rk["商品番号"].map(lambda c: code_to_name_map.get(c, jan_title_dict.get(c, "")))
+
+    if rank_col is not None:
+        work_rk["ランク名"] = raw_rank_df[rank_col].astype(str).str.strip()
+    else:
+        work_rk["ランク名"] = "標準ランク"
+
+    work_rk["ロット数"] = raw_rank_df[lot_col].apply(clean_num).astype(int) if lot_col is not None else 1
+    work_rk["ロット単価"] = raw_rank_df[price_col].apply(clean_num).astype(int) if price_col is not None else 0
+    work_rk["原価"] = raw_rank_df[cost_col].apply(clean_num).astype(int) if cost_col is not None else work_rk["商品番号"].map(lambda c: int(cost_master_dict.get(c, 0)))
+
+    work_rk = work_rk[~work_rk["ランク名"].map(is_invalid_rank_name)].copy()
+    work_rk = work_rk[(work_rk["ロット単価"] > 0) & (work_rk["ロット単価"] < 90000)].copy()
+
     r_col1, r_col2, r_col3 = st.columns([1.5, 1.5, 1.0])
     with r_col1:
-        unique_ranks = sorted([str(x).strip() for x in raw_rank_df["ランク名"].dropna().unique() if not is_invalid_rank_name(x)])
-        sel_rank = st.selectbox("🎯 ランクで絞り込み", ["（すべて）"] + unique_ranks)
+        unique_ranks = sorted([str(x).strip() for x in work_rk["ランク名"].dropna().unique() if str(x).strip() != ""])
+        sel_rank = st.selectbox("🎯 ランク・取引先で絞り込み", ["（すべて）"] + unique_ranks)
     with r_col2:
-        search_rank_prod = st.text_input("🔍 商品番号・商品名で検索", placeholder="例：ABO-03...")
+        search_rank_prod = st.text_input("🔍 商品番号・商品名で検索", placeholder="例：ABO-03, 耳かき...")
     with r_col3:
         rank_limit_val = st.selectbox("表示件数", [50, 100, 200, 500, "全件"], index=0)
 
-    filt_rank_df = raw_rank_df.copy()
-    if sel_rank != "（すべて）": filt_rank_df = filt_rank_df[filt_rank_df["ランク名"] == sel_rank]
-    if "商品名" not in filt_rank_df.columns:
-        p_col = "商品番号" if "商品番号" in filt_rank_df.columns else filt_rank_df.columns[0]
-        filt_rank_df["商品名"] = filt_rank_df[p_col].astype(str).str.strip().map(lambda c: code_to_name_map.get(c, ""))
+    filt_rank_df = work_rk.copy()
+    if sel_rank != "（すべて）":
+        filt_rank_df = filt_rank_df[filt_rank_df["ランク名"] == sel_rank]
     if search_rank_prod.strip():
         kw_rp = search_rank_prod.strip()
-        filt_rank_df = filt_rank_df[filt_rank_df["商品番号"].astype(str).str.contains(kw_rp, na=False) | filt_rank_df["商品名"].astype(str).str.contains(kw_rp, na=False)]
+        filt_rank_df = filt_rank_df[filt_rank_df["商品番号"].str.contains(kw_rp, case=False, na=False) | filt_rank_df["商品名"].str.contains(kw_rp, case=False, na=False)]
 
-    filt_rank_df["ロット数"] = filt_rank_df["ロット数"].apply(clean_num).astype(int)
-    filt_rank_df["ロット単価"] = filt_rank_df["ロット単価"].apply(clean_num).astype(int)
-    filt_rank_df["原価"] = filt_rank_df["原価"].apply(clean_num).astype(int)
     filt_rank_df["ロット粗利額"] = filt_rank_df["ロット単価"] - filt_rank_df["原価"]
     filt_rank_df["粗利率"] = filt_rank_df.apply(lambda r: f"{(r['ロット粗利額'] / r['ロット単価'] * 100):.1f}%" if r['ロット単価'] > 0 else "-", axis=1)
 
-    disp_rank_cols = [c for c in ["商品番号", "商品名", "ランク名", "ロット数", "ロット単価", "原価", "ロット粗利額", "粗利率"] if c in filt_rank_df.columns]
-    out_rank_df = filt_rank_df[disp_rank_cols].copy()
+    disp_rank_cols = ["商品番号", "商品名", "ランク名", "ロット数", "ロット単価", "原価", "ロット粗利額", "粗利率"]
+    out_rank_df = filt_rank_df[disp_rank_cols].reset_index(drop=True)
     out_rank_df.insert(0, "番号", range(1, len(out_rank_df) + 1))
-    if rank_limit_val != "全件": out_rank_df = out_rank_df.head(int(rank_limit_val))
+
+    r_top_c1, r_top_c2 = st.columns([4, 1.5])
+    with r_top_c1:
+        st.markdown(f"""
+        <div class="total-card" style="margin-bottom:0;">
+            <b>対象ランク:</b> <span style="color:#1a73e8; font-weight:bold;">{sel_rank}</span> &nbsp;|&nbsp;
+            <b>該当件数:</b> <span style="font-size:16px; font-weight:bold; color:#d93025;">{len(out_rank_df):,} 件</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with r_top_c2:
+        st.download_button(
+            label="📥 ランク価格一覧をExcel保存",
+            data=generate_excel_bytes(out_rank_df, "ランク価格一覧"),
+            file_name=f"ランク価格_{sel_rank}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+    st.write("")
+    if rank_limit_val != "全件":
+        out_rank_df = out_rank_df.head(int(rank_limit_val))
     render_universal_table(out_rank_df)
     st.stop()
 
 # ========================================================
-# ★ 期間設定（売上分析用：ショートカット完全連動）
+# ★ 期間設定（売上分析用：営業会議用シートとも完全同期）
 # ========================================================
 idx_ym = valid_ym.index(latest_ym) if latest_ym in valid_ym else len(valid_ym) - 1
 
@@ -1907,35 +2033,45 @@ else:
     s_date_calc = min_date
     e_date_calc = max_date
 
+# 期間ショートカット切り替え時に営業会議用の対象月度も一緒に同期させる（2026年9月選択時のズレ防止）
 if "prev_quick_choice" not in st.session_state or st.session_state.prev_quick_choice != quick_choice:
     st.session_state.prev_quick_choice = quick_choice
     if quick_choice != "手動指定":
-        st.session_state["analysis_ym_start_v3"] = s_def if s_def in desc_valid_ym else desc_valid_ym[-1]
+        sync_ym = s_def if s_def in desc_valid_ym else desc_valid_ym[0]
+        st.session_state["analysis_ym_start_v3"] = sync_ym
         st.session_state["analysis_ym_end_v3"] = e_def if e_def in desc_valid_ym else desc_valid_ym[0]
+        st.session_state["tgt_ym_meeting_v3"] = sync_ym
+        st.session_state["tgt_ym_topcust_v3"] = sync_ym
 
 if "analysis_ym_start_v3" not in st.session_state:
     st.session_state["analysis_ym_start_v3"] = s_def if s_def in desc_valid_ym else desc_valid_ym[0]
 if "analysis_ym_end_v3" not in st.session_state:
     st.session_state["analysis_ym_end_v3"] = e_def if e_def in desc_valid_ym else desc_valid_ym[0]
 
-col_mode, col_p1, col_p2, col_staff = st.columns([1, 1.2, 1.2, 1.6])
-with col_mode:
-    date_mode = st.radio("指定単位", ["年月で指定", "日で指定"], horizontal=True, key="date_mode_radio_analysis")
-
-if date_mode == "年月で指定":
-    with col_p1: ym_start = st.selectbox("開始年月", desc_valid_ym, key="analysis_ym_start_v3")
-    with col_p2: ym_end = st.selectbox("終了年月", desc_valid_ym, key="analysis_ym_end_v3")
-else:
-    with col_p1: d_start = st.date_input("開始日", value=s_date_calc, min_value=min_date, max_value=max_date)
-    with col_p2: d_end = st.date_input("終了日", value=e_date_calc, min_value=min_date, max_value=max_date)
-
-with col_staff:
-    staff_options = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
-    sel_staff = st.selectbox("担当者指定", staff_options)
-
-all_unique_custs = sorted([x for x in df["得意先名"].unique() if x])
-
+# 営業会議用シート以外のときだけ通常の「開始年月・終了年月」を表示し、二重プルダウンによる混乱を完全に防止
 if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート']:
+    col_mode, col_p1, col_p2, col_staff = st.columns([1, 1.2, 1.2, 1.6])
+    with col_mode:
+        date_mode = st.radio("指定単位", ["年月で指定", "日で指定"], horizontal=True, key="date_mode_radio_analysis")
+
+    if date_mode == "年月で指定":
+        with col_p1:
+            ym_start = st.selectbox("開始年月", desc_valid_ym, key="analysis_ym_start_v3")
+        with col_p2:
+            ym_end = st.selectbox("終了年月", desc_valid_ym, key="analysis_ym_end_v3")
+        # 開始年月を変えたら営業会議用の対象月度にも反映しておく
+        st.session_state["tgt_ym_meeting_v3"] = ym_start
+        st.session_state["tgt_ym_topcust_v3"] = ym_start
+    else:
+        with col_p1: d_start = st.date_input("開始日", value=s_date_calc, min_value=min_date, max_value=max_date)
+        with col_p2: d_end = st.date_input("終了日", value=e_date_calc, min_value=min_date, max_value=max_date)
+
+    with col_staff:
+        staff_options = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
+        sel_staff = st.selectbox("担当者指定", staff_options)
+
+    all_unique_custs = sorted([x for x in df["得意先名"].unique() if x])
+
     c1, c2, c3, c4 = st.columns(4)
     with c1: sel_cust = st.selectbox("得意先名", ["（すべて）"] + all_unique_custs)
     with c2: search_cust = st.text_input("得意先検索", placeholder="会社名の一部を入力（例：丸藤、アマゾン）...")
@@ -1958,9 +2094,12 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     limit_col, _, _, _ = st.columns(4)
     with limit_col: limit_val = st.selectbox("表示件数", [50, 100, 200, 500, "全件"], index=0)
 else:
+    date_mode = "年月で指定"
+    ym_start = st.session_state.get("analysis_ym_start_v3", latest_ym)
+    ym_end = st.session_state.get("analysis_ym_end_v3", latest_ym)
+    sel_staff = "（すべて）"
     sel_cust = "（すべて）"; search_cust = ""; sel_prod = "（すべて）"; search_prod = ""; limit_val = 50; matched_custs = []; chosen_sub_branch = ""
 
-# 🔴 初回売上日の事前計算（新商品分析で1年以上前の定番品を除外するために使用）
 prod_first_seen_dt = df.groupby("商品コード")["日付_dt"].min().to_dict()
 prod_last_seen_dt = df.groupby("商品コード")["日付_dt"].max().to_dict()
 code_to_name = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
@@ -1972,7 +2111,6 @@ if view_type in ['📑 営業会議用：上位客先別売上実績', '📊 営
 elif view_type == '💤 滞留・未販売商品分析（売れてない商品）':
     filtered = df.copy(); period_text = f"基準日: {max_date.strftime('%Y/%m/%d')}"; ly_filtered = pd.DataFrame()
 elif view_type == '✨ 新商品売上分析（直近1年）':
-    # 🔴 全期間で「初回売上日が直近1年以内」の真の新商品コードのみに絞り込む
     true_new_skus = {sku for sku, f_dt in prod_first_seen_dt.items() if pd.notna(f_dt) and f_dt >= one_year_ago_date}
     filtered = df[(df["日付_dt"] >= one_year_ago_date) & (df["商品コード"].isin(true_new_skus))].copy()
     period_text = f"{one_year_ago_date.strftime('%Y/%m/%d')} 〜 {max_date.strftime('%Y/%m/%d')}（直近1年間に初登場した新商品）"
@@ -2024,7 +2162,7 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     total_sales = int(filtered["金額"].sum()) if not filtered.empty else 0
 
 # ========================================================
-# ★ 各種分析画面
+# ★ 🏢 得意先別ランキング（📦商品別売上ランキングと同じ綺麗な幅感に統一）
 # ========================================================
 if view_type == '🏢 得意先別ランキング':
     group_cols = [c for c in ["得意先名", "担当者"] if c in filtered.columns]
@@ -2057,22 +2195,16 @@ if view_type == '🏢 得意先別ランキング':
                 use_container_width=True
             )
 
-    st.write("")
     if not show_df.empty:
-        st.info("👆 **表の行をクリック（選択）すると、その得意先の「売れ筋・売上TOP10詳細」がポップアップ表示されます。**")
-        event = st.dataframe(
-            show_df.style.format({"販売金額": "¥{:,}", "粗利額": "¥{:,}", "原価合計": "¥{:,}", "数量": "{:,}", "取扱品目数": "{:,}"}),
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            height=560
-        )
-        if event and event.selection and event.selection.rows:
-            sel_row_idx = event.selection.rows[0]
-            clicked_cust = show_df.iloc[sel_row_idx]["得意先名"]
-            cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
-            show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
+        c_pop1, c_pop2 = st.columns([3.2, 1.5])
+        with c_pop1:
+            sel_top10_cust = st.selectbox("🎯 売れ筋・売上TOP10内訳を確認する得意先を選択", show_df["得意先名"].tolist(), label_visibility="collapsed")
+        with c_pop2:
+            if st.button("🔍 選択した得意先の売上TOP10詳細を表示", use_container_width=True):
+                cust_sub_df = filtered[filtered["得意先名"] == sel_top10_cust]
+                show_customer_top10_dialog(sel_top10_cust, cust_sub_df, period_text)
+
+        render_universal_table(show_df)
     else:
         st.info("該当期間のデータがありません。")
     st.stop()
@@ -2178,8 +2310,26 @@ elif view_type == '👤 担当者別 売上＆目標達成分析':
 
 elif view_type == '✨ 新商品売上分析（直近1年）':
     st.markdown(f"#### ✨ 新商品売上分析（{period_text}）")
-    st.caption("※全データ履歴の中で「初回売上日」が直近1年以内の新商品のみを自動抽出しています（1年以上前から販売実績のある既存定番品は除外されます）。")
+    st.caption("※全データ履歴の中で「初回売上日」が直近1年以内の新商品のみを自動抽出しています。")
     if not filtered.empty:
+        # 🔴 ご要望：数量、導入社数、販売金額の昇順・降順切り替えボタン
+        c_sort1, c_sort2, _ = st.columns([1.8, 1.8, 2.0])
+        with c_sort1:
+            np_sort_col = st.radio(
+                "📊 並び替え項目",
+                ["販売金額", "数量", "導入社数"],
+                horizontal=True,
+                key="np_sort_col_radio"
+            )
+        with c_sort2:
+            np_sort_order = st.radio(
+                "🔃 並び順",
+                ["⬇️ 降順（高い順）", "⬆️ 昇順（低い順）"],
+                horizontal=True,
+                key="np_sort_order_radio"
+            )
+        is_asc = np_sort_order.startswith("⬆️")
+
         np_agg = filtered.groupby(["商品コード", "商品名"]).agg(
             販売金額=("金額", "sum"),
             数量=("数量", "sum"),
@@ -2191,7 +2341,7 @@ elif view_type == '✨ 新商品売上分析（直近1年）':
         ).reset_index()
         np_agg["初回売上日"] = np_agg["商品コード"].map(lambda c: prod_first_seen_dt.get(c).strftime('%Y/%m/%d') if pd.notna(prod_first_seen_dt.get(c)) else "-")
         np_agg["粗利率"] = np_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
-        np_agg = np_agg.sort_values(by="販売金額", ascending=False)
+        np_agg = np_agg.sort_values(by=[np_sort_col, "販売金額"], ascending=[is_asc, False]).reset_index(drop=True)
         np_agg.insert(0, "順位", range(1, len(np_agg) + 1))
         if limit_val != "全件": np_agg = np_agg.head(int(limit_val))
         cols_np = ["順位", "商品コード", "商品名", "初回売上日", "最終売上日", "導入社数", "数量", "単価原価", "販売金額", "粗利額", "粗利率"]
@@ -2202,7 +2352,8 @@ elif view_type == '✨ 新商品売上分析（直近1年）':
             st.markdown(f"""
             <div class="total-card" style="margin-bottom:0;">
                 <b>新商品 該当品目数:</b> <span style="color:#1a73e8; font-weight:bold;">{len(show_np_df):,} 品目</span> &nbsp;|&nbsp;
-                <b>新商品 売上合計:</b> <span style="color:#d93025; font-size:16px; font-weight:bold;">¥{int(show_np_df['販売金額'].sum()):,}</span>
+                <b>新商品 売上合計:</b> <span style="color:#d93025; font-size:16px; font-weight:bold;">¥{int(show_np_df['販売金額'].sum()):,}</span> &nbsp;|&nbsp;
+                <b>現在の並び順:</b> <span style="color:#188038; font-weight:bold;">{np_sort_col}（{'昇順' if is_asc else '降順'}）</span>
             </div>
             """, unsafe_allow_html=True)
         with c_sum2:
@@ -2220,9 +2371,14 @@ elif view_type == '✨ 新商品売上分析（直近1年）':
     st.stop()
 
 elif view_type == '📊 営業会議用：上位社 売上比較シート':
+    if "tgt_ym_meeting_v3" not in st.session_state:
+        st.session_state["tgt_ym_meeting_v3"] = s_def if s_def in desc_valid_ym else desc_valid_ym[0]
+
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
-    with col_m1: target_meeting_ym = st.selectbox("対象月度", desc_valid_ym, index=0, key="tgt_ym_meeting_v3")
-    with col_m2: compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=0, key="compare_cust_count_meeting_v3")
+    with col_m1:
+        target_meeting_ym = st.selectbox("対象月度（期間ショートカット連動）", desc_valid_ym, key="tgt_ym_meeting_v3")
+    with col_m2:
+        compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=0, key="compare_cust_count_meeting_v3")
     with col_m3:
         staff_options_meeting = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
         sel_staff_m = st.selectbox("担当者指定", staff_options_meeting, key="meeting_staff_sel_v3")
@@ -2237,7 +2393,6 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
 
     df_scope = df if sel_staff_m == "（すべて）" else df[df["担当者"] == sel_staff_m]
 
-    # 🔴 自己参照を排除した完全に安全なDataFrame抽出
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
     ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
     next_m_df = df_scope[df_scope["年月"] == next_ym] if not df_scope.empty else pd.DataFrame()
@@ -2284,14 +2439,14 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
         c_item["plan_text"] = st.session_state.get(f"pln_{target_meeting_ym}_{cn}", "")
 
     st.download_button(
-        label="📥 上位社 売上比較シートをExcel保存",
+        label=f"📥 上位社 売上比較シート（{target_meeting_ym}）をExcel保存",
         data=generate_meeting_comparison_excel(cards_data, target_meeting_ym),
         file_name=f"営業会議_上位社売上比較シート_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="dl_btn_meeting_comp_v3"
     )
 
-    st.markdown(f"#### 📊 {tgt_m}月度 上位{len(top_custs)}社 売上比較シート（担当: {sel_staff_m}）")
+    st.markdown(f"#### 📊 {tgt_y}年{tgt_m}月度 上位{len(top_custs)}社 売上比較シート（担当: {sel_staff_m}）")
     for idx_c in range(0, len(cards_data), 2):
         cols_card = st.columns(2)
         for sub_i in range(2):
@@ -2301,8 +2456,11 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
     st.stop()
 
 elif view_type == '📑 営業会議用：上位客先別売上実績':
+    if "tgt_ym_topcust_v3" not in st.session_state:
+        st.session_state["tgt_ym_topcust_v3"] = s_def if s_def in desc_valid_ym else desc_valid_ym[0]
+
     col_m1, col_m2, col_m3 = st.columns([1.5, 1.5, 1.5])
-    with col_m1: target_meeting_ym = st.selectbox("対象月度", desc_valid_ym, index=0, key="tgt_ym_topcust_v3")
+    with col_m1: target_meeting_ym = st.selectbox("対象月度（期間ショートカット連動）", desc_valid_ym, key="tgt_ym_topcust_v3")
     with col_m2: meeting_cust_count = st.selectbox("表示上位数", [10, 20, 30, 50, 100], index=0, key="meeting_cust_count_v3")
     with col_m3:
         staff_options_topcust = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
@@ -2317,7 +2475,6 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
 
     df_scope = df if sel_staff_tc == "（すべて）" else df[df["担当者"] == sel_staff_tc]
 
-    # 🔴 自己参照を排除した完全に安全なDataFrame抽出
     cur_m_df = df_scope[df_scope["年月"] == target_meeting_ym] if not df_scope.empty else pd.DataFrame()
     ly_m_df = df_scope[df_scope["年月"] == ly_ym] if not df_scope.empty else pd.DataFrame()
     cur_ytd_df = df_scope[(df_scope["年月"] >= term_start_ym) & (df_scope["年月"] <= target_meeting_ym)] if not df_scope.empty else pd.DataFrame()
@@ -2367,7 +2524,7 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     title_sheet = f"{tgt_m}月度上位{len(target_cust_list)}社客先別売上実績"
 
     st.download_button(
-        label="📥 上位客先別売上実績をExcel保存",
+        label=f"📥 上位客先別売上実績（{target_meeting_ym}）をExcel保存",
         data=generate_meeting_top_cust_excel(res_m_df_tot, title_sheet),
         file_name=f"営業会議_{title_sheet}_{target_meeting_ym}_{datetime.now().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
