@@ -36,6 +36,7 @@ OTHER_DATA_DIR = os.path.join(BASE_SHARE, "その他データ")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_FILE = os.path.join(BASE_DIR, "sales_cache.parquet")
 SAVED_QUOTES_FILE = os.path.join(BASE_SHARE, "saved_estimates.json")
+LOCAL_QUOTES_FILE = os.path.join(BASE_DIR, "saved_estimates.json")
 SAVED_MEETING_FILE = os.path.join(BASE_SHARE, "saved_meeting_sheet.json")
 LOCAL_MEETING_FILE = os.path.join(BASE_DIR, "saved_meeting_sheet.json")
 
@@ -285,8 +286,10 @@ def load_customer_master(file_path, file_mtime):
 def get_hanko_bytes():
     for d in [BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]:
         if os.path.exists(d):
-            for p in ["*hanko*.png", "*05171642*.png", "*印鑑*.png", "input_file_5.png"]:
+            for p in ["hanko.png", "*hanko*.png", "*hanko*.jpg", "*05171642*.png", "*印鑑*.png", "input_file_5.png"]:
                 fl = glob.glob(os.path.join(d, p))
+                if not fl:
+                    fl = glob.glob(os.path.join(d, "**", p), recursive=True)
                 if fl:
                     try:
                         with open(fl[0], "rb") as f: return f.read(), fl[0]
@@ -294,16 +297,21 @@ def get_hanko_bytes():
     return None, None
 
 def load_saved_quotes():
-    if os.path.exists(SAVED_QUOTES_FILE):
-        try:
-            with open(SAVED_QUOTES_FILE, "r", encoding="utf-8") as f: return json.load(f)
-        except Exception: return []
+    for f in [SAVED_QUOTES_FILE, LOCAL_QUOTES_FILE]:
+        if os.path.exists(f):
+            try:
+                with open(f, "r", encoding="utf-8") as fp: return json.load(fp)
+            except Exception: pass
     return []
 
 def save_quotes_list(q_list):
+    target_f = SAVED_QUOTES_FILE if os.path.exists(os.path.dirname(SAVED_QUOTES_FILE)) else LOCAL_QUOTES_FILE
     try:
-        with open(SAVED_QUOTES_FILE, "w", encoding="utf-8") as f: json.dump(q_list, f, ensure_ascii=False, indent=2)
-    except Exception: pass
+        with open(target_f, "w", encoding="utf-8") as f: json.dump(q_list, f, ensure_ascii=False, indent=2)
+    except Exception:
+        try:
+            with open(LOCAL_QUOTES_FILE, "w", encoding="utf-8") as f: json.dump(q_list, f, ensure_ascii=False, indent=2)
+        except Exception: pass
 
 def load_saved_meeting_sheet_data():
     for f in [SAVED_MEETING_FILE, LOCAL_MEETING_FILE]:
@@ -1039,6 +1047,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     for k_f in [k_comp, k_person, k_post, k_addr, k_s_comp, k_s_person, k_s_post, k_s_addr, k_s_tel]:
         if k_f not in st.session_state: st.session_state[k_f] = ""
 
+    # 🔴 「✏️ 編集画面に読込」クリック時にデータをセットし、タブも新規見積作成画面へ確実に切り替える
     if "load_target_estimate" in st.session_state and st.session_state["load_target_estimate"]:
         loaded_est = st.session_state.pop("load_target_estimate")
         st.session_state[k_comp] = loaded_est.get("cust_comp", "")
@@ -1050,13 +1059,26 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
         st.session_state[k_s_post] = loaded_est.get("ship_post", "")
         st.session_state[k_s_addr] = loaded_est.get("ship_addr", "")
         st.session_state[k_s_tel] = loaded_est.get("ship_tel", "")
-        st.session_state[k_sel_c] = loaded_est.get("cust_comp", "（手動入力）")
+        st.session_state[k_sel_c] = loaded_est.get("cust_comp", "（手動入力）") if loaded_est.get("cust_comp") else "（手動入力）"
+        st.session_state[f"q_no_{s_key}"] = loaded_est.get("q_no", f"{datetime.now().strftime('%Y%m%d')}-01")
+        st.session_state[f"q_memo_{s_key}"] = loaded_est.get("memo", "")
+        st.session_state[f"q_smemo_{s_key}"] = loaded_est.get("hitokoto", f"営業担当：{est_staff}")
+        st.session_state[f"q_ship_{s_key}"] = int(clean_num(loaded_est.get("shipping_fee", 0)))
         st.session_state[k_items] = loaded_est.get("items", [])
         st.session_state[k_ver] += 1
+        st.session_state["est_active_tab_v3"] = "📝 新規見積作成・シミュレーター"
 
     staff_Filter_list = [e for e in st.session_state.saved_estimates if est_staff == "（すべて表示）" or e.get("staff", "") == est_staff or (est_staff in str(e.get("hitokoto", "")))]
+    tab_opt_new = "📝 新規見積作成・シミュレーター"
+    tab_opt_list = f"📋 保存済み見積一覧・スマレジ注文CSV出力（{len(staff_Filter_list)}件）"
+    if "est_active_tab_v3" in st.session_state and st.session_state["est_active_tab_v3"] not in [tab_opt_new, tab_opt_list]:
+        if str(st.session_state["est_active_tab_v3"]).startswith("📋"):
+            st.session_state["est_active_tab_v3"] = tab_opt_list
+        else:
+            st.session_state["est_active_tab_v3"] = tab_opt_new
+
     with col_menu_left:
-        tab_choice = st.radio("見積機能メニュー", ["📝 新規見積作成・シミュレーター", f"📋 保存済み見積一覧・スマレジ注文CSV出力（{len(staff_Filter_list)}件）"], horizontal=True, key="est_active_tab_v3")
+        tab_choice = st.radio("見積機能メニュー", [tab_opt_new, tab_opt_list], horizontal=True, key="est_active_tab_v3")
 
     if tab_choice.startswith("📝"):
         st.markdown(f"##### 🏢 提出先（得意先）の選択 &nbsp;<span style='font-size:13px; color:#2563eb;'>［作業担当: {est_staff}］</span>", unsafe_allow_html=True)
@@ -1097,6 +1119,8 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                             itm["見積単価"], itm["最低下代"] = new_p, new_min
                     st.session_state[k_ver] += 1
 
+        if st.session_state.get(k_sel_c) not in cust_options:
+            st.session_state[k_sel_c] = "（手動入力）"
         st.selectbox("🔍 加盟店・取引先を選択（検索可能）", cust_options, key=k_sel_c, on_change=on_customer_change)
 
         col_addr1, col_addr2 = st.columns(2)
@@ -1488,6 +1512,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 with b_col2:
                     if st.button("✏️ 編集画面に読込", key=f"load_est_{idx_q}"):
                         st.session_state["load_target_estimate"] = est
+                        st.session_state["est_active_tab_v3"] = "📝 新規見積作成・シミュレーター"
                         st.rerun()
                 with b_col3:
                     if st.button("🗑️ 削除", key=f"del_est_{idx_q}"):
@@ -1709,7 +1734,7 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     total_sales = int(filtered["金額"].sum()) if not filtered.empty else 0
 
 # ========================================================
-# ★ 🏢 得意先別ランキング（順位列をコンパクト＆センター揃えに統一）
+# ★ 🏢 得意先別ランキング（行クリックでTOP10詳細POP完全固定＆順位幅コンパクト）
 # ========================================================
 if view_type == '🏢 得意先別ランキング':
     group_cols = [c for c in ["得意先名", "担当者"] if c in filtered.columns]
@@ -1733,13 +1758,25 @@ if view_type == '🏢 得意先別ランキング':
 
     st.write("")
     if not show_df.empty:
-        c_pop1, c_pop2 = st.columns([3.2, 1.5])
-        with c_pop1:
-            sel_top10_cust = st.selectbox("🎯 売れ筋・売上TOP10内訳を確認する得意先を選択", show_df["得意先名"].tolist(), label_visibility="collapsed")
-        with c_pop2:
-            if st.button("🔍 選択した得意先の売上TOP10詳細を表示", use_container_width=True):
-                show_customer_top10_dialog(sel_top10_cust, filtered[filtered["得意先名"] == sel_top10_cust], period_text)
-        render_universal_table(show_df)
+        st.info("👆 **表の行（得意先名）をクリックすると、その得意先の「売れ筋・売上TOP10詳細」がポップアップ表示されます。**")
+        event = st.dataframe(
+            show_df.style.format({"販売金額": "¥{:,}", "粗利額": "¥{:,}", "原価合計": "¥{:,}", "数量": "{:,}", "取扱品目数": "{:,}"}),
+            column_config={
+                "順位": st.column_config.NumberColumn("順位", width="small", format="%d"),
+                "得意先名": st.column_config.TextColumn("得意先名", width="large"),
+                "担当者": st.column_config.TextColumn("担当者", width="small"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            height=560
+        )
+        if event and event.selection and event.selection.rows:
+            sel_row_idx = event.selection.rows[0]
+            clicked_cust = show_df.iloc[sel_row_idx]["得意先名"]
+            cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
+            show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
     else:
         st.info("該当期間のデータがありません。")
     st.stop()
