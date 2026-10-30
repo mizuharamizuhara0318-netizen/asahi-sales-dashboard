@@ -571,7 +571,7 @@ def render_universal_table(df_data):
     header_cells = []
     for c in df_data.columns:
         align = 'center' if c in center_cols else ('left' if c in left_cols else 'right')
-        w_style = "width: 52px; min-width: 52px; max-width: 56px;" if c in narrow_cols else ""
+        w_style = "width: 48px; min-width: 48px; max-width: 52px;" if c in narrow_cols else ""
         header_cells.append(f"<th style='border:1px solid #cbd5e1; padding:8px 10px; background:#f1f5f9; text-align:{align}; {w_style} white-space:nowrap;'>{c}</th>")
     header_html = "".join(header_cells)
 
@@ -583,7 +583,7 @@ def render_universal_table(df_data):
             val = row[c]
             val_str = "" if pd.isna(val) else str(val)
             align = "center" if c in center_cols else ("left" if c in left_cols else "right")
-            w_style = "width: 52px; min-width: 52px; max-width: 56px;" if c in narrow_cols else ""
+            w_style = "width: 48px; min-width: 48px; max-width: 52px;" if c in narrow_cols else ""
             if isinstance(val, (int, float)) and c not in center_cols:
                 val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額", "粗利増減"] else f"{int(val):,}"
             is_neg = (isinstance(val, (int, float)) and val < 0) or (isinstance(val_str, str) and (val_str.startswith("-") or val_str.startswith("▲-")))
@@ -601,8 +601,8 @@ def render_universal_table(df_data):
     """
     components.html(table_html, height=min(620, 80 + len(df_data) * 36), scrolling=True)
 
-# 🔴 商品別売上ランキングと100%同じ美しいHTML表で、得意先名のクリックPOPにも対応する専用コンポーネント
-_CLICKABLE_TABLE_DIR = os.path.join(BASE_DIR, "_cust_table_comp")
+# 🔴 商品別売上ランキングの引き締まった列幅バランスに完全一致させたクリック対応テーブルコンポーネント
+_CLICKABLE_TABLE_DIR = os.path.join(BASE_DIR, "_cust_table_comp_v2")
 os.makedirs(_CLICKABLE_TABLE_DIR, exist_ok=True)
 _CLICKABLE_INDEX_HTML = os.path.join(_CLICKABLE_TABLE_DIR, "index.html")
 _COMP_HTML_CONTENT = """<!DOCTYPE html>
@@ -611,10 +611,10 @@ _COMP_HTML_CONTENT = """<!DOCTYPE html>
 <meta charset="utf-8">
 <style>
   body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; background: transparent; }
-  .tbl-wrap { overflow-x: auto; max-height: 580px; border: 1px solid #cbd5e1; border-radius: 6px; background-color: #ffffff; }
-  table { width: 100%; border-collapse: collapse; }
+  .tbl-wrap { overflow-x: auto; max-height: 580px; border: 1px solid #cbd5e1; border-radius: 6px; background-color: #ffffff; display: inline-block; max-width: 100%; }
+  table { border-collapse: collapse; table-layout: fixed; width: auto; }
   th { border: 1px solid #cbd5e1; padding: 8px 10px; background: #f1f5f9; white-space: nowrap; position: sticky; top: 0; z-index: 1; color: #0f172a; }
-  td { border: 1px solid #e2e8f0; padding: 6px 10px; font-variant-numeric: tabular-nums; white-space: nowrap; color: #0f172a; }
+  td { border: 1px solid #e2e8f0; padding: 6px 10px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #0f172a; }
   tr:nth-child(even) { background: #f8fafc; }
   tr:nth-child(odd) { background: #ffffff; }
   tr:hover { background: #eff6ff !important; }
@@ -651,13 +651,12 @@ init();
 </script>
 </body>
 </html>"""
-if not os.path.exists(_CLICKABLE_INDEX_HTML):
-    try:
-        with open(_CLICKABLE_INDEX_HTML, "w", encoding="utf-8") as _f:
-            _f.write(_COMP_HTML_CONTENT)
-    except Exception:
-        pass
-_clickable_cust_table_func = components.declare_component("clickable_cust_table", path=_CLICKABLE_TABLE_DIR)
+try:
+    with open(_CLICKABLE_INDEX_HTML, "w", encoding="utf-8") as _f:
+        _f.write(_COMP_HTML_CONTENT)
+except Exception:
+    pass
+_clickable_cust_table_func = components.declare_component("clickable_cust_table_v2", path=_CLICKABLE_TABLE_DIR)
 
 def render_clickable_customer_table(df_data):
     if df_data is None or df_data.empty:
@@ -665,13 +664,26 @@ def render_clickable_customer_table(df_data):
         return None
     center_cols = {"番号", "順位", "日付", "販売期間", "最終売上日", "初回売上日", "未販売期間", "目標達成率", "通期進捗率", "前年比", "粗利率", "構成比"}
     left_cols = {"得意先名", "商品コード", "商品名", "商品番号", "ランク名", "担当者", "客先名", "販売価格帯"}
-    narrow_cols = {"番号", "順位"}
+
+    # 商品別売上ランキングの1列あたりの密度・幅感と完全に揃えた固定幅設計
+    col_width_map = {
+        "順位": "48px",
+        "得意先名": "270px",
+        "担当者": "76px",
+        "販売金額": "115px",
+        "粗利額": "110px",
+        "粗利率": "76px",
+        "原価合計": "110px",
+        "数量": "85px",
+        "取扱品目数": "85px",
+        "構成比": "76px"
+    }
 
     header_cells = []
     for c in df_data.columns:
         align = 'center' if c in center_cols else ('left' if c in left_cols else 'right')
-        w_style = "width: 52px; min-width: 52px; max-width: 56px;" if c in narrow_cols else ""
-        header_cells.append(f"<th style='text-align:{align}; {w_style}'>{c}</th>")
+        w_px = col_width_map.get(c, "100px")
+        header_cells.append(f"<th style='text-align:{align}; width:{w_px}; min-width:{w_px}; max-width:{w_px};'>{c}</th>")
 
     body_rows = []
     for _, row in df_data.iterrows():
@@ -680,7 +692,7 @@ def render_clickable_customer_table(df_data):
             val = row[c]
             val_str = "" if pd.isna(val) else str(val)
             align = "center" if c in center_cols else ("left" if c in left_cols else "right")
-            w_style = "width: 52px; min-width: 52px; max-width: 56px;" if c in narrow_cols else ""
+            w_px = col_width_map.get(c, "100px")
             if isinstance(val, (int, float)) and c not in center_cols:
                 val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額", "粗利増減"] else f"{int(val):,}"
             is_neg = (isinstance(val, (int, float)) and val < 0) or (isinstance(val_str, str) and (val_str.startswith("-") or val_str.startswith("▲-")))
@@ -688,14 +700,14 @@ def render_clickable_customer_table(df_data):
 
             if c == "得意先名":
                 safe_c = val_str.replace('"', '&quot;')
-                cells.append(f"<td style='text-align:left;'><span class='cust-link' data-cust=\"{safe_c}\">🔍 {val_str}</span></td>")
+                cells.append(f"<td style='text-align:left; width:{w_px}; min-width:{w_px}; max-width:{w_px};' title=\"{safe_c}\"><span class='cust-link' data-cust=\"{safe_c}\">🔍 {val_str}</span></td>")
             else:
-                cells.append(f"<td style='text-align:{align}; {w_style} {style_extra}'>{val_str}</td>")
+                cells.append(f"<td style='text-align:{align}; width:{w_px}; min-width:{w_px}; max-width:{w_px}; {style_extra}'>{val_str}</td>")
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
 
     full_html = f"<div class='tbl-wrap'><table><thead><tr>{''.join(header_cells)}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>"
     calc_h = min(600, 75 + len(df_data) * 35)
-    return _clickable_cust_table_func(table_html=full_html, height=calc_h, key="cust_rank_clickable_tbl")
+    return _clickable_cust_table_func(table_html=full_html, height=calc_h, key="cust_rank_clickable_tbl_v2")
 
 @st.dialog("🏢 得意先別 売れ筋・売上TOP10詳細", width="large")
 def show_customer_top10_dialog(cust_name, sub_df, period_str):
@@ -1142,7 +1154,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     for k_f in [k_comp, k_person, k_post, k_addr, k_s_comp, k_s_person, k_s_post, k_s_addr, k_s_tel]:
         if k_f not in st.session_state: st.session_state[k_f] = ""
 
-    # 🔴 ラジオボタン描画前のタイミングで安全にタブを切り替える（StreamlitWidgetAlreadyInstantiatedError完全回避）
     if "load_target_estimate" in st.session_state and st.session_state["load_target_estimate"]:
         loaded_est = st.session_state.pop("load_target_estimate")
         st.session_state[k_comp] = loaded_est.get("cust_comp", "")
@@ -1828,7 +1839,7 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     total_sales = int(filtered["金額"].sum()) if not filtered.empty else 0
 
 # ========================================================
-# ★ 🏢 得意先別ランキング（商品別売上ランキングと同じ綺麗なHTML表＋得意先名クリックでPOP表示）
+# ★ 🏢 得意先別ランキング（商品別売上ランキングと同じ綺麗な幅バランス＋得意先名クリックでPOP表示）
 # ========================================================
 if view_type == '🏢 得意先別ランキング':
     group_cols = [c for c in ["得意先名", "担当者"] if c in filtered.columns]
