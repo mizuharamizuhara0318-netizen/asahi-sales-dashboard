@@ -23,9 +23,14 @@ st.markdown("""
 <style>
     .main-header { background-color: #2a75d3; color: white; padding: 8px 15px; font-size: 19px; font-weight: bold; border-radius: 4px; margin-bottom: 10px; }
     .total-card { background-color: #f0f4f8; padding: 10px 14px; border-radius: 6px; border-left: 5px solid #2a75d3; margin-bottom: 8px; }
+    .side-panel-header { background: linear-gradient(135deg, #1e3a8a, #2563eb); color: white; padding: 8px 14px; border-radius: 6px; font-size: 15px; font-weight: bold; margin-bottom: 8px; }
     .est-card { border: 1px solid #cbd5e1; border-radius: 6px; background-color: #ffffff; margin-bottom: 16px; overflow: hidden; }
     .est-header { background-color: #f8fafc; padding: 10px 14px; border-bottom: 1px solid #cbd5e1; display: flex; justify-content: space-between; align-items: center; }
     .badge-green { background-color: #16a34a; color: white; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold; }
+    @media (max-width: 768px) {
+        .main-header { font-size: 16px; padding: 6px 10px; }
+        .total-card { font-size: 12px; padding: 8px 10px; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -540,7 +545,7 @@ def load_and_prep_data(force_reload=False):
         sep_date = pd.Timestamp(2026, 9, 30)
         amz_rows = [
             {"商品コード": "ABA-501", "商品名": "ABA-501", "得意先名": "アマゾンセラー", "担当者": "水原", "数量": 100, "単価": 500, "金額": 50000, "日付_dt": sep_date, "日付": "2026/09/30", "年月": "2026年09月", "_source_file": "default_amz"},
-            {"商品コード": "ABA-507", "商品名": "ABA-507", "得意先名": "アマゾンセラー", "担当者": "水原", "数量": 50, "単価": 600, "金額": 30000, "日付_dt": sep_date, "日付": "2026/09/30", "年月": "2026年09月", "_source_file": "default_amz"}
+            {"商品コード": "ABA-507", "商品名": "ABA-507", "得意先名": "アマゾンセラー", "担当者": "水原", "数量": 50, "単価": 600, "金額": 30000, "日付_dt": sep_date, "日付": "2026/09/30", "年月": "2026/09/30", "_source_file": "default_amz"}
         ]
         df = pd.concat([df, pd.DataFrame(amz_rows)], ignore_index=True)
 
@@ -560,7 +565,7 @@ def load_and_prep_data(force_reload=False):
     except Exception: pass
     return df, len(csv_candidates), cost_master, len(csv_candidates)
 
-def render_universal_table(df_data):
+def render_universal_table(df_data, max_h=600):
     if df_data is None or df_data.empty:
         st.info("該当するデータがありません。")
         return
@@ -592,17 +597,17 @@ def render_universal_table(df_data):
         body_rows.append(f"<tr style='background:{bg};'>{''.join(cells)}</tr>")
 
     table_html = f"""
-    <div style="overflow-x: auto; max-height: 600px; border: 1px solid #cbd5e1; border-radius: 6px; background-color: #ffffff;">
+    <div style="overflow-x: auto; max-height: {max_h}px; border: 1px solid #cbd5e1; border-radius: 6px; background-color: #ffffff;">
     <table style="width: 100%; border-collapse: collapse; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px;">
     <thead><tr style="position: sticky; top: 0; z-index: 1;">{header_html}</tr></thead>
     <tbody>{''.join(body_rows)}</tbody>
     </table>
     </div>
     """
-    components.html(table_html, height=min(620, 80 + len(df_data) * 36), scrolling=True)
+    components.html(table_html, height=min(max_h + 20, 80 + len(df_data) * 36), scrolling=True)
 
-# 🔴 商品別売上ランキングの引き締まった列幅バランスに完全一致させたクリック対応テーブルコンポーネント
-_CLICKABLE_TABLE_DIR = os.path.join(BASE_DIR, "_cust_table_comp_v2")
+# 🔴 画面幅（PC vs スマホ）も同時取得できるクリック対応テーブルコンポーネント
+_CLICKABLE_TABLE_DIR = os.path.join(BASE_DIR, "_cust_table_comp_v3")
 os.makedirs(_CLICKABLE_TABLE_DIR, exist_ok=True)
 _CLICKABLE_INDEX_HTML = os.path.join(_CLICKABLE_TABLE_DIR, "index.html")
 _COMP_HTML_CONTENT = """<!DOCTYPE html>
@@ -618,6 +623,7 @@ _COMP_HTML_CONTENT = """<!DOCTYPE html>
   tr:nth-child(even) { background: #f8fafc; }
   tr:nth-child(odd) { background: #ffffff; }
   tr:hover { background: #eff6ff !important; }
+  tr.selected-row { background: #dbeafe !important; }
   .cust-link { color: #1d4ed8; font-weight: bold; text-decoration: underline; cursor: pointer; }
   .cust-link:hover { color: #1e40af; }
 </style>
@@ -642,7 +648,8 @@ window.addEventListener("message", function(event) {
   links.forEach(function(el) {
     el.addEventListener("click", function() {
       var cname = this.getAttribute("data-cust");
-      sendValue({cust: cname, ts: Date.now()});
+      var screenW = window.parent ? window.parent.innerWidth : window.innerWidth;
+      sendValue({cust: cname, ts: Date.now(), is_mobile: (screenW <= 768)});
     });
   });
   setFrameHeight(args.height || 595);
@@ -656,43 +663,44 @@ try:
         _f.write(_COMP_HTML_CONTENT)
 except Exception:
     pass
-_clickable_cust_table_func = components.declare_component("clickable_cust_table_v2", path=_CLICKABLE_TABLE_DIR)
+_clickable_cust_table_func = components.declare_component("clickable_cust_table_v3", path=_CLICKABLE_TABLE_DIR)
 
-def render_clickable_customer_table(df_data):
+def render_clickable_customer_table(df_data, selected_cust=""):
     if df_data is None or df_data.empty:
         st.info("該当するデータがありません。")
         return None
     center_cols = {"番号", "順位", "日付", "販売期間", "最終売上日", "初回売上日", "未販売期間", "目標達成率", "通期進捗率", "前年比", "粗利率", "構成比"}
     left_cols = {"得意先名", "商品コード", "商品名", "商品番号", "ランク名", "担当者", "客先名", "販売価格帯"}
 
-    # 商品別売上ランキングの1列あたりの密度・幅感と完全に揃えた固定幅設計
     col_width_map = {
-        "順位": "48px",
-        "得意先名": "270px",
-        "担当者": "76px",
-        "販売金額": "115px",
-        "粗利額": "110px",
-        "粗利率": "76px",
-        "原価合計": "110px",
-        "数量": "85px",
-        "取扱品目数": "85px",
-        "構成比": "76px"
+        "順位": "44px",
+        "得意先名": "220px",
+        "担当者": "64px",
+        "販売金額": "105px",
+        "粗利額": "100px",
+        "粗利率": "68px",
+        "原価合計": "100px",
+        "数量": "74px",
+        "取扱品目数": "74px",
+        "構成比": "68px"
     }
 
     header_cells = []
     for c in df_data.columns:
         align = 'center' if c in center_cols else ('left' if c in left_cols else 'right')
-        w_px = col_width_map.get(c, "100px")
+        w_px = col_width_map.get(c, "90px")
         header_cells.append(f"<th style='text-align:{align}; width:{w_px}; min-width:{w_px}; max-width:{w_px};'>{c}</th>")
 
     body_rows = []
     for _, row in df_data.iterrows():
         cells = []
+        row_cust = str(row.get("得意先名", ""))
+        row_cls = " class='selected-row'" if row_cust and row_cust == selected_cust else ""
         for c in df_data.columns:
             val = row[c]
             val_str = "" if pd.isna(val) else str(val)
             align = "center" if c in center_cols else ("left" if c in left_cols else "right")
-            w_px = col_width_map.get(c, "100px")
+            w_px = col_width_map.get(c, "90px")
             if isinstance(val, (int, float)) and c not in center_cols:
                 val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額", "粗利増減"] else f"{int(val):,}"
             is_neg = (isinstance(val, (int, float)) and val < 0) or (isinstance(val_str, str) and (val_str.startswith("-") or val_str.startswith("▲-")))
@@ -703,25 +711,52 @@ def render_clickable_customer_table(df_data):
                 cells.append(f"<td style='text-align:left; width:{w_px}; min-width:{w_px}; max-width:{w_px};' title=\"{safe_c}\"><span class='cust-link' data-cust=\"{safe_c}\">🔍 {val_str}</span></td>")
             else:
                 cells.append(f"<td style='text-align:{align}; width:{w_px}; min-width:{w_px}; max-width:{w_px}; {style_extra}'>{val_str}</td>")
-        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+        body_rows.append(f"<tr{row_cls}>{''.join(cells)}</tr>")
 
     full_html = f"<div class='tbl-wrap'><table><thead><tr>{''.join(header_cells)}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>"
     calc_h = min(600, 75 + len(df_data) * 35)
-    return _clickable_cust_table_func(table_html=full_html, height=calc_h, key="cust_rank_clickable_tbl_v2")
+    return _clickable_cust_table_func(table_html=full_html, height=calc_h, key="cust_rank_clickable_tbl_v3")
 
-@st.dialog("🏢 得意先別 売れ筋・売上TOP10詳細", width="large")
+def build_customer_all_products_df(sub_df):
+    if sub_df is None or sub_df.empty:
+        return pd.DataFrame()
+    p_agg = sub_df.groupby(["商品コード", "商品名"]).agg(
+        数量=("数量", "sum"),
+        販売金額=("金額", "sum"),
+        粗利額=("粗利額", "sum"),
+        単価_min=("単価", "min"),
+        単価_max=("単価", "max")
+    ).reset_index().sort_values(by="販売金額", ascending=False)
+    p_agg["販売価格帯"] = p_agg.apply(lambda r: f"¥{int(r['単価_min']):,}" if r['単価_min'] == r['単価_max'] else f"¥{int(r['単価_min']):,}〜¥{int(r['単価_max']):,}", axis=1)
+    p_agg["粗利率"] = p_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
+    p_agg.insert(0, "順位", range(1, len(p_agg) + 1))
+    return p_agg[["順位", "商品コード", "商品名", "数量", "販売価格帯", "販売金額", "粗利額", "粗利率"]]
+
+@st.dialog("🏢 得意先別 購入商品一覧（全件）", width="large")
 def show_customer_top10_dialog(cust_name, sub_df, period_str):
     st.markdown(f"#### 🎯 対象得意先: **{cust_name}**")
     st.caption(f"指定期間: {period_str}")
-    if sub_df.empty:
+    show_p_df = build_customer_all_products_df(sub_df)
+    if show_p_df.empty:
         st.info("該当期間の売上データはありません。")
         return
-    p_agg = sub_df.groupby(["商品コード", "商品名"]).agg(数量=("数量", "sum"), 販売金額=("金額", "sum"), 粗利額=("粗利額", "sum")).reset_index().sort_values(by="販売金額", ascending=False).head(10)
-    p_agg["粗利率"] = p_agg.apply(lambda r: f"{(r['粗利額'] / r['販売金額'] * 100):.1f}%" if r['販売金額'] > 0 else "-", axis=1)
-    p_agg.insert(0, "順位", range(1, len(p_agg) + 1))
-    show_p_df = p_agg[["順位", "商品コード", "商品名", "数量", "販売金額", "粗利額", "粗利率"]]
-    st.markdown(f"<div class='total-card'><b>TOP10商品売上合計:</b> ¥{int(p_agg['販売金額'].sum()):,} &nbsp;|&nbsp; <b>数量合計:</b> {int(p_agg['数量'].sum()):,} 個</div>", unsafe_allow_html=True)
-    render_universal_table(show_p_df)
+    tot_s = int(show_p_df["販売金額"].sum())
+    tot_q = int(show_p_df["数量"].sum())
+    tot_cnt = len(show_p_df)
+    c_d1, c_d2 = st.columns([3.2, 1.5])
+    with c_d1:
+        st.markdown(f"<div class='total-card' style='margin-bottom:0;'><b>該当品目数:</b> {tot_cnt:,} 品目 &nbsp;|&nbsp; <b>数量合計:</b> {tot_q:,} 個 &nbsp;|&nbsp; <b>売上合計:</b> <span style='color:#d93025; font-weight:bold;'>¥{tot_s:,}</span></div>", unsafe_allow_html=True)
+    with c_d2:
+        st.download_button(
+            label="📥 この得意先の内訳をExcel保存",
+            data=generate_excel_bytes(show_p_df, f"{cust_name}_商品内訳"),
+            file_name=f"得意先別商品内訳_{cust_name}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"dl_modal_cust_{cust_name}"
+        )
+    st.write("")
+    render_universal_table(show_p_df, max_h=500)
 
 def _extract_top5_and_other(sub_df):
     if sub_df is None or sub_df.empty:
@@ -1034,7 +1069,9 @@ curr_y = int(latest_ym[:4]) if len(latest_ym) >= 4 else 2026
 curr_m = int(latest_ym[5:7]) if len(latest_ym) >= 7 else 1
 fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
-col_status, col_refresh = st.columns([4, 1.2])
+col_status, col_mob_toggle, col_refresh = st.columns([3.0, 1.0, 1.2])
+with col_mob_toggle:
+    is_mobile_view = st.toggle("📱 スマホ最適化表示", value=False, key="mobile_opt_toggle")
 with col_refresh:
     if st.button("🔄 データを最新に再読み込み"):
         st.cache_data.clear()
@@ -1839,7 +1876,7 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     total_sales = int(filtered["金額"].sum()) if not filtered.empty else 0
 
 # ========================================================
-# ★ 🏢 得意先別ランキング（商品別売上ランキングと同じ綺麗な幅バランス＋得意先名クリックでPOP表示）
+# ★ 🏢 得意先別ランキング（PC版：左ランキング＋右全商品パネル ｜ スマホ版：必須列＋タップでPOP）
 # ========================================================
 if view_type == '🏢 得意先別ランキング':
     group_cols = [c for c in ["得意先名", "担当者"] if c in filtered.columns]
@@ -1850,35 +1887,94 @@ if view_type == '🏢 得意先別ランキング':
         agg = agg.sort_values(by="販売金額", ascending=False)
         agg.insert(0, "順位", range(1, len(agg) + 1))
         if limit_val != "全件": agg = agg.head(int(limit_val))
-        show_df = agg[["順位", "得意先名", "担当者", "販売金額", "粗利額", "粗利率", "原価合計", "数量", "取扱品目数", "構成比"]].copy()
+        full_cust_df = agg[["順位", "得意先名", "担当者", "販売金額", "粗利額", "粗利率", "原価合計", "数量", "取扱品目数", "構成比"]].copy()
+        if is_mobile_view:
+            show_df = agg[["順位", "得意先名", "販売金額", "粗利額", "粗利率"]].copy()
+        else:
+            show_df = full_cust_df
     else:
+        full_cust_df = pd.DataFrame()
         show_df = pd.DataFrame()
 
     c_sum1, c_sum2 = st.columns([4, 1.2])
     with c_sum1:
         st.markdown(f"<div class='total-card' style='margin-bottom:0;'><b>抽出期間:</b> <span style='color:#1a73e8; font-weight:bold;'>{period_text}</span> &nbsp;|&nbsp; <b>売上合計:</b> <span style='color:#d93025; font-size:16px; font-weight:bold;'>{int(total_sales):,} 円</span></div>", unsafe_allow_html=True)
     with c_sum2:
-        if not show_df.empty:
-            st.download_button(label="📥 Excelで保存", data=generate_excel_bytes(show_df, "得意先別ランキング"), file_name=f"得意先別ランキング_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        if not full_cust_df.empty:
+            st.download_button(label="📥 ランキングをExcel保存", data=generate_excel_bytes(full_cust_df, "得意先別ランキング"), file_name=f"得意先別ランキング_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
     st.write("")
     if not show_df.empty:
-        st.caption("💡 表内の **「🔍 得意先名」** をクリックすると、その得意先の「売れ筋・売上TOP10詳細」がポップアップ表示されます。")
-        clicked_res = render_clickable_customer_table(show_df)
-        if clicked_res and isinstance(clicked_res, dict) and clicked_res.get("cust"):
-            last_ts = st.session_state.get("_last_cust_click_ts", 0)
-            cur_ts = clicked_res.get("ts", 0)
-            if cur_ts != last_ts:
-                st.session_state["_last_cust_click_ts"] = cur_ts
-                clicked_cust = clicked_res["cust"]
-                cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
-                show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
+        default_cust = show_df.iloc[0]["得意先名"]
+        if "selected_side_cust" not in st.session_state or st.session_state["selected_side_cust"] not in show_df["得意先名"].values:
+            st.session_state["selected_side_cust"] = default_cust
+
+        if is_mobile_view:
+            st.caption("💡 表内の **「🔍 得意先名」** をタップすると、その得意先の購入商品一覧がポップアップ表示されます。")
+            clicked_res = render_clickable_customer_table(show_df, selected_cust="")
+            if clicked_res and isinstance(clicked_res, dict) and clicked_res.get("cust"):
+                last_ts = st.session_state.get("_last_cust_click_ts", 0)
+                cur_ts = clicked_res.get("ts", 0)
+                if cur_ts != last_ts:
+                    st.session_state["_last_cust_click_ts"] = cur_ts
+                    clicked_cust = clicked_res["cust"]
+                    cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
+                    show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
+        else:
+            col_left_rank, col_right_detail = st.columns([1.15, 1.0], gap="medium")
+            with col_left_rank:
+                st.caption("💡 表内の **「🔍 得意先名」** をクリックすると、右側のパネルにその得意先の全購入商品が表示されます。")
+                clicked_res = render_clickable_customer_table(show_df, selected_cust=st.session_state["selected_side_cust"])
+                if clicked_res and isinstance(clicked_res, dict) and clicked_res.get("cust"):
+                    last_ts = st.session_state.get("_last_cust_click_ts", 0)
+                    cur_ts = clicked_res.get("ts", 0)
+                    if cur_ts != last_ts:
+                        st.session_state["_last_cust_click_ts"] = cur_ts
+                        clicked_cust = clicked_res["cust"]
+                        st.session_state["selected_side_cust"] = clicked_cust
+                        if clicked_res.get("is_mobile"):
+                            cust_sub_df = filtered[filtered["得意先名"] == clicked_cust]
+                            show_customer_top10_dialog(clicked_cust, cust_sub_df, period_text)
+                        else:
+                            st.rerun()
+
+            with col_right_detail:
+                target_side_cust = st.session_state["selected_side_cust"]
+                cust_sub_df = filtered[filtered["得意先名"] == target_side_cust]
+                side_prod_df = build_customer_all_products_df(cust_sub_df)
+
+                st.markdown(f"<div class='side-panel-header'>🎯 {target_side_cust} の購入商品内訳（全件）</div>", unsafe_allow_html=True)
+                if not side_prod_df.empty:
+                    s_cnt = len(side_prod_df)
+                    s_qty = int(side_prod_df["数量"].sum())
+                    s_amt = int(side_prod_df["販売金額"].sum())
+                    sc1, sc2 = st.columns([2.6, 1.4])
+                    with sc1:
+                        st.markdown(f"""
+                        <div class="total-card" style="margin-bottom:6px; padding:7px 12px; font-size:13px;">
+                            <b>該当品目数:</b> <span style="color:#1a73e8; font-weight:bold;">{s_cnt:,} 品目</span> &nbsp;|&nbsp;
+                            <b>数量合計:</b> {s_qty:,} 個 &nbsp;|&nbsp;
+                            <b>売上合計:</b> <span style="color:#d93025; font-weight:bold;">¥{s_amt:,}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with sc2:
+                        st.download_button(
+                            label="📥 この得意先の内訳をExcel保存",
+                            data=generate_excel_bytes(side_prod_df, f"{target_side_cust}_商品内訳"),
+                            file_name=f"得意先別商品内訳_{target_side_cust}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key=f"dl_side_cust_{target_side_cust}"
+                        )
+                    render_universal_table(side_prod_df, max_h=525)
+                else:
+                    st.info("該当期間の商品売上データはありません。")
     else:
         st.info("該当期間のデータがありません。")
     st.stop()
 
 # ========================================================
-# ★ 📦 商品別売上ランキング
+# ★ 📦 商品別売上ランキング（スマホ最適化表示にも対応）
 # ========================================================
 elif view_type == '📦 商品別売上ランキング':
     group_cols = [c for c in ["得意先名", "担当者", "商品コード", "商品名"] if c in filtered.columns]
@@ -1894,17 +1990,23 @@ elif view_type == '📦 商品別売上ランキング':
         agg = agg.sort_values(by="販売金額", ascending=False)
         agg.insert(0, "番号", range(1, len(agg) + 1))
         if limit_val != "全件": agg = agg.head(int(limit_val))
-        cols = ["番号", "得意先名", "担当者", "商品コード", "商品名", "数量", "販売価格帯", "単価原価", "販売金額", "原価合計", "粗利額", "粗利率", "構成比", "販売期間"]
-        show_df = agg[[c for c in cols if c in agg.columns]].copy()
+        full_cols = ["番号", "得意先名", "担当者", "商品コード", "商品名", "数量", "販売価格帯", "単価原価", "販売金額", "原価合計", "粗利額", "粗利率", "構成比", "販売期間"]
+        full_prod_df = agg[[c for c in full_cols if c in agg.columns]].copy()
+        if is_mobile_view:
+            mob_cols = ["番号", "得意先名", "商品コード", "商品名", "数量", "販売金額", "粗利率"]
+            show_df = agg[[c for c in mob_cols if c in agg.columns]].copy()
+        else:
+            show_df = full_prod_df
     else:
+        full_prod_df = pd.DataFrame()
         show_df = pd.DataFrame()
 
     c_sum1, c_sum2 = st.columns([4, 1.2])
     with c_sum1:
         st.markdown(f"<div class='total-card' style='margin-bottom:0;'><b>抽出期間:</b> <span style='color:#1a73e8; font-weight:bold;'>{period_text}</span> &nbsp;|&nbsp; <b>販売金額合計:</b> <span style='color:#d93025; font-size:16px; font-weight:bold;'>{int(total_sales):,} 円</span></div>", unsafe_allow_html=True)
     with c_sum2:
-        if not show_df.empty:
-            st.download_button(label="📥 Excelで保存", data=generate_excel_bytes(show_df, "商品別売上ランキング"), file_name=f"商品別売上ランキング_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        if not full_prod_df.empty:
+            st.download_button(label="📥 Excelで保存", data=generate_excel_bytes(full_prod_df, "商品別売上ランキング"), file_name=f"商品別売上ランキング_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
     st.write("")
     render_universal_table(show_df)
