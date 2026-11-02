@@ -99,8 +99,9 @@ def generate_excel_bytes(data_df, title_str):
     return output.getvalue()
 
 def clean_cust_name(val):
-    if not isinstance(val, str) or not val.strip(): return ""
+    if pd.isna(val) or not isinstance(val, str) or not val.strip(): return ""
     raw = str(val).strip()
+    if raw.lower() == "nan": return ""
     norm = re.sub(r'[\s ]+', '', raw)
     if "アマゾン" in norm:
         if "セラー" in norm: return "アマゾンセラー"
@@ -119,6 +120,7 @@ def clean_num(val):
 def convert_staff_name(val):
     if pd.isna(val): return ""
     v = str(val).strip().replace(".0", "")
+    if v.lower() == "nan": return ""
     return STAFF_MAP.get(v, v)
 
 def normalize_target_staff_name(raw_name):
@@ -129,7 +131,7 @@ def normalize_target_staff_name(raw_name):
     return s
 
 def clean_product_name(val):
-    if not isinstance(val, str) or not val.strip(): return ""
+    if pd.isna(val) or not isinstance(val, str) or not val.strip(): return ""
     if "】" in val: val = val.split("】", 1)[-1]
     return re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]', '', val).strip()
 
@@ -411,7 +413,13 @@ def _read_single_csv(f, explicit_name=None):
     else:
         y_m = re.search(r'(\d{4})年', fname)
         d_m = re.search(r'yayoi_(\d{4})', fname, re.IGNORECASE)
-        if y_m and d_m: path_date = f"{y_m.group(1)}{d_m.group(1)}"
+        if y_m and d_m:
+            path_date = f"{y_m.group(1)}{d_m.group(1)}"
+        elif d_m:
+            mmdd = d_m.group(1)
+            mm_int = int(mmdd[:2]) if mmdd[:2].isdigit() else 9
+            inferred_y = 2026 if mm_int >= 7 else 2027
+            path_date = f"{inferred_y}{mmdd}"
 
     for enc in ["cp932", "shift_jis", "utf-8", "utf-8-sig"]:
         try:
@@ -434,25 +442,36 @@ def _read_single_csv(f, explicit_name=None):
         except Exception: continue
     return None
 
+def _parse_ym_from_filename_or_override(fname, override_ym=None):
+    if override_ym:
+        m_ov = re.search(r'(\d{4})\D+(\d{1,2})', str(override_ym))
+        if m_ov:
+            y_i, m_i = int(m_ov.group(1)), int(m_ov.group(2))
+            return y_i, m_i
+    norm_f = str(fname).replace(os.sep, '/')
+    # 1. 「2026年10月」「2026-10」「2026_10」など年＋月がある場合
+    m_full = re.search(r'(20\d{2})[年/\-_ ]*(\d{1,2})月?', norm_f)
+    if m_full:
+        y_i, m_i = int(m_full.group(1)), int(m_full.group(2))
+        if 1 <= m_i <= 12:
+            return y_i, m_i
+    # 2. 「10月」「9月」など月だけがある場合（7〜12月は2026年、1〜6月は2027年と自動判定）
+    m_month_only = re.search(r'(?<!\d)(1[0-2]|0?[1-9])月', norm_f)
+    if m_month_only:
+        m_i = int(m_month_only.group(1))
+        y_i = 2026 if m_i >= 7 else 2027
+        return y_i, m_i
+    now_dt = datetime.now()
+    return now_dt.year, now_dt.month
+
 def _read_amazon_seller_csv(f, explicit_name=None, override_ym=None):
     fname = explicit_name if explicit_name else str(f)
-    norm_f = fname.replace(os.sep, '/')
-    ym_match = re.search(r'(\d{4})年?[/\-_]?(\d{1,2})月?', norm_f)
-    if override_ym and len(override_ym) >= 7:
-        y_str, m_str = override_ym[:4], override_ym[5:7]
-        target_ym = f"{y_str}年{m_str}月"
-        try: dt_last = pd.Timestamp(year=int(y_str), month=int(m_str), day=1) + pd.offsets.MonthEnd(1)
-        except Exception: dt_last = datetime(int(y_str), int(m_str), 28)
-    elif ym_match:
-        y_str, m_str = ym_match.group(1), f"{int(ym_match.group(2)):02d}"
-        target_ym = f"{y_str}年{m_str}月"
-        try: dt_last = pd.Timestamp(year=int(y_str), month=int(m_str), day=1) + pd.offsets.MonthEnd(1)
-        except Exception: dt_last = datetime(int(y_str), int(m_str), 28)
-    else:
-        now_dt = datetime.now()
-        target_ym = f"{now_dt.year}年{now_dt.month:02d}月"
-        try: dt_last = pd.Timestamp(year=now_dt.year, month=now_dt.month, day=1) + pd.offsets.MonthEnd(1)
-        except Exception: dt_last = now_dt
+    y_i, m_i = _parse_ym_from_filename_or_override(fname, override_ym)
+    target_ym = f"{y_i}年{m_i:02d}月"
+    try:
+        dt_last = pd.Timestamp(year=y_i, month=m_i, day=1) + pd.offsets.MonthEnd(1)
+    except Exception:
+        dt_last = pd.Timestamp(year=y_i, month=m_i, day=28)
 
     for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
         try:
@@ -475,10 +494,19 @@ def _read_amazon_seller_csv(f, explicit_name=None, override_ym=None):
                 elif len(d.columns) >= 2: amt_series = (d.iloc[:, 1].apply(clean_num) / 1.10).round().astype(int)
                 else: continue
             res = pd.DataFrame({
-                "商品コード": sku_series, "商品名": sku_series, "得意先名": "アマゾンセラー", "担当者": "水原",
-                "数量": qty_series, "金額": amt_series, "日付_dt": dt_last,
-                "日付": dt_last.strftime('%Y/%m/%d'), "年月": target_ym, "_source_file": os.path.basename(fname)
+                "商品コード": sku_series,
+                "元商品名": sku_series,
+                "商品名": sku_series,
+                "得意先名": "アマゾンセラー",
+                "担当者": "水原",
+                "数量": qty_series,
+                "金額": amt_series,
+                "日付_dt": dt_last,
+                "日付": dt_last.strftime('%Y/%m/%d'),
+                "年月": target_ym,
+                "_source_file": os.path.basename(fname)
             })
+            res = res[res["商品コード"].astype(str).str.strip().ne("") & ~res["商品コード"].astype(str).isin(["nan", "None"])].copy()
             res["単価"] = (res["金額"] / res["数量"].replace(0, 1)).round().astype(int)
             return res
         except Exception: continue
@@ -499,21 +527,21 @@ def _parse_raw_df_to_standard(df_all):
     c_staff = find_col(["担当者コード", "担当者CD", "担当者名", "担当者", "担当", "営業担当"], all_cols)
 
     res = pd.DataFrame()
-    if c_pcode: res["商品コード"] = df_all[c_pcode].astype(str).str.strip()
+    if c_pcode: res["商品コード"] = df_all[c_pcode].fillna("").astype(str).str.strip()
     if c_pname:
-        res["元商品名"] = df_all[c_pname].astype(str).str.strip()
-        res["商品名"] = df_all[c_pname].astype(str).map(clean_product_name)
-    res["得意先名"] = df_all[c_cname].astype(str).str.strip().map(clean_cust_name) if c_cname else ""
-    res["担当者"] = df_all[c_staff].map(convert_staff_name).fillna("").replace("nan", "") if c_staff else ""
+        res["元商品名"] = df_all[c_pname].fillna("").astype(str).str.strip()
+        res["商品名"] = df_all[c_pname].fillna("").astype(str).map(clean_product_name)
+    res["得意先名"] = df_all[c_cname].fillna("").astype(str).str.strip().map(clean_cust_name) if c_cname else ""
+    res["担当者"] = df_all[c_staff].map(convert_staff_name).fillna("").astype(str).replace("nan", "") if c_staff else ""
     res["数量"] = df_all["_auto_qty"].fillna(0).astype(int)
     res["単価"] = df_all["_auto_price"].fillna(0).astype(int)
     res["金額"] = df_all["_auto_amt"].fillna(res["数量"] * res["単価"]).astype(int)
-    if "_source_file" in df_all.columns: res["_source_file"] = df_all["_source_file"]
+    if "_source_file" in df_all.columns: res["_source_file"] = df_all["_source_file"].fillna("").astype(str)
 
-    raw_s = df_all[c_date].astype(str).str.strip() if c_date else pd.Series([""] * len(df_all))
+    raw_s = df_all[c_date].fillna("").astype(str).str.strip() if c_date else pd.Series([""] * len(df_all))
     clean_date = raw_s.str.replace(r'\.0$', '', regex=True).str.replace(r'[-/.\s]', '', regex=True)
     if "_fallback_date" in df_all.columns:
-        clean_date = clean_date.where(clean_date.str.len() == 8, df_all["_fallback_date"].astype(str))
+        clean_date = clean_date.where(clean_date.str.len() == 8, df_all["_fallback_date"].fillna("").astype(str))
     dt = pd.to_datetime(clean_date, format="%Y%m%d", errors="coerce").fillna(pd.to_datetime(raw_s, errors="coerce"))
     res["日付_dt"] = dt
     res["日付"] = dt.dt.strftime('%Y/%m/%d').fillna("")
@@ -521,14 +549,31 @@ def _parse_raw_df_to_standard(df_all):
     if "商品名" in res.columns: res = res[~res["商品名"].str.contains("送料", na=False)].copy()
     return res
 
-def finalize_sales_df(df, cost_master):
+def finalize_sales_df(df, cost_master, code_name_dict=None):
     if df.empty: return df
     df["日付_dt"] = pd.to_datetime(df["日付_dt"], errors="coerce")
+    # 🔴 文字列カラムのNaN混入を完全排除（TypeError根絶）
+    for s_col in ["商品コード", "商品名", "元商品名", "得意先名", "担当者", "日付", "年月", "_source_file"]:
+        if s_col in df.columns:
+            df[s_col] = df[s_col].fillna("").astype(str).replace({"nan": "", "None": ""})
+        else:
+            df[s_col] = ""
+
+    # アマゾンセラー等で商品名がSKUのままの場合、マスタから商品名を自動補完
+    if code_name_dict:
+        mask_same = (df["商品名"] == df["商品コード"]) | (df["商品名"] == "")
+        df.loc[mask_same, "商品名"] = df.loc[mask_same, "商品コード"].map(lambda c: code_name_dict.get(c, c))
+
     if "担当者" in df.columns and "得意先名" in df.columns:
-        valid_staff_df = df[df["担当者"].astype(str).str.strip().ne("")].sort_values("日付_dt")
+        valid_staff_df = df[df["担当者"].str.strip().ne("")].sort_values("日付_dt")
         if not valid_staff_df.empty:
             cust_current_staff_map = valid_staff_df.groupby("得意先名")["担当者"].last().to_dict()
             df["担当者"] = df["得意先名"].map(lambda c: cust_current_staff_map.get(c, ""))
+
+    for n_col in ["数量", "単価", "金額"]:
+        if n_col in df.columns:
+            df[n_col] = df[n_col].apply(clean_num).round().astype(int)
+
     if "商品コード" in df.columns:
         df["単価原価"] = df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
         df["原価合計"] = (df["数量"] * df["単価原価"]).round().astype(int)
@@ -539,6 +584,8 @@ def finalize_sales_df(df, cost_master):
 def load_and_prep_data():
     cost_path, cost_mtime = get_cost_master_file_info()
     cost_master = load_cost_master(cost_path, cost_mtime)
+    jan_path, jan_mtime = get_jan_file_info()
+    _, jan_title_dict_local, _ = load_jan_master_v2(jan_path, jan_mtime)
 
     cached_df = pd.DataFrame()
     existing_sources = set()
@@ -546,11 +593,10 @@ def load_and_prep_data():
         try:
             cached_df = pd.read_parquet(CACHE_FILE)
             if not cached_df.empty and "_source_file" in cached_df.columns:
-                existing_sources = set(cached_df["_source_file"].dropna().unique())
+                existing_sources = set(cached_df["_source_file"].dropna().astype(str).unique())
         except Exception:
             cached_df = pd.DataFrame()
 
-    # GドライブおよびGitHubリポジトリ(BASE_DIR)に置かれた新規CSVを自動探索して追加結合
     raw_candidates = []
     for search_root in [BASE_SHARE, BASE_DIR]:
         if os.path.exists(search_root):
@@ -564,32 +610,42 @@ def load_and_prep_data():
         if bname not in existing_sources:
             csv_candidates.append(f)
 
-    new_dfs = []
+    new_yayoi_df = pd.DataFrame()
+    new_amz_df = pd.DataFrame()
     if csv_candidates:
-        yayoi_files = [f for f in csv_candidates if "yayoi" in f.lower()]
-        amz_files = [f for f in csv_candidates if "アマゾン売上" in f or "businessreport" in f.lower() or "amazon" in f.lower()]
-        if not yayoi_files:
-            yayoi_files = [f for f in csv_candidates if f not in amz_files]
+        yayoi_files = [f for f in csv_candidates if "yayoi" in os.path.basename(f).lower()]
+        amz_files = [f for f in csv_candidates if f not in yayoi_files and any(k in f.lower() for k in ["アマゾン", "amazon", "businessreport", "月"])]
+        if not yayoi_files and not amz_files:
+            yayoi_files = csv_candidates
 
         if yayoi_files:
             with ThreadPoolExecutor(max_workers=16) as executor:
                 res_list = list(executor.map(_read_single_csv, yayoi_files))
             valid_res = [d for d in res_list if d is not None and not d.empty]
             if valid_res:
-                new_dfs.append(_parse_raw_df_to_standard(pd.concat(valid_res, ignore_index=True)))
+                new_yayoi_df = _parse_raw_df_to_standard(pd.concat(valid_res, ignore_index=True))
 
         if amz_files:
             amz_res = [_read_amazon_seller_csv(af) for af in amz_files]
             valid_amz = [ad for ad in amz_res if ad is not None and not ad.empty]
             if valid_amz:
-                new_dfs.append(pd.concat(valid_amz, ignore_index=True))
+                new_amz_df = pd.concat(valid_amz, ignore_index=True)
 
-    all_parts = [d for d in ([cached_df] + new_dfs) if d is not None and not d.empty]
+    # アマゾンセラーの新しい月データが入ってきた場合、その月の古いアマゾンセラーデータを置き換えて二重計上を防止
+    if not cached_df.empty and not new_amz_df.empty:
+        amz_yms = set(new_amz_df["年月"].dropna().unique())
+        cached_df = cached_df[~((cached_df["得意先名"] == "アマゾンセラー") & (cached_df["年月"].isin(amz_yms)))].copy()
+
+    all_parts = [d for d in [cached_df, new_yayoi_df, new_amz_df] if d is not None and not d.empty]
     df = pd.concat(all_parts, ignore_index=True) if all_parts else pd.DataFrame()
 
     if not df.empty:
-        df = finalize_sales_df(df, cost_master)
-        if new_dfs:
+        name_lookup = dict(jan_title_dict_local or {})
+        valid_names = df[(df["商品名"].notna()) & (df["商品名"].astype(str) != df["商品コード"].astype(str)) & (df["商品名"].astype(str).str.strip() != "")]
+        if not valid_names.empty:
+            name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
+        df = finalize_sales_df(df, cost_master, name_lookup)
+        if not new_yayoi_df.empty or not new_amz_df.empty:
             try: df.to_parquet(CACHE_FILE, index=False)
             except Exception: pass
 
@@ -636,7 +692,6 @@ def render_universal_table(df_data, max_h=600):
     """
     components.html(table_html, height=min(max_h + 20, 80 + len(df_data) * 36), scrolling=True)
 
-# 🔴 画面幅（PC vs スマホ）も同時取得できるクリック対応テーブルコンポーネント
 _CLICKABLE_TABLE_DIR = os.path.join(BASE_DIR, "_cust_table_comp_v3")
 os.makedirs(_CLICKABLE_TABLE_DIR, exist_ok=True)
 _CLICKABLE_INDEX_HTML = os.path.join(_CLICKABLE_TABLE_DIR, "index.html")
@@ -1066,7 +1121,7 @@ def generate_meeting_top_cust_excel(res_df, title_str):
     return out.getvalue()
 
 # ========================================================
-# ★ データ読込 & マスタ初期化（キャッシュ削除ボタン撤去＋CSV追加機能搭載）
+# ★ データ読込 & マスタ初期化
 # ========================================================
 df, file_count, cost_master_dict = load_and_prep_data()
 member_p_path, member_p_mtime = get_member_price_file_info()
@@ -1092,30 +1147,45 @@ with col_mob_toggle:
     is_mobile_view = st.toggle("📱 スマホ最適化表示", value=False, key="mobile_opt_toggle")
 with col_upload:
     with st.expander("📥 売上CSV追加（弥生 / Amazon）", expanded=False):
-        st.caption("※GitHubに直接CSVをアップロードするか、ここからファイルを選択して追加できます。")
+        st.caption("※GitHubに直接CSVを置くか、ここからファイルを選択して追加できます。")
         up_csv_type = st.radio("種類", ["弥生売上CSV", "アマゾンセラーCSV"], horizontal=True, key="up_csv_type_radio")
         amz_ym_input = ""
         if up_csv_type == "アマゾンセラーCSV":
-            amz_ym_input = st.text_input("対象年月（例: 2026年10月）", value=datetime.now().strftime("%Y年%m月"), key="amz_ym_input_box")
+            amz_ym_input = st.text_input("対象年月（ファイル名に年月が無い場合に適用）", value=datetime.now().strftime("%Y年%m月"), key="amz_ym_input_box")
         uploaded_files = st.file_uploader("CSVファイルを選択（複数可）", type=["csv"], accept_multiple_files=True, key="csv_uploader_widget")
         if uploaded_files and st.button("➕ データベースに追加反映", type="primary", use_container_width=True):
-            added_parts = []
+            added_yayoi = []
+            added_amz = []
             for uf in uploaded_files:
                 if up_csv_type == "弥生売上CSV":
                     raw_d = _read_single_csv(uf, explicit_name=uf.name)
                     if raw_d is not None and not raw_d.empty:
-                        added_parts.append(_parse_raw_df_to_standard(raw_d))
+                        added_yayoi.append(_parse_raw_df_to_standard(raw_d))
                 else:
-                    amz_d = _read_amazon_seller_csv(uf, explicit_name=uf.name, override_ym=amz_ym_input)
+                    # ファイル名に「10月」や「2026年10月」があればそれを優先、無ければ入力欄の年月を使用
+                    has_m_in_name = bool(re.search(r'(20\d{2})[年/\-_ ]*(\d{1,2})月?|(?<!\d)(1[0-2]|0?[1-9])月', uf.name))
+                    amz_d = _read_amazon_seller_csv(uf, explicit_name=uf.name, override_ym=(None if has_m_in_name else amz_ym_input))
                     if amz_d is not None and not amz_d.empty:
-                        added_parts.append(amz_d)
-            if added_parts:
-                new_merged = pd.concat([df] + added_parts, ignore_index=True)
-                new_merged = finalize_sales_df(new_merged, cost_master_dict)
+                        added_amz.append(amz_d)
+
+            base_df = df.copy()
+            if added_amz:
+                amz_concat = pd.concat(added_amz, ignore_index=True)
+                replace_yms = set(amz_concat["年月"].dropna().unique())
+                base_df = base_df[~((base_df["得意先名"] == "アマゾンセラー") & (base_df["年月"].isin(replace_yms)))].copy()
+                added_yayoi.append(amz_concat)
+
+            if added_yayoi:
+                new_merged = pd.concat([base_df] + added_yayoi, ignore_index=True)
+                name_lookup = dict(jan_title_dict or {})
+                valid_names = new_merged[(new_merged["商品名"].notna()) & (new_merged["商品名"].astype(str) != new_merged["商品コード"].astype(str)) & (new_merged["商品名"].astype(str).str.strip() != "")]
+                if not valid_names.empty:
+                    name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
+                new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
                 try:
                     new_merged.to_parquet(CACHE_FILE, index=False)
                     st.cache_data.clear()
-                    st.success(f"✅ {len(uploaded_files)}件のCSVを追加しました！")
+                    st.success(f"✅ {len(uploaded_files)}件のCSVをデータベースに反映しました！")
                     time.sleep(0.5)
                     st.rerun()
                 except Exception as e:
@@ -1128,14 +1198,14 @@ with col_upload:
                     file_name="sales_cache.parquet",
                     mime="application/octet-stream",
                     use_container_width=True,
-                    help="ダウンロードしたファイルをGitHubにアップロードすると永続保存されます。"
+                    help="ダウンロードしたファイルをGitHubに上書きアップロードすると永続保存されます。"
                 )
 
 if df.empty:
     st.error("売上データが見つかりませんでした。GitHubの `sales_cache.parquet` を確認してください。")
     st.stop()
 
-valid_ym = sorted([x for x in df["年月"].dropna().unique() if x and str(x).strip() != ""])
+valid_ym = sorted([str(x).strip() for x in df["年月"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
 desc_valid_ym = sorted(valid_ym, reverse=True)
 
@@ -1845,16 +1915,16 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
         with col_p2: d_end = st.date_input("終了日", value=e_date_calc, min_value=min_date, max_value=max_date)
 
     with col_staff:
-        staff_options = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
+        staff_options = ["（すべて）"] + sorted([str(x).strip() for x in df["担当者"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
         sel_staff = st.selectbox("担当者指定", staff_options)
 
-    all_unique_custs = sorted([x for x in df["得意先名"].unique() if x])
+    all_unique_custs = sorted([str(x).strip() for x in df["得意先名"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
     c1, c2, c3, c4 = st.columns(4)
     with c1: sel_cust = st.selectbox("得意先名", ["（すべて）"] + all_unique_custs)
     with c2: search_cust = st.text_input("得意先検索", placeholder="会社名の一部を入力（例：丸藤、アマゾン）...")
     with c3:
         prod_pairs = df[["商品コード", "商品名"]].dropna().drop_duplicates()
-        prod_list = ["（すべて）"] + sorted([f"{r['商品コード']} : {r['商品名']}" for _, r in prod_pairs.iterrows()])
+        prod_list = ["（すべて）"] + sorted([f"{str(r['商品コード']).strip()} : {str(r['商品名']).strip()}" for _, r in prod_pairs.iterrows() if str(r['商品コード']).strip() not in ["", "nan", "None"]])
         sel_prod = st.selectbox("商品選択", prod_list)
     with c4: search_prod = st.text_input("商品検索", placeholder="商品コード・品名の一部を入力...")
 
@@ -2203,7 +2273,7 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
     with col_m2:
         compare_cust_count = st.selectbox("比較上位社数", [4, 6, 8, 10, 20, 30], index=0, key="compare_cust_count_meeting_v3")
     with col_m3:
-        staff_options_meeting = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
+        staff_options_meeting = ["（すべて）"] + sorted([str(x).strip() for x in df["担当者"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
         sel_staff_m = st.selectbox("担当者指定", staff_options_meeting, key="meeting_staff_sel_v3")
 
     tgt_y, tgt_m = int(target_meeting_ym[:4]), int(target_meeting_ym[5:7])
@@ -2362,7 +2432,7 @@ elif view_type == '📑 営業会議用：上位客先別売上実績':
     with col_m1: target_meeting_ym = st.selectbox("対象月度（期間ショートカット連動）", desc_valid_ym, key="tgt_ym_topcust_v3")
     with col_m2: meeting_cust_count = st.selectbox("表示上位数", [10, 20, 30, 50, 100], index=0, key="meeting_cust_count_v3")
     with col_m3:
-        staff_options_topcust = ["（すべて）"] + sorted([x for x in df["担当者"].unique() if x and x != "nan"])
+        staff_options_topcust = ["（すべて）"] + sorted([str(x).strip() for x in df["担当者"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
         sel_staff_tc = st.selectbox("担当者指定", staff_options_topcust, key="topcust_staff_sel_v3")
 
     tgt_y, tgt_m = int(target_meeting_ym[:4]), int(target_meeting_ym[5:7])
