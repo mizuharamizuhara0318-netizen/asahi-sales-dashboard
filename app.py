@@ -291,16 +291,35 @@ def load_member_group_master(file_path, file_mtime):
         except Exception: pass
     return grp_map
 
-def create_lotmember_csv_bytes(items_list, group_no, member_code, sku_meta_dict):
+def lookup_group_info_by_comp(comp_name, grp_master_dict):
+    if not comp_name or not grp_master_dict:
+        return {"group_no": "", "member_code": ""}
+    c_trim = str(comp_name).strip()
+    if c_trim in grp_master_dict:
+        return grp_master_dict[c_trim]
+    norm_c = re.sub(r'[\s ]+', '', c_trim)
+    if norm_c in grp_master_dict:
+        return grp_master_dict[norm_c]
+    for k, v in grp_master_dict.items():
+        norm_k = re.sub(r'[\s ]+', '', str(k))
+        if norm_c and norm_k and (norm_c in norm_k or norm_k in norm_c):
+            return v
+    return {"group_no": "", "member_code": ""}
+
+def create_lotmember_csv_bytes(items_list, group_no, member_code, sku_meta_dict, default_ctrl=None):
     out_rows = []
     g_str = clean_code_str(group_no)
     m_str = clean_code_str(member_code)
     for item in items_list:
         sk = str(item.get("商品コード", "")).strip()
         if not sk: continue
-        reg_str = str(item.get("登録区分", "更新 (u)"))
-        ctrl = "n" if ("n" in reg_str.lower() or "新規" in reg_str) else "u"
-        u_price = int(clean_num(item.get("登録単価", 0)))
+        if default_ctrl in ["n", "u"]:
+            ctrl = default_ctrl
+        else:
+            reg_str = str(item.get("登録区分", "更新 (u)"))
+            ctrl = "n" if ("n" in reg_str.lower() or "新規" in reg_str) else "u"
+        raw_p = item.get("登録単価", item.get("見積単価", 0))
+        u_price = int(clean_num(raw_p))
         meta = (sku_meta_dict or {}).get(sk, {'商品規格ID': '', '商品ID': '', '商品管理番号': sk, '商品番号': sk})
         out_rows.append({
             'コントロールカラム': ctrl,
@@ -1443,7 +1462,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
         c_lot1, c_lot2, c_lot3 = st.columns([2.2, 1.0, 1.0])
         with c_lot1:
             sel_lot_comp = st.selectbox("🏢 登録対象の会社名（加盟店グループ管理マスタ）", grp_comp_list if grp_comp_list else ["株式会社ナスコム"], index=default_nascom_idx, key=f"lot_comp_sel_{s_key}")
-        grp_info = member_group_master_dict.get(sel_lot_comp, member_group_master_dict.get(re.sub(r'[\s ]+', '', sel_lot_comp), {"group_no": "", "member_code": ""}))
+        grp_info = lookup_group_info_by_comp(sel_lot_comp, member_group_master_dict)
         with c_lot2:
             in_grp_no = st.text_input("F列：グループ連番（自動反映）", value=grp_info.get("group_no", ""), key=f"lot_grp_no_{sel_lot_comp}_{s_key}")
         with c_lot3:
@@ -1536,7 +1555,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             cur_price = int(clean_num(row_l.get("登録単価", 0)))
             cur_cost = int(clean_num(row_l.get("単価原価", 0)))
             cur_name = str(row_l.get("商品名", "")).strip() if pd.notna(row_l.get("商品名")) else ""
-            cur_min = int(clean_num(row_l.get("最低下代", 0)))
+            cur_min = int(clean_num(row_e.get("最低下代", 0))) if "row_e" in locals() else int(clean_num(row_l.get("最低下代", 0)))
 
             if c_code != prev_code or not cur_name or cur_name == "None" or cur_price == 0:
                 auto_name, _, auto_price, auto_cost, auto_min, applied_lbl = get_sku_details(c_code, cur_rank if cur_rank != "None" else "ロット単価", sel_lot_comp)
@@ -1985,16 +2004,22 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
         if not staff_Filter_list:
             st.info(f"担当「{est_staff}」の保存された見積もりはありません。")
         else:
-            search_est_kw = st.text_input("🔍 見積番号・会社名・商品名で絞り込み", placeholder="例: アーネスト, ABA-105...")
+            search_est_kw = st.text_input("🔍 見積番号・会社名・商品名で絞り込み", placeholder="例: アーネスト, ナスコム, ABA-105...")
             for idx_q, est in enumerate(st.session_state.saved_estimates):
                 if est_staff != "（すべて表示）" and est.get("staff", "") != est_staff and (est_staff not in str(est.get("hitokoto", ""))):
                     continue
                 if search_est_kw.strip() and search_est_kw.strip() not in json.dumps(est, ensure_ascii=False):
                     continue
 
+                est_comp_name = est.get("cust_comp", "") or est.get("ship_comp", "")
+                matched_grp = lookup_group_info_by_comp(est_comp_name, member_group_master_dict)
+                g_no_est = matched_grp.get("group_no", "")
+                m_cd_est = matched_grp.get("member_code", "")
+                grp_badge_str = f" &nbsp;|&nbsp; <span style='color:#1d4ed8; font-size:12px;'>[グループ連番: <b>{g_no_est or '未検出'}</b> / 加盟店コード: <b>{m_cd_est or '未検出'}</b>]</span>"
+
                 st.markdown(f"""
                 <div class="est-card"><div class="est-header">
-                    <div><span class="badge-green">店</span> &nbsp;<b>見積番号: {est.get('q_no', '')}</b> &nbsp;|&nbsp; <b>担当:</b> {est.get('staff', est_staff)} &nbsp;|&nbsp; <b>見積日時:</b> {est.get('created_at', '')}</div>
+                    <div><span class="badge-green">店</span> &nbsp;<b>見積番号: {est.get('q_no', '')}</b> &nbsp;|&nbsp; <b>担当:</b> {est.get('staff', est_staff)} &nbsp;|&nbsp; <b>見積日時:</b> {est.get('created_at', '')}{grp_badge_str}</div>
                     <div><b>税込見積総額:</b> <span style="color:#d93025; font-size:16px; font-weight:bold;">¥{int(est.get('grand_total', 0)):,}</span></div>
                 </div></div>
                 """, unsafe_allow_html=True)
@@ -2011,22 +2036,41 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 with c_items:
                     items_df = pd.DataFrame(est.get("items", []))
                     if not items_df.empty:
-                        st.dataframe(items_df[[c for c in ["商品コード", "商品名", "数量", "見積単価", "合計金額"] if c in items_df.columns]], use_container_width=True, hide_index=True)
+                        st.dataframe(items_df[[c for c in ["商品コード", "商品名", "数量", "見積単価", "合計金額", "粗利額", "粗利率"] if c in items_df.columns]], use_container_width=True, hide_index=True)
 
-                b_col1, b_col2, b_col3, _ = st.columns([2.0, 1.6, 1.0, 2.0])
+                b_col1, b_col_lot_mode, b_col_lot_dl, b_col2, b_col3 = st.columns([1.8, 0.9, 1.9, 1.3, 0.8])
                 with b_col1:
                     st.download_button(
                         label="🛒 注文確定：スマレジ用CSV出力",
                         data=create_smaregi_order_csv_bytes(est, raw_prod_title_map, jan_std_price_dict),
                         file_name=f"order_{est.get('q_no')}_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv", key=f"dl_saved_csv_{idx_q}_{est.get('q_no')}"
+                        mime="text/csv", use_container_width=True, key=f"dl_saved_csv_{idx_q}_{est.get('q_no')}"
+                    )
+                with b_col_lot_mode:
+                    sel_est_ctrl = st.selectbox(
+                        "A列区分",
+                        ["更新 (u)", "新規 (n)"],
+                        index=0,
+                        key=f"est_lot_ctrl_{idx_q}_{est.get('q_no')}",
+                        label_visibility="collapsed"
+                    )
+                with b_col_lot_dl:
+                    ctrl_code = "n" if "n" in sel_est_ctrl else "u"
+                    st.download_button(
+                        label="🏷️ 価格登録CSV出力 (lotmember)",
+                        data=create_lotmember_csv_bytes(est.get("items", []), g_no_est, m_cd_est, lotmember_sku_meta_dict, default_ctrl=ctrl_code),
+                        file_name="item_class_lotmember.csv",
+                        mime="text/csv",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"dl_saved_lotcsv_{idx_q}_{est.get('q_no')}"
                     )
                 with b_col2:
-                    if st.button("✏️ 編集画面に読込", key=f"load_est_{idx_q}"):
+                    if st.button("✏️ 編集画面に読込", use_container_width=True, key=f"load_est_{idx_q}"):
                         st.session_state["load_target_estimate"] = est
                         st.rerun()
                 with b_col3:
-                    if st.button("🗑️ 削除", key=f"del_est_{idx_q}"):
+                    if st.button("🗑️ 削除", use_container_width=True, key=f"del_est_{idx_q}"):
                         st.session_state.saved_estimates.pop(idx_q)
                         save_quotes_list(st.session_state.saved_estimates)
                         st.rerun()
