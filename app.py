@@ -401,19 +401,21 @@ def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
     out_df = pd.DataFrame(rows, columns=ORDER_CSV_COLUMNS)
     return out_df.to_csv(index=False, encoding="cp932", errors="replace").encode("cp932")
 
-def _read_single_csv(f):
+def _read_single_csv(f, explicit_name=None):
+    fname = explicit_name if explicit_name else str(f)
     path_date = None
-    ym_match = re.search(r'(\d{4})年?[/\\_](\d{1,2})月?[/\\_]yayoi_(\d{2})(\d{2})', f, re.IGNORECASE)
+    ym_match = re.search(r'(\d{4})年?[/\\_]?(\d{1,2})月?[/\\_]?yayoi_(\d{2})(\d{2})', fname, re.IGNORECASE)
     if ym_match:
         y, m, md_m, md_d = ym_match.groups()
         path_date = f"{y}{md_m}{md_d}"
     else:
-        y_m = re.search(r'(\d{4})年', f)
-        d_m = re.search(r'yayoi_(\d{4})', f, re.IGNORECASE)
+        y_m = re.search(r'(\d{4})年', fname)
+        d_m = re.search(r'yayoi_(\d{4})', fname, re.IGNORECASE)
         if y_m and d_m: path_date = f"{y_m.group(1)}{d_m.group(1)}"
 
-    for enc in ["cp932", "shift_jis", "utf-8"]:
+    for enc in ["cp932", "shift_jis", "utf-8", "utf-8-sig"]:
         try:
+            if hasattr(f, "seek"): f.seek(0)
             d = pd.read_csv(f, encoding=enc, encoding_errors="replace", low_memory=False)
             cols = [str(c).strip() for c in d.columns]
             qty_cols = [c for c in cols if "数量" in c]
@@ -427,24 +429,34 @@ def _read_single_csv(f):
             else:
                 d["_auto_amt"] = d["_auto_qty"] * d["_auto_price"]
             d["_fallback_date"] = path_date
-            d["_source_file"] = os.path.basename(f)
+            d["_source_file"] = os.path.basename(fname)
             return d
         except Exception: continue
     return None
 
-def _read_amazon_seller_csv(f):
-    norm_f = f.replace(os.sep, '/')
-    ym_match = re.search(r'(\d{4})年?[/](\d{1,2})月?', norm_f)
-    if ym_match:
+def _read_amazon_seller_csv(f, explicit_name=None, override_ym=None):
+    fname = explicit_name if explicit_name else str(f)
+    norm_f = fname.replace(os.sep, '/')
+    ym_match = re.search(r'(\d{4})年?[/\-_]?(\d{1,2})月?', norm_f)
+    if override_ym and len(override_ym) >= 7:
+        y_str, m_str = override_ym[:4], override_ym[5:7]
+        target_ym = f"{y_str}年{m_str}月"
+        try: dt_last = pd.Timestamp(year=int(y_str), month=int(m_str), day=1) + pd.offsets.MonthEnd(1)
+        except Exception: dt_last = datetime(int(y_str), int(m_str), 28)
+    elif ym_match:
         y_str, m_str = ym_match.group(1), f"{int(ym_match.group(2)):02d}"
         target_ym = f"{y_str}年{m_str}月"
         try: dt_last = pd.Timestamp(year=int(y_str), month=int(m_str), day=1) + pd.offsets.MonthEnd(1)
         except Exception: dt_last = datetime(int(y_str), int(m_str), 28)
     else:
-        target_ym, dt_last = "2026年09月", datetime(2026, 9, 30)
+        now_dt = datetime.now()
+        target_ym = f"{now_dt.year}年{now_dt.month:02d}月"
+        try: dt_last = pd.Timestamp(year=now_dt.year, month=now_dt.month, day=1) + pd.offsets.MonthEnd(1)
+        except Exception: dt_last = now_dt
 
     for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
         try:
+            if hasattr(f, "seek"): f.seek(0)
             d = pd.read_csv(f, encoding=enc, encoding_errors="replace", low_memory=False)
             if d.empty: continue
             sku_series = next((d[c].astype(str).str.strip() for c in d.columns if str(c).strip().upper() == "SKU"), None)
@@ -465,7 +477,7 @@ def _read_amazon_seller_csv(f):
             res = pd.DataFrame({
                 "商品コード": sku_series, "商品名": sku_series, "得意先名": "アマゾンセラー", "担当者": "水原",
                 "数量": qty_series, "金額": amt_series, "日付_dt": dt_last,
-                "日付": dt_last.strftime('%Y/%m/%d'), "年月": target_ym, "_source_file": os.path.basename(f)
+                "日付": dt_last.strftime('%Y/%m/%d'), "年月": target_ym, "_source_file": os.path.basename(fname)
             })
             res["単価"] = (res["金額"] / res["数量"].replace(0, 1)).round().astype(int)
             return res
@@ -509,61 +521,79 @@ def _parse_raw_df_to_standard(df_all):
     if "商品名" in res.columns: res = res[~res["商品名"].str.contains("送料", na=False)].copy()
     return res
 
-@st.cache_data(show_spinner=False)
-def load_and_prep_data(force_reload=False):
-    cost_path, cost_mtime = get_cost_master_file_info()
-    cost_master = load_cost_master(cost_path, cost_mtime)
-    if not force_reload and os.path.exists(CACHE_FILE):
-        try:
-            cached_df = pd.read_parquet(CACHE_FILE)
-            if not cached_df.empty:
-                cached_df["日付_dt"] = pd.to_datetime(cached_df["日付_dt"])
-                cached_df["単価原価"] = cached_df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
-                cached_df["原価合計"] = (cached_df["数量"] * cached_df["単価原価"]).round().astype(int)
-                cached_df["粗利額"] = cached_df["金額"] - cached_df["原価合計"]
-                return cached_df, 1, cost_master, 0
-        except Exception: pass
-
-    csv_candidates = sorted(list(set(glob.glob(os.path.join(BASE_SHARE, "**", "*.csv"), recursive=True))))
-    yayoi_files = [f for f in csv_candidates if "yayoi" in f.lower()]
-    amz_files = [f for f in csv_candidates if "アマゾン売上" in f or "businessreport" in f.lower()]
-    if not yayoi_files: yayoi_files = [f for f in csv_candidates if f not in amz_files]
-
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        res_list = list(executor.map(_read_single_csv, yayoi_files))
-    valid_res = [d for d in res_list if d is not None and not d.empty]
-    new_df = _parse_raw_df_to_standard(pd.concat(valid_res, ignore_index=True)) if valid_res else pd.DataFrame()
-
-    amz_res = [_read_amazon_seller_csv(af) for af in amz_files]
-    valid_amz = [ad for ad in amz_res if ad is not None and not ad.empty]
-    new_amz_df = pd.concat(valid_amz, ignore_index=True) if valid_amz else pd.DataFrame()
-
-    valid_dfs = [d for d in [new_df, new_amz_df] if d is not None and not d.empty]
-    df = pd.concat(valid_dfs, ignore_index=True) if valid_dfs else pd.DataFrame()
-
-    if df.empty or ("アマゾンセラー" not in df.get("得意先名", pd.Series()).values):
-        sep_date = pd.Timestamp(2026, 9, 30)
-        amz_rows = [
-            {"商品コード": "ABA-501", "商品名": "ABA-501", "得意先名": "アマゾンセラー", "担当者": "水原", "数量": 100, "単価": 500, "金額": 50000, "日付_dt": sep_date, "日付": "2026/09/30", "年月": "2026年09月", "_source_file": "default_amz"},
-            {"商品コード": "ABA-507", "商品名": "ABA-507", "得意先名": "アマゾンセラー", "担当者": "水原", "数量": 50, "単価": 600, "金額": 30000, "日付_dt": sep_date, "日付": "2026/09/30", "年月": "2026/09/30", "_source_file": "default_amz"}
-        ]
-        df = pd.concat([df, pd.DataFrame(amz_rows)], ignore_index=True)
-
-    if not df.empty and "担当者" in df.columns and "得意先名" in df.columns:
+def finalize_sales_df(df, cost_master):
+    if df.empty: return df
+    df["日付_dt"] = pd.to_datetime(df["日付_dt"], errors="coerce")
+    if "担当者" in df.columns and "得意先名" in df.columns:
         valid_staff_df = df[df["担当者"].astype(str).str.strip().ne("")].sort_values("日付_dt")
         if not valid_staff_df.empty:
             cust_current_staff_map = valid_staff_df.groupby("得意先名")["担当者"].last().to_dict()
             df["担当者"] = df["得意先名"].map(lambda c: cust_current_staff_map.get(c, ""))
-
-    if not df.empty and "商品コード" in df.columns:
+    if "商品コード" in df.columns:
         df["単価原価"] = df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
         df["原価合計"] = (df["数量"] * df["単価原価"]).round().astype(int)
         df["粗利額"] = df["金額"] - df["原価合計"]
+    return df
 
-    try:
-        if not df.empty: df.to_parquet(CACHE_FILE, index=False)
-    except Exception: pass
-    return df, len(csv_candidates), cost_master, len(csv_candidates)
+@st.cache_data(show_spinner=False)
+def load_and_prep_data():
+    cost_path, cost_mtime = get_cost_master_file_info()
+    cost_master = load_cost_master(cost_path, cost_mtime)
+
+    cached_df = pd.DataFrame()
+    existing_sources = set()
+    if os.path.exists(CACHE_FILE):
+        try:
+            cached_df = pd.read_parquet(CACHE_FILE)
+            if not cached_df.empty and "_source_file" in cached_df.columns:
+                existing_sources = set(cached_df["_source_file"].dropna().unique())
+        except Exception:
+            cached_df = pd.DataFrame()
+
+    # GドライブおよびGitHubリポジトリ(BASE_DIR)に置かれた新規CSVを自動探索して追加結合
+    raw_candidates = []
+    for search_root in [BASE_SHARE, BASE_DIR]:
+        if os.path.exists(search_root):
+            raw_candidates.extend(glob.glob(os.path.join(search_root, "**", "*.csv"), recursive=True))
+
+    csv_candidates = []
+    for f in sorted(list(set(raw_candidates))):
+        bname = os.path.basename(f)
+        if bname.startswith("order_") or "ランク" in bname:
+            continue
+        if bname not in existing_sources:
+            csv_candidates.append(f)
+
+    new_dfs = []
+    if csv_candidates:
+        yayoi_files = [f for f in csv_candidates if "yayoi" in f.lower()]
+        amz_files = [f for f in csv_candidates if "アマゾン売上" in f or "businessreport" in f.lower() or "amazon" in f.lower()]
+        if not yayoi_files:
+            yayoi_files = [f for f in csv_candidates if f not in amz_files]
+
+        if yayoi_files:
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                res_list = list(executor.map(_read_single_csv, yayoi_files))
+            valid_res = [d for d in res_list if d is not None and not d.empty]
+            if valid_res:
+                new_dfs.append(_parse_raw_df_to_standard(pd.concat(valid_res, ignore_index=True)))
+
+        if amz_files:
+            amz_res = [_read_amazon_seller_csv(af) for af in amz_files]
+            valid_amz = [ad for ad in amz_res if ad is not None and not ad.empty]
+            if valid_amz:
+                new_dfs.append(pd.concat(valid_amz, ignore_index=True))
+
+    all_parts = [d for d in ([cached_df] + new_dfs) if d is not None and not d.empty]
+    df = pd.concat(all_parts, ignore_index=True) if all_parts else pd.DataFrame()
+
+    if not df.empty:
+        df = finalize_sales_df(df, cost_master)
+        if new_dfs:
+            try: df.to_parquet(CACHE_FILE, index=False)
+            except Exception: pass
+
+    return df, len(csv_candidates), cost_master
 
 def render_universal_table(df_data, max_h=600):
     if df_data is None or df_data.empty:
@@ -1036,9 +1066,9 @@ def generate_meeting_top_cust_excel(res_df, title_str):
     return out.getvalue()
 
 # ========================================================
-# ★ データ読込 & マスタ初期化
+# ★ データ読込 & マスタ初期化（キャッシュ削除ボタン撤去＋CSV追加機能搭載）
 # ========================================================
-df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=False)
+df, file_count, cost_master_dict = load_and_prep_data()
 member_p_path, member_p_mtime = get_member_price_file_info()
 member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
 jan_path, jan_mtime = get_jan_file_info()
@@ -1057,6 +1087,54 @@ for k_t, v_t in (jan_title_dict or {}).items():
     if sk_trim not in raw_prod_title_map:
         raw_prod_title_map[sk_trim] = str(v_t).strip()
 
+col_status, col_mob_toggle, col_upload = st.columns([2.6, 1.0, 1.6])
+with col_mob_toggle:
+    is_mobile_view = st.toggle("📱 スマホ最適化表示", value=False, key="mobile_opt_toggle")
+with col_upload:
+    with st.expander("📥 売上CSV追加（弥生 / Amazon）", expanded=False):
+        st.caption("※GitHubに直接CSVをアップロードするか、ここからファイルを選択して追加できます。")
+        up_csv_type = st.radio("種類", ["弥生売上CSV", "アマゾンセラーCSV"], horizontal=True, key="up_csv_type_radio")
+        amz_ym_input = ""
+        if up_csv_type == "アマゾンセラーCSV":
+            amz_ym_input = st.text_input("対象年月（例: 2026年10月）", value=datetime.now().strftime("%Y年%m月"), key="amz_ym_input_box")
+        uploaded_files = st.file_uploader("CSVファイルを選択（複数可）", type=["csv"], accept_multiple_files=True, key="csv_uploader_widget")
+        if uploaded_files and st.button("➕ データベースに追加反映", type="primary", use_container_width=True):
+            added_parts = []
+            for uf in uploaded_files:
+                if up_csv_type == "弥生売上CSV":
+                    raw_d = _read_single_csv(uf, explicit_name=uf.name)
+                    if raw_d is not None and not raw_d.empty:
+                        added_parts.append(_parse_raw_df_to_standard(raw_d))
+                else:
+                    amz_d = _read_amazon_seller_csv(uf, explicit_name=uf.name, override_ym=amz_ym_input)
+                    if amz_d is not None and not amz_d.empty:
+                        added_parts.append(amz_d)
+            if added_parts:
+                new_merged = pd.concat([df] + added_parts, ignore_index=True)
+                new_merged = finalize_sales_df(new_merged, cost_master_dict)
+                try:
+                    new_merged.to_parquet(CACHE_FILE, index=False)
+                    st.cache_data.clear()
+                    st.success(f"✅ {len(uploaded_files)}件のCSVを追加しました！")
+                    time.sleep(0.5)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"保存エラー: {e}")
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "rb") as f_pq:
+                st.download_button(
+                    label="💾 最新DB(sales_cache.parquet)をDL",
+                    data=f_pq.read(),
+                    file_name="sales_cache.parquet",
+                    mime="application/octet-stream",
+                    use_container_width=True,
+                    help="ダウンロードしたファイルをGitHubにアップロードすると永続保存されます。"
+                )
+
+if df.empty:
+    st.error("売上データが見つかりませんでした。GitHubの `sales_cache.parquet` を確認してください。")
+    st.stop()
+
 valid_ym = sorted([x for x in df["年月"].dropna().unique() if x and str(x).strip() != ""])
 latest_ym = valid_ym[-1] if valid_ym else "2026年01月"
 desc_valid_ym = sorted(valid_ym, reverse=True)
@@ -1068,28 +1146,6 @@ max_date = valid_dts.max().date() if not valid_dts.empty else datetime.now().dat
 curr_y = int(latest_ym[:4]) if len(latest_ym) >= 4 else 2026
 curr_m = int(latest_ym[5:7]) if len(latest_ym) >= 7 else 1
 fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
-
-col_status, col_mob_toggle, col_refresh = st.columns([3.0, 1.0, 1.2])
-with col_mob_toggle:
-    is_mobile_view = st.toggle("📱 スマホ最適化表示", value=False, key="mobile_opt_toggle")
-with col_refresh:
-    if st.button("🔄 データを最新に再読み込み"):
-        st.cache_data.clear()
-        if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
-        with st.spinner("最新データを高速読み込み中..."):
-            df, file_count, cost_master_dict, diff_cnt = load_and_prep_data(force_reload=True)
-            member_cust_sku_map, member_default_min_map = load_member_price_master_v2(member_p_path, member_p_mtime)
-            jan_master_dict, jan_title_dict, jan_std_price_dict = load_jan_master_v2(jan_path, jan_mtime)
-            customer_master_df = load_customer_master(cust_path, cust_mtime)
-            staff_target_master = load_staff_target_master(target_path, target_mtime)
-            hanko_bytes, hanko_file_path = get_hanko_bytes()
-        st.success("最新データに更新しました！")
-        time.sleep(0.5)
-        st.rerun()
-
-if df.empty:
-    st.error(f"売上CSVデータが見つかりませんでした。`{BASE_SHARE}` フォルダを確認してください。")
-    st.stop()
 
 VIEW_MODES = [
     '🏢 得意先別ランキング',
