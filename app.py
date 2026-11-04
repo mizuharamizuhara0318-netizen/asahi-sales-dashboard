@@ -1469,7 +1469,6 @@ curr_m = int(latest_ym[5:7]) if len(latest_ym) >= 7 else 1
 fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 
 VIEW_MODES = [
-   VIEW_MODES = [
     '🏢 得意先別ランキング',
     '📦 商品別売上ランキング',
     '🧮 簡易見積＆利益シミュレーター',
