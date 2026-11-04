@@ -159,6 +159,135 @@ def find_file_multidir(filename_pattern, exclude_substr=None):
                 return fl[0], os.path.getmtime(fl[0])
     return None, 0
 
+# ========================================================
+# ★ 在庫・確保数・発注検討表 データ読込エンジン
+# ========================================================
+def get_inventory_files_info():
+    p_ao, m_ao = find_file_multidir("*ロジザード在庫*青山*.csv")
+    p_ng, m_ng = find_file_multidir("*ロジザード在庫*名古屋*.csv")
+    p_kk, m_kk = find_file_multidir("*在庫確保*.xls*")
+    p_hc, m_hc = find_file_multidir("*発注検討表*.xls*")
+    return (p_ao, m_ao), (p_ng, m_ng), (p_kk, m_kk), (p_hc, m_hc)
+
+@st.cache_data(show_spinner=False)
+def load_inventory_and_order_data(ao_info, ng_info, kk_info, hc_info):
+    logi_map = {}
+    for p, _ in [ao_info, ng_info]:
+        if p and os.path.exists(p):
+            for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
+                try:
+                    ldf = pd.read_csv(p, encoding=enc, low_memory=False)
+                    for _, r in ldf.iterrows():
+                        sku = str(r.get("商品ID", "")).strip()
+                        if not sku or sku in ["nan", "None"]: continue
+                        wh = str(r.get("倉庫名", "")).strip()
+                        wh_short = "青山" if ("三重" in wh or "青山" in wh) else ("名古屋" if "名古屋" in wh else wh)
+                        q_id = int(clean_num(r.get("品質区分ID", 0)))
+                        qty = int(clean_num(r.get("在庫数(引当数を含む)", 0)))
+                        avail = int(clean_num(r.get("出荷可能数", 0)))
+                        inc = int(clean_num(r.get("入荷予定数", 0)))
+                        if sku not in logi_map:
+                            logi_map[sku] = {
+                                "name": str(r.get("商品名", "")).strip(),
+                                "wh_set": set(),
+                                "good_qty": 0, "avail_qty": 0, "uninspected_qty": 0,
+                                "reserved_logi": 0, "defective_qty": 0, "incoming_qty": 0,
+                                "aoyama_good": 0, "nagoya_good": 0
+                            }
+                        if wh_short: logi_map[sku]["wh_set"].add(wh_short)
+                        logi_map[sku]["incoming_qty"] += inc
+                        if q_id == 1:
+                            logi_map[sku]["good_qty"] += qty
+                            logi_map[sku]["avail_qty"] += avail
+                            if wh_short == "青山": logi_map[sku]["aoyama_good"] += qty
+                            elif wh_short == "名古屋": logi_map[sku]["nagoya_good"] += qty
+                        elif q_id == 2:
+                            logi_map[sku]["uninspected_qty"] += qty
+                        elif q_id == 13:
+                            logi_map[sku]["reserved_logi"] += qty
+                        elif q_id in [3, 4, 7]:
+                            logi_map[sku]["defective_qty"] += qty
+                    break
+                except Exception: continue
+
+    kakuho_sum_map = {}
+    kakuho_details_list = []
+    p_kk, _ = kk_info
+    if p_kk and os.path.exists(p_kk):
+        try:
+            raw_k = pd.read_excel(p_kk, header=None)
+            h_idx = 3
+            for i in range(min(15, len(raw_k))):
+                row_vals = [str(x).strip() for x in raw_k.iloc[i].values if pd.notna(x)]
+                if "商品コード" in row_vals and ("受注残数" in row_vals or "得意先名" in row_vals):
+                    h_idx = i
+                    break
+            kdf = pd.read_excel(p_kk, header=h_idx)
+            for _, r in kdf.iterrows():
+                sku = str(r.get("商品コード", "")).strip()
+                if not sku or sku in ["nan", "None", ""]: continue
+                rem_qty = int(clean_num(r.get("受注残数", r.get("数量", 0))))
+                if rem_qty == 0 and int(clean_num(r.get("数量", 0))) == 0: continue
+                kakuho_sum_map[sku] = kakuho_sum_map.get(sku, 0) + rem_qty
+                dt_v = r.get("受注日")
+                dt_str = pd.to_datetime(dt_v).strftime("%Y/%m/%d") if pd.notna(dt_v) else ""
+                due_v = r.get("納入期日")
+                due_str = pd.to_datetime(due_v).strftime("%Y/%m/%d") if pd.notna(due_v) else ""
+                kakuho_details_list.append({
+                    "商品コード": sku,
+                    "商品名": str(r.get("商品名/摘要", "")).strip() if pd.notna(r.get("商品名/摘要")) else "",
+                    "受注日": dt_str,
+                    "受注番号": clean_code_str(r.get("受注番号", "")),
+                    "得意先名": str(r.get("得意先名", "")).strip() if pd.notna(r.get("得意先名")) else "",
+                    "担当者": str(r.get("担当者名", "")).strip() if pd.notna(r.get("担当者名")) else "",
+                    "倉庫": str(r.get("倉庫名", "")).strip() if pd.notna(r.get("倉庫名")) else "",
+                    "確保残数": rem_qty,
+                    "納入期日": due_str,
+                    "備考": str(r.get("備考", "")).strip() if pd.notna(r.get("備考")) else ""
+                })
+        except Exception: pass
+
+    hacchu_map = {}
+    p_hc, _ = hc_info
+    if p_hc and os.path.exists(p_hc):
+        try:
+            hdf = pd.read_excel(p_hc)
+            c_o = next((c for c in hdf.columns if "発注点" in str(c) and "5ヶ月" in str(c)), None)
+            c_r = next((c for c in hdf.columns if "在庫数" in str(c) and "ロジザード" in str(c)), None)
+            c_s = next((c for c in hdf.columns if "入荷予定" in str(c) and "日" not in str(c)), None)
+            c_u = next((c for c in hdf.columns if "入荷予定日" in str(c)), None)
+            c_v = next((c for c in hdf.columns if "在庫確保" in str(c) and "ロジザード" in str(c)), None)
+            c_w = next((c for c in hdf.columns if "在庫確保" in str(c) and "弥生" in str(c)), None)
+            c_y = next((c for c in hdf.columns if "丸藤" in str(c)), None)
+            c_ac = next((c for c in hdf.columns if "ﾘﾝﾍﾞﾙ" in str(c) or "リンベル" in str(c)), None)
+            c_ad = next((c for c in hdf.columns if "前回決定事項" in str(c)), None)
+            c_ae = next((c for c in hdf.columns if str(c).strip() == "決定事項"), None)
+            c_l = next((c for c in hdf.columns if "77期" in str(c)), None)
+
+            for _, r in hdf.iterrows():
+                sku = str(r.get("品番", "")).strip()
+                if not sku or sku in ["nan", "None"]: continue
+                hacchu_map[sku] = {
+                    "center": str(r.get("商品センター", "")).strip() if pd.notna(r.get("商品センター")) else "",
+                    "category": str(r.get("商品区分", "")).strip() if pd.notna(r.get("商品区分")) else "",
+                    "color": str(r.get("カラー", "")).strip() if pd.notna(r.get("カラー")) else "",
+                    "discontinued": str(r.get("処分品", "")).strip() if pd.notna(r.get("処分品")) else "",
+                    "order_point": round(clean_num(r.get(c_o, 0)), 1) if c_o else 0.0,
+                    "sheet_logi_stock": int(clean_num(r.get(c_r, 0))) if c_r else 0,
+                    "sheet_incoming": int(clean_num(r.get(c_s, 0))) if c_s else 0,
+                    "incoming_date": str(r.get(c_u, "")).strip() if (c_u and pd.notna(r.get(c_u))) else "",
+                    "sheet_logi_res": int(clean_num(r.get(c_v, 0))) if c_v else 0,
+                    "sheet_yayoi_res": int(clean_num(r.get(c_w, 0))) if c_w else 0,
+                    "marufuji_res": int(clean_num(r.get(c_y, 0))) if c_y else 0,
+                    "ringbell_res": int(clean_num(r.get(c_ac, 0))) if c_ac else 0,
+                    "prev_note": str(r.get(c_ad, "")).strip() if (c_ad and pd.notna(r.get(c_ad))) else "",
+                    "decision": str(r.get(c_ae, "")).strip() if (c_ae and pd.notna(r.get(c_ae))) else "",
+                    "term77_qty": int(clean_num(r.get(c_l, 0))) if c_l else 0
+                }
+        except Exception: pass
+
+    return logi_map, kakuho_sum_map, pd.DataFrame(kakuho_details_list), hacchu_map
+
 def get_target_file_info():
     return find_file_multidir("*今期目標*.xls*")
 
@@ -704,7 +833,7 @@ def load_and_prep_data():
     csv_candidates = []
     for f in sorted(list(set(raw_candidates))):
         bname = os.path.basename(f)
-        if bname.startswith("order_") or bname.startswith("item_class_lotmember") or "ランク" in bname:
+        if bname.startswith("order_") or bname.startswith("item_class_lotmember") or "ランク" in bname or "ロジザード" in bname or "在庫" in bname:
             continue
         if bname not in existing_sources:
             csv_candidates.append(f)
@@ -753,8 +882,8 @@ def render_universal_table(df_data, max_h=600):
     if df_data is None or df_data.empty:
         st.info("該当するデータがありません。")
         return
-    center_cols = {"番号", "順位", "日付", "販売期間", "最終売上日", "初回売上日", "未販売期間", "目標達成率", "通期進捗率", "前年比", "粗利率", "構成比"}
-    left_cols = {"得意先名", "商品コード", "商品名", "商品番号", "ランク名", "担当者", "客先名", "販売価格帯"}
+    center_cols = {"番号", "順位", "日付", "販売期間", "最終売上日", "初回売上日", "未販売期間", "目標達成率", "通期進捗率", "前年比", "粗利率", "構成比", "倉庫", "センター", "判定", "受注日", "納入期日"}
+    left_cols = {"得意先名", "商品コード", "商品名", "商品番号", "ランク名", "担当者", "客先名", "販売価格帯", "備考", "決定事項", "入荷予定日"}
     narrow_cols = {"番号", "順位"}
 
     header_cells = []
@@ -774,9 +903,9 @@ def render_universal_table(df_data, max_h=600):
             align = "center" if c in center_cols else ("left" if c in left_cols else "right")
             w_style = "width: 48px; min-width: 48px; max-width: 52px;" if c in narrow_cols else ""
             if isinstance(val, (int, float)) and c not in center_cols:
-                val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額", "粗利増減"] else f"{int(val):,}"
-            is_neg = (isinstance(val, (int, float)) and val < 0) or (isinstance(val_str, str) and (val_str.startswith("-") or val_str.startswith("▲-")))
-            style_extra = "color: #dc2626; font-weight: bold;" if is_neg else "color: #0f172a;"
+                val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額", "粗利増減", "発注検討差", "確保ズレ"] else f"{int(val):,}"
+            is_neg = (isinstance(val, (int, float)) and val < 0) or (isinstance(val_str, str) and (val_str.startswith("-") or val_str.startswith("▲-") or "🚨" in val_str))
+            style_extra = "color: #dc2626; font-weight: bold;" if is_neg else ("color: #16a34a; font-weight: bold;" if "✅" in val_str else "color: #0f172a;")
             cells.append(f"<td style='border:1px solid #e2e8f0; padding:6px 10px; text-align:{align}; {w_style} font-variant-numeric:tabular-nums; {style_extra} white-space:nowrap;'>{val_str}</td>")
         body_rows.append(f"<tr style='background:{bg};'>{''.join(cells)}</tr>")
 
@@ -1222,6 +1351,9 @@ target_path, target_mtime = get_target_file_info()
 staff_target_master = load_staff_target_master(target_path, target_mtime)
 hanko_bytes, hanko_file_path = get_hanko_bytes()
 
+ao_info, ng_info, kk_info, hc_info = get_inventory_files_info()
+logi_inv_map, yayoi_kakuho_map, yayoi_kakuho_df, hacchu_master_map = load_inventory_and_order_data(ao_info, ng_info, kk_info, hc_info)
+
 raw_prod_title_map = {}
 if "元商品名" in df.columns and "商品コード" in df.columns:
     raw_prod_title_map = df.dropna(subset=["商品コード", "元商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["元商品名"].to_dict()
@@ -1230,62 +1362,95 @@ for k_t, v_t in (jan_title_dict or {}).items():
     if sk_trim not in raw_prod_title_map:
         raw_prod_title_map[sk_trim] = str(v_t).strip()
 
-col_status, col_mob_toggle, col_upload = st.columns([2.6, 1.0, 1.6])
+col_status, col_mob_toggle, col_upload = st.columns([2.4, 1.0, 1.8])
 with col_mob_toggle:
     is_mobile_view = st.toggle("📱 スマホ最適化表示", value=False, key="mobile_opt_toggle")
 with col_upload:
-    with st.expander("📥 売上CSV追加（弥生 / Amazon）", expanded=False):
-        st.caption("※GitHubに直接CSVを置くか、ここからファイルを選択して追加できます。")
-        up_csv_type = st.radio("種類", ["弥生売上CSV", "アマゾンセラーCSV"], horizontal=True, key="up_csv_type_radio")
-        amz_ym_input = ""
-        if up_csv_type == "アマゾンセラーCSV":
-            amz_ym_input = st.text_input("対象年月（ファイル名に年月が無い場合に適用）", value=datetime.now().strftime("%Y年%m月"), key="amz_ym_input_box")
-        uploaded_files = st.file_uploader("CSVファイルを選択（複数可）", type=["csv"], accept_multiple_files=True, key="csv_uploader_widget")
-        if uploaded_files and st.button("➕ データベースに追加反映", type="primary", use_container_width=True):
-            added_yayoi, added_amz = [], []
-            for uf in uploaded_files:
-                if up_csv_type == "弥生売上CSV":
-                    raw_d = _read_single_csv(uf, explicit_name=uf.name)
-                    if raw_d is not None and not raw_d.empty:
-                        added_yayoi.append(_parse_raw_df_to_standard(raw_d))
-                else:
-                    has_m_in_name = bool(re.search(r'(20\d{2})[年/\-_ ]*(\d{1,2})月?|(?<!\d)(1[0-2]|0?[1-9])月', uf.name))
-                    amz_d = _read_amazon_seller_csv(uf, explicit_name=uf.name, override_ym=(None if has_m_in_name else amz_ym_input))
-                    if amz_d is not None and not amz_d.empty:
-                        added_amz.append(amz_d)
+    with st.expander("📥 データ追加・在庫更新・バックアップ", expanded=False):
+        up_tab1, up_tab2, up_tab3 = st.tabs(["📊 売上CSV追加", "📦 在庫・確保更新", "💾 バックアップ"])
+        with up_tab1:
+            up_csv_type = st.radio("種類", ["弥生売上CSV", "アマゾンセラーCSV"], horizontal=True, key="up_csv_type_radio")
+            amz_ym_input = ""
+            if up_csv_type == "アマゾンセラーCSV":
+                amz_ym_input = st.text_input("対象年月（ファイル名に年月が無い場合に適用）", value=datetime.now().strftime("%Y年%m月"), key="amz_ym_input_box")
+            uploaded_files = st.file_uploader("CSVファイルを選択（複数可）", type=["csv"], accept_multiple_files=True, key="csv_uploader_widget")
+            if uploaded_files and st.button("➕ 売上データベースに追加反映", type="primary", use_container_width=True):
+                added_yayoi, added_amz = [], []
+                for uf in uploaded_files:
+                    if up_csv_type == "弥生売上CSV":
+                        raw_d = _read_single_csv(uf, explicit_name=uf.name)
+                        if raw_d is not None and not raw_d.empty:
+                            added_yayoi.append(_parse_raw_df_to_standard(raw_d))
+                    else:
+                        has_m_in_name = bool(re.search(r'(20\d{2})[年/\-_ ]*(\d{1,2})月?|(?<!\d)(1[0-2]|0?[1-9])月', uf.name))
+                        amz_d = _read_amazon_seller_csv(uf, explicit_name=uf.name, override_ym=(None if has_m_in_name else amz_ym_input))
+                        if amz_d is not None and not amz_d.empty:
+                            added_amz.append(amz_d)
 
-            base_df = df.copy()
-            if added_amz:
-                amz_concat = pd.concat(added_amz, ignore_index=True)
-                replace_yms = set(amz_concat["年月"].dropna().unique())
-                base_df = base_df[~((base_df["得意先名"] == "アマゾンセラー") & (base_df["年月"].isin(replace_yms)))].copy()
-                added_yayoi.append(amz_concat)
+                base_df = df.copy()
+                if added_amz:
+                    amz_concat = pd.concat(added_amz, ignore_index=True)
+                    replace_yms = set(amz_concat["年月"].dropna().unique())
+                    base_df = base_df[~((base_df["得意先名"] == "アマゾンセラー") & (base_df["年月"].isin(replace_yms)))].copy()
+                    added_yayoi.append(amz_concat)
 
-            if added_yayoi:
-                new_merged = pd.concat([base_df] + added_yayoi, ignore_index=True)
-                name_lookup = dict(jan_title_dict or {})
-                valid_names = new_merged[(new_merged["商品名"].notna()) & (new_merged["商品名"].astype(str) != new_merged["商品コード"].astype(str)) & (new_merged["商品名"].astype(str).str.strip() != "")]
-                if not valid_names.empty:
-                    name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
-                new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
+                if added_yayoi:
+                    new_merged = pd.concat([base_df] + added_yayoi, ignore_index=True)
+                    name_lookup = dict(jan_title_dict or {})
+                    valid_names = new_merged[(new_merged["商品名"].notna()) & (new_merged["商品名"].astype(str) != new_merged["商品コード"].astype(str)) & (new_merged["商品名"].astype(str).str.strip() != "")]
+                    if not valid_names.empty:
+                        name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
+                    new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
+                    try:
+                        new_merged.to_parquet(CACHE_FILE, index=False)
+                        st.cache_data.clear()
+                        st.success(f"✅ {len(uploaded_files)}件のCSVを反映しました！")
+                        time.sleep(0.5)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"保存エラー: {e}")
+
+        with up_tab2:
+            st.caption("ロジザード在庫CSV（青山・名古屋）、在庫確保.xlsx、発注検討表.xlsx を最新に上書きします。")
+            inv_up_files = st.file_uploader("在庫・確保ファイルを選択", type=["csv", "xlsx", "xls"], accept_multiple_files=True, key="inv_uploader_widget")
+            if inv_up_files and st.button("🔄 在庫・確保データを最新に更新", type="primary", use_container_width=True):
+                for iuf in inv_up_files:
+                    fn = iuf.name
+                    save_name = fn
+                    if "青山" in fn and fn.endswith(".csv"): save_name = "ロジザード在庫（青山）.csv"
+                    elif "名古屋" in fn and fn.endswith(".csv"): save_name = "ロジザード在庫（名古屋）.csv"
+                    elif "在庫確保" in fn: save_name = "在庫確保.xlsx"
+                    elif "発注検討" in fn: save_name = "発注検討表.xlsx"
+                    with open(os.path.join(BASE_DIR, save_name), "wb") as f_out:
+                        f_out.write(iuf.getbuffer())
+                st.cache_data.clear()
+                st.success("✅ 在庫・確保データを更新しました！")
+                time.sleep(0.4)
+                st.rerun()
+
+        with up_tab3:
+            if os.path.exists(CACHE_FILE):
+                with open(CACHE_FILE, "rb") as f_pq:
+                    st.download_button("💾 ① 売上DB (sales_cache.parquet) DL", data=f_pq.read(), file_name="sales_cache.parquet", mime="application/octet-stream", use_container_width=True)
+            quotes_now = load_saved_quotes()
+            st.download_button("💾 ② 保存済み見積 (saved_estimates.json) DL", data=json.dumps(quotes_now, ensure_ascii=False, indent=2).encode("utf-8"), file_name="saved_estimates.json", mime="application/json", use_container_width=True)
+            meeting_now = load_saved_meeting_sheet_data()
+            st.download_button("💾 ③ 会議シート (saved_meeting_sheet.json) DL", data=json.dumps(meeting_now, ensure_ascii=False, indent=2).encode("utf-8"), file_name="saved_meeting_sheet.json", mime="application/json", use_container_width=True)
+            restore_json = st.file_uploader("📂 JSONバックアップを復元", type=["json"], key="restore_json_up")
+            if restore_json and st.button("♻️ JSONを復元反映", use_container_width=True):
                 try:
-                    new_merged.to_parquet(CACHE_FILE, index=False)
-                    st.cache_data.clear()
-                    st.success(f"✅ {len(uploaded_files)}件のCSVをデータベースに反映しました！")
-                    time.sleep(0.5)
+                    loaded_j = json.loads(restore_json.getvalue().decode("utf-8"))
+                    if isinstance(loaded_j, list):
+                        save_quotes_list(loaded_j)
+                        st.session_state.saved_estimates = loaded_j
+                        st.success("✅ 保存済み見積を復元しました！")
+                    elif isinstance(loaded_j, dict):
+                        save_meeting_sheet_data(loaded_j)
+                        st.success("✅ 営業会議シートを復元しました！")
+                    time.sleep(0.4)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"保存エラー: {e}")
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "rb") as f_pq:
-                st.download_button(
-                    label="💾 最新DB(sales_cache.parquet)をDL",
-                    data=f_pq.read(),
-                    file_name="sales_cache.parquet",
-                    mime="application/octet-stream",
-                    use_container_width=True,
-                    help="ダウンロードしたファイルをGitHubに上書きアップロードすると永続保存されます。"
-                )
+                    st.error(f"復元エラー: {e}")
 
 if df.empty:
     st.error("売上データが見つかりませんでした。GitHubの `sales_cache.parquet` を確認してください。")
@@ -1306,6 +1471,7 @@ fiscal_year = curr_y if curr_m >= 7 else curr_y - 1
 VIEW_MODES = [
     '🏢 得意先別ランキング',
     '📦 商品別売上ランキング',
+    '🏭 在庫・確保数＆発注検討アラート',
     '🧮 簡易見積＆利益シミュレーター',
     '📊 営業会議用：上位社 売上比較シート',
     '📑 営業会議用：上位客先別売上実績',
@@ -1326,8 +1492,360 @@ with col_top2:
         hanko_status = "角印: **読込完了**" if hanko_bytes else "⚠️ 印鑑未検出"
         grp_status = f"グループ管理: **{len(member_group_master_dict):,} 件**" if member_group_master_dict else "⚠️ グループ未検出"
         st.info(f"📁 原価: **{len(cost_master_dict):,} 件** | {grp_status} | {jan_status} | {hanko_status}")
+    elif view_type == '🏭 在庫・確保数＆発注検討アラート':
+        st.write("")
+        st.info(f"📦 ロジザード登録: **{len(logi_inv_map):,} 品番** | 🔒 弥生確保: **{len(yayoi_kakuho_map):,} 品番** | 📋 発注検討表: **{len(hacchu_master_map):,} 品番**")
     else:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
+
+# ========================================================
+# ★ 🏭 在庫・確保数＆発注検討アラート
+# ========================================================
+if view_type == '🏭 在庫・確保数＆発注検討アラート':
+    code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
+    for k_t, v_t in jan_title_dict.items():
+        if str(k_t).strip() not in code_to_name_map:
+            code_to_name_map[str(k_t).strip()] = str(v_t).strip()
+
+    dt_30_ago = pd.Timestamp(max_date) - pd.Timedelta(days=30)
+    dt_90_ago = pd.Timestamp(max_date) - pd.Timedelta(days=90)
+    sales_30_map = df[df["日付_dt"] >= dt_30_ago].groupby("商品コード")["数量"].sum().to_dict() if not df.empty else {}
+    sales_90_map = df[df["日付_dt"] >= dt_90_ago].groupby("商品コード")["数量"].sum().to_dict() if not df.empty else {}
+
+    all_inv_skus = sorted(list(set(list(logi_inv_map.keys()) + list(yayoi_kakuho_map.keys()) + list(hacchu_master_map.keys()))))
+    inv_rows = []
+    for sku in all_inv_skus:
+        if not sku or sku in ["nan", "None"]: continue
+        l_info = logi_inv_map.get(sku, {})
+        h_info = hacchu_master_map.get(sku, {})
+        y_res = yayoi_kakuho_map.get(sku, h_info.get("sheet_yayoi_res", 0))
+
+        if sku in logi_inv_map:
+            good_q = l_info.get("good_qty", 0)
+            uninsp_q = l_info.get("uninspected_qty", 0)
+            total_logi_q = good_q + uninsp_q
+            logi_res_q = l_info.get("reserved_logi", 0)
+            inc_q = max(l_info.get("incoming_qty", 0), h_info.get("sheet_incoming", 0))
+            wh_str = "/".join(sorted(list(l_info.get("wh_set", set())))) or h_info.get("center", "-")
+        else:
+            good_q = h_info.get("sheet_logi_stock", 0)
+            uninsp_q = 0
+            total_logi_q = good_q
+            logi_res_q = h_info.get("sheet_logi_res", 0)
+            inc_q = h_info.get("sheet_incoming", 0)
+            wh_str = h_info.get("center", "-")
+
+        p_name = code_to_name_map.get(sku, h_info.get("category", clean_product_name(l_info.get("name", sku))))
+        ord_pt = int(round(h_info.get("order_point", 0)))
+        free_after_inc = (total_logi_q + inc_q) - y_res
+        immediate_free = good_q - y_res
+        order_diff = free_after_inc - ord_pt
+        res_gap = logi_res_q - y_res
+
+        q_30 = int(sales_30_map.get(sku, 0))
+        q_90 = int(sales_90_map.get(sku, 0))
+        daily_avg = q_90 / 90.0 if q_90 > 0 else (h_info.get("term77_qty", 0) / 365.0)
+        days_left_str = f"{int(round(max(0, free_after_inc) / daily_avg))}日分" if daily_avg > 0 else "-"
+
+        if h_info.get("discontinued") == "処分品":
+            status_lbl = "⏹️ 処分品"
+        elif free_after_inc < 0:
+            status_lbl = "🚨 確保割れ(不足)"
+        elif ord_pt > 0 and order_diff < 0:
+            status_lbl = "🚨 要発注検討"
+        elif immediate_free < 0 and inc_q > 0:
+            status_lbl = "⏳ 入荷・検品待ち"
+        else:
+            status_lbl = "✅ 適正"
+
+        inv_rows.append({
+            "判定": status_lbl,
+            "倉庫": wh_str,
+            "商品コード": sku,
+            "商品名": p_name,
+            "良品在庫": good_q,
+            "未検品": uninsp_q,
+            "入荷予定": inc_q,
+            "弥生確保数": y_res,
+            "ロジ確保分": logi_res_q,
+            "確保ズレ": res_gap,
+            "有効フリー在庫": free_after_inc,
+            "発注点(5ヶ月)": ord_pt,
+            "発注検討差": order_diff,
+            "直近30日出荷": q_30,
+            "在庫日数目安": days_left_str,
+            "入荷予定日": h_info.get("incoming_date", ""),
+            "決定事項": h_info.get("decision") or h_info.get("prev_note", "")
+        })
+
+    inv_df = pd.DataFrame(inv_rows)
+
+    f_col1, f_col2, f_col3, f_col4 = st.columns([1.6, 1.2, 1.8, 1.0])
+    with f_col1:
+        inv_filter_mode = st.selectbox("🎯 ステータス絞り込み", ["（すべて表示）", "🚨 要発注・確保割れのみ", "🔒 弥生確保ありのみ", "⚖️ 確保数にズレがある商品", "✅ 適正のみ"])
+    with f_col2:
+        wh_opts = ["（すべて）"] + sorted([x for x in inv_df["倉庫"].unique() if x and x != "-"])
+        sel_wh = st.selectbox("🏭 倉庫・センター", wh_opts)
+    with f_col3:
+        kw_inv = st.text_input("🔍 品番・商品名で検索", placeholder="例: ABO-08PK, AHL-1400, ABA-105...")
+    with f_col4:
+        inv_limit = st.selectbox("表示件数", [50, 100, 200, 500, "全件"], index=1, key="inv_limit_sel")
+
+    work_inv = inv_df.copy()
+    if inv_filter_mode == "🚨 要発注・確保割れのみ":
+        work_inv = work_inv[work_inv["判定"].str.contains("🚨")]
+    elif inv_filter_mode == "🔒 弥生確保ありのみ":
+        work_inv = work_inv[work_inv["弥生確保数"] > 0]
+    elif inv_filter_mode == "⚖️ 確保数にズレがある商品":
+        work_inv = work_inv[work_inv["確保ズレ"] != 0]
+    elif inv_filter_mode == "✅ 適正のみ":
+        work_inv = work_inv[work_inv["判定"] == "✅ 適正"]
+
+    if sel_wh != "（すべて）":
+        work_inv = work_inv[work_inv["倉庫"].str.contains(sel_wh, na=False)]
+    if kw_inv.strip():
+        kw_i = kw_inv.strip()
+        work_inv = work_inv[work_inv["商品コード"].str.contains(kw_i, case=False, na=False) | work_inv["商品名"].str.contains(kw_i, case=False, na=False)]
+
+    work_inv = work_inv.sort_values(by=["発注検討差", "有効フリー在庫"], ascending=[True, True]).reset_index(drop=True)
+    work_inv.insert(0, "番号", range(1, len(work_inv) + 1))
+
+    alert_cnt = len(inv_df[inv_df["判定"].str.contains("🚨")])
+    short_cnt = len(inv_df[inv_df["有効フリー在庫"] < 0])
+    sum_c1, sum_c2 = st.columns([4.0, 1.2])
+    with sum_c1:
+        st.markdown(f"""
+        <div class="total-card" style="margin-bottom:0;">
+            <b>表示対象:</b> <span style="color:#1a73e8; font-weight:bold;">{len(work_inv):,} 品番</span> &nbsp;|&nbsp;
+            <b>🚨 要発注検討(発注点割れ):</b> <span style="color:#d93025; font-size:16px; font-weight:bold;">{alert_cnt:,} 品番</span> &nbsp;|&nbsp;
+            <b>⚠️ 確保割れ(フリー在庫マイナス):</b> <span style="color:#d93025; font-weight:bold;">{short_cnt:,} 品番</span>
+        </div>
+        """, unsafe_allow_html=True)
+    with sum_c2:
+        st.download_button("📥 在庫・発注検討表をExcel保存", data=generate_excel_bytes(work_inv, "在庫_発注検討一覧"), file_name=f"在庫_発注検討一覧_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+
+    st.write("")
+    insp_col1, insp_col2 = st.columns([1.5, 2.5])
+    sku_choices = work_inv["商品コード"].tolist() if not work_inv.empty else all_inv_skus
+    with insp_col1:
+        sel_insp_sku = st.selectbox("🔍 商品を選択して「得意先別の確保内訳・倉庫別在庫」を詳しく見る", sku_choices if sku_choices else ["（なし）"])
+    if sel_insp_sku and sel_insp_sku != "（なし）":
+        row_s = inv_df[inv_df["商品コード"] == sel_insp_sku].iloc[0] if not inv_df[inv_df["商品コード"] == sel_insp_sku].empty else {}
+        l_det = logi_inv_map.get(sel_insp_sku, {})
+        with insp_col2:
+            st.markdown(f"""
+            <div class="total-card" style="margin-top:2px; padding:8px 14px; background:#eff6ff; border-left:5px solid #1d4ed8;">
+                <b>【{sel_insp_sku}】 {row_s.get('商品名', '')}</b> &nbsp;➔&nbsp;
+                良品: <b>{int(row_s.get('良品在庫', 0)):,}</b> (青山:{l_det.get('aoyama_good', 0):,} / 名古屋:{l_det.get('nagoya_good', 0):,}) ｜
+                未検品: <b>{int(row_s.get('未検品', 0)):,}</b> ｜
+                弥生確保: <b style="color:#d93025;">{int(row_s.get('弥生確保数', 0)):,}</b> ｜
+                有効フリー在庫: <b style="color:#16a34a; font-size:15px;">{int(row_s.get('有効フリー在庫', 0)):,} 個</b>
+            </div>
+            """, unsafe_allow_html=True)
+
+        if not yayoi_kakuho_df.empty:
+            sub_k_df = yayoi_kakuho_df[yayoi_kakuho_df["商品コード"] == sel_insp_sku].copy()
+            if not sub_k_df.empty:
+                with st.expander(f"🔒 【{sel_insp_sku}】弥生・在庫確保の得意先別明細（{len(sub_k_df)}件 / 合計 {int(sub_k_df['確保残数'].sum()):,} 個）", expanded=True):
+                    render_universal_table(sub_k_df[["受注日", "受注番号", "得意先名", "担当者", "倉庫", "確保残数", "納入期日", "備考"]], max_h=240)
+
+    disp_inv_df = work_inv.head(int(inv_limit)) if inv_limit != "全件" else work_inv
+    if is_mobile_view:
+        mob_inv_cols = ["番号", "判定", "商品コード", "商品名", "良品在庫", "弥生確保数", "有効フリー在庫", "発注検討差"]
+        disp_inv_df = disp_inv_df[[c for c in mob_inv_cols if c in disp_inv_df.columns]]
+    render_universal_table(disp_inv_df, max_h=560)
+    st.stop()
+# ========================================================
+# ★ 📦 商品コードクリック対応テーブル ＆ 在庫・確保詳細ポップアップ（POP）
+# ========================================================
+_CLICKABLE_PROD_DIR = os.path.join(BASE_DIR, "_prod_table_comp_v1")
+os.makedirs(_CLICKABLE_PROD_DIR, exist_ok=True)
+_CLICKABLE_PROD_HTML = os.path.join(_CLICKABLE_PROD_DIR, "index.html")
+_PROD_COMP_CONTENT = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; background: transparent; }
+  .tbl-wrap { overflow-x: auto; max-height: 600px; border: 1px solid #cbd5e1; border-radius: 6px; background-color: #ffffff; }
+  table { width: 100%; border-collapse: collapse; }
+  th { border: 1px solid #cbd5e1; padding: 8px 10px; background: #f1f5f9; white-space: nowrap; position: sticky; top: 0; z-index: 1; color: #0f172a; }
+  td { border: 1px solid #e2e8f0; padding: 6px 10px; font-variant-numeric: tabular-nums; white-space: nowrap; color: #0f172a; }
+  tr:nth-child(even) { background: #f8fafc; }
+  tr:nth-child(odd) { background: #ffffff; }
+  tr:hover { background: #eff6ff !important; }
+  .sku-link { color: #1d4ed8; font-weight: bold; text-decoration: underline; cursor: pointer; }
+  .sku-link:hover { color: #1e40af; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+function sendMessageToStreamlitClient(type, data) {
+  var outData = Object.assign({ isStreamlitMessage: true, type: type }, data);
+  window.parent.postMessage(outData, "*");
+}
+function init() { sendMessageToStreamlitClient("streamlit:componentReady", {apiVersion: 1}); }
+function setFrameHeight(height) { sendMessageToStreamlitClient("streamlit:setFrameHeight", {height: height}); }
+function sendValue(value) { sendMessageToStreamlitClient("streamlit:setComponentValue", {value: value}); }
+
+window.addEventListener("message", function(event) {
+  if (event.data.type !== "streamlit:render") return;
+  var args = event.data.args;
+  var root = document.getElementById("root");
+  root.innerHTML = args.table_html || "";
+  var links = root.querySelectorAll(".sku-link");
+  links.forEach(function(el) {
+    el.addEventListener("click", function() {
+      var s_code = this.getAttribute("data-sku");
+      sendValue({sku: s_code, ts: Date.now()});
+    });
+  });
+  setFrameHeight(args.height || 610);
+});
+init();
+</script>
+</body>
+</html>"""
+try:
+    with open(_CLICKABLE_PROD_HTML, "w", encoding="utf-8") as _f:
+        _f.write(_PROD_COMP_CONTENT)
+except Exception:
+    pass
+_clickable_prod_table_func = components.declare_component("clickable_prod_table_v1", path=_CLICKABLE_PROD_DIR)
+
+def render_clickable_product_table(df_data):
+    if df_data is None or df_data.empty:
+        st.info("該当するデータがありません。")
+        return None
+    center_cols = {"番号", "順位", "日付", "販売期間", "最終売上日", "初回売上日", "未販売期間", "目標達成率", "通期進捗率", "前年比", "粗利率", "構成比"}
+    left_cols = {"得意先名", "商品コード", "商品名", "商品番号", "ランク名", "担当者", "客先名", "販売価格帯"}
+    narrow_cols = {"番号", "順位"}
+
+    header_cells = []
+    for c in df_data.columns:
+        align = 'center' if c in center_cols else ('left' if c in left_cols else 'right')
+        w_style = "width: 48px; min-width: 48px; max-width: 52px;" if c in narrow_cols else ""
+        header_cells.append(f"<th style='text-align:{align}; {w_style}'>{c}</th>")
+
+    body_rows = []
+    for _, row in df_data.iterrows():
+        cells = []
+        for c in df_data.columns:
+            val = row[c]
+            val_str = "" if pd.isna(val) else str(val)
+            align = "center" if c in center_cols else ("left" if c in left_cols else "right")
+            w_style = "width: 48px; min-width: 48px; max-width: 52px;" if c in narrow_cols else ""
+            if isinstance(val, (int, float)) and c not in center_cols:
+                val_str = f"{int(val):+,}" if c in ["増減", "増減額", "目標差額", "粗利増減"] else f"{int(val):,}"
+            is_neg = (isinstance(val, (int, float)) and val < 0) or (isinstance(val_str, str) and (val_str.startswith("-") or val_str.startswith("▲-")))
+            style_extra = "color: #dc2626; font-weight: bold;" if is_neg else ""
+
+            if c == "商品コード":
+                safe_s = val_str.replace('"', '&quot;')
+                cells.append(f"<td style='text-align:left;' title='クリックして在庫・確保情報を表示'><span class='sku-link' data-sku=\"{safe_s}\">🔍 {val_str}</span></td>")
+            else:
+                cells.append(f"<td style='text-align:{align}; {w_style} {style_extra}'>{val_str}</td>")
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    full_html = f"<div class='tbl-wrap'><table><thead><tr>{''.join(header_cells)}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>"
+    calc_h = min(620, 80 + len(df_data) * 36)
+    return _clickable_prod_table_func(table_html=full_html, height=calc_h, key="prod_rank_clickable_tbl_v1")
+
+@st.dialog("📦 商品別 在庫・確保数・発注検討ステータス詳細", width="large")
+def show_product_inventory_dialog(sku_code, prod_name):
+    l_info = logi_inv_map.get(sku_code, {})
+    h_info = hacchu_master_map.get(sku_code, {})
+    y_res = yayoi_kakuho_map.get(sku_code, h_info.get("sheet_yayoi_res", 0))
+
+    if sku_code in logi_inv_map:
+        good_q = l_info.get("good_qty", 0)
+        ao_good = l_info.get("aoyama_good", 0)
+        ng_good = l_info.get("nagoya_good", 0)
+        uninsp_q = l_info.get("uninspected_qty", 0)
+        total_logi_q = good_q + uninsp_q
+        logi_res_q = l_info.get("reserved_logi", 0)
+        inc_q = max(l_info.get("incoming_qty", 0), h_info.get("sheet_incoming", 0))
+        wh_str = "/".join(sorted(list(l_info.get("wh_set", set())))) or h_info.get("center", "-")
+    else:
+        good_q = h_info.get("sheet_logi_stock", 0)
+        ao_good, ng_good, uninsp_q = 0, 0, 0
+        total_logi_q = good_q
+        logi_res_q = h_info.get("sheet_logi_res", 0)
+        inc_q = h_info.get("sheet_incoming", 0)
+        wh_str = h_info.get("center", "-")
+
+    ord_pt = int(round(h_info.get("order_point", 0)))
+    free_after_inc = (total_logi_q + inc_q) - y_res
+    order_diff = free_after_inc - ord_pt
+    res_gap = logi_res_q - y_res
+    inc_date_str = h_info.get("incoming_date", "-") or "-"
+    note_str = h_info.get("decision") or h_info.get("prev_note") or "-"
+
+    dt_30_ago = pd.Timestamp(max_date) - pd.Timedelta(days=30)
+    dt_90_ago = pd.Timestamp(max_date) - pd.Timedelta(days=90)
+    sub_s = df[df["商品コード"] == sku_code] if not df.empty else pd.DataFrame()
+    q_30 = int(sub_s[sub_s["日付_dt"] >= dt_30_ago]["数量"].sum()) if not sub_s.empty else 0
+    q_90 = int(sub_s[sub_s["日付_dt"] >= dt_90_ago]["数量"].sum()) if not sub_s.empty else 0
+    daily_avg = q_90 / 90.0 if q_90 > 0 else (h_info.get("term77_qty", 0) / 365.0)
+    days_left_str = f"約 {int(round(max(0, free_after_inc) / daily_avg))} 日分" if daily_avg > 0 else "-"
+
+    if h_info.get("discontinued") == "処分品":
+        badge_html = "<span style='background:#64748b; color:white; padding:4px 10px; border-radius:4px; font-weight:bold;'>⏹️ 処分品</span>"
+    elif free_after_inc < 0:
+        badge_html = "<span style='background:#dc2626; color:white; padding:4px 10px; border-radius:4px; font-weight:bold;'>🚨 確保割れ（在庫不足）</span>"
+    elif ord_pt > 0 and order_diff < 0:
+        badge_html = "<span style='background:#ea580c; color:white; padding:4px 10px; border-radius:4px; font-weight:bold;'>🚨 要発注検討（発注点割れ）</span>"
+    else:
+        badge_html = "<span style='background:#16a34a; color:white; padding:4px 10px; border-radius:4px; font-weight:bold;'>✅ 在庫適正</span>"
+
+    st.markdown(f"#### 🎯 【{sku_code}】 {prod_name} &nbsp; {badge_html}", unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-top:10px; margin-bottom:12px;">
+        <div style="border:1px solid #cbd5e1; border-top:4px solid #2563eb; border-radius:6px; padding:10px; background:#f8fafc;">
+            <div style="font-size:12px; color:#475569;">📦 ロジザード良品在庫</div>
+            <div style="font-size:20px; font-weight:bold; color:#0f172a; margin-top:2px;">{good_q:,} 個</div>
+            <div style="font-size:11px; color:#64748b; margin-top:2px;">青山: <b>{ao_good:,}</b> / 名古屋: <b>{ng_good:,}</b> (倉庫:{wh_str})</div>
+        </div>
+        <div style="border:1px solid #cbd5e1; border-top:4px solid #0284c7; border-radius:6px; padding:10px; background:#f8fafc;">
+            <div style="font-size:12px; color:#475569;">🚢 未検品 ・ 入荷予定</div>
+            <div style="font-size:20px; font-weight:bold; color:#0f172a; margin-top:2px;">未検: {uninsp_q:,} / 入荷: {inc_q:,}</div>
+            <div style="font-size:11px; color:#64748b; margin-top:2px;">入荷予定日: <b>{inc_date_str}</b></div>
+        </div>
+        <div style="border:1px solid #cbd5e1; border-top:4px solid #dc2626; border-radius:6px; padding:10px; background:#fef2f2;">
+            <div style="font-size:12px; color:#991b1b;">🔒 弥生 確保数（引当残）</div>
+            <div style="font-size:20px; font-weight:bold; color:#dc2626; margin-top:2px;">{y_res:,} 個</div>
+            <div style="font-size:11px; color:#7f1d1d; margin-top:2px;">ロジ確保分: <b>{logi_res_q:,}</b> (ズレ: {res_gap:+,})</div>
+        </div>
+        <div style="border:1px solid #cbd5e1; border-top:4px solid #16a34a; border-radius:6px; padding:10px; background:#f0fdf4;">
+            <div style="font-size:12px; color:#166534;">✅ 有効フリー在庫（販売可能）</div>
+            <div style="font-size:20px; font-weight:bold; color:{'#dc2626' if free_after_inc < 0 else '#15803d'}; margin-top:2px;">{free_after_inc:,} 個</div>
+            <div style="font-size:11px; color:#14532d; margin-top:2px;">直近30日出荷: <b>{q_30:,}個</b> (在庫目安: {days_left_str})</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div class="total-card" style="margin-bottom:12px; font-size:13px;">
+        <b>📊 発注検討表データ</b> &nbsp;|&nbsp;
+        <b>発注点(5ヶ月):</b> {ord_pt:,} 個 &nbsp;|&nbsp;
+        <b>発注検討差(フリー在庫 − 発注点):</b> <span style="color:{'#dc2626' if order_diff < 0 else '#15803d'}; font-weight:bold; font-size:15px;">{order_diff:+,} 個</span> &nbsp;|&nbsp;
+        <b>丸藤確保:</b> {h_info.get('marufuji_res', 0):,} 個 &nbsp;|&nbsp;
+        <b>リンベル確保:</b> {h_info.get('ringbell_res', 0):,} 個 &nbsp;|&nbsp;
+        <b>決定事項・備考:</b> <span style="color:#1e40af; font-weight:bold;">{note_str}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("##### 🔒 弥生・在庫確保の得意先別内訳")
+    if not yayoi_kakuho_df.empty:
+        sub_k = yayoi_kakuho_df[yayoi_kakuho_df["商品コード"] == sku_code].copy()
+        if not sub_k.empty:
+            render_universal_table(sub_k[["受注日", "受注番号", "得意先名", "担当者", "倉庫", "確保残数", "納入期日", "備考"]], max_h=260)
+        else:
+            st.info("現在、弥生で確保（受注残）されている明細はありません。")
+    else:
+        st.info("現在、弥生で確保（受注残）されている明細はありません。")
 
 # ========================================================
 # ★ 🧮 簡易見積＆利益シミュレーター（＋ 🏷️ 加盟店価格登録CSV作成）
@@ -1439,9 +1957,6 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     with col_menu_left:
         tab_choice = st.radio("機能メニュー", [tab_opt_new, tab_opt_lot, tab_opt_list], horizontal=True, key="est_active_tab_v3")
 
-    # ========================================================
-    # ★ 🏷️ 加盟店価格登録CSV作成（item_class_lotmember.csv 出力）
-    # ========================================================
     if tab_choice == tab_opt_lot:
         st.markdown(f"##### 🏷️ 加盟店価格登録用CSV作成（`item_class_lotmember.csv`） &nbsp;<span style='font-size:13px; color:#2563eb;'>［作業担当: {est_staff}］</span>", unsafe_allow_html=True)
         lot_items_key = f"lotmember_items_{s_key}"
@@ -1555,7 +2070,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             cur_price = int(clean_num(row_l.get("登録単価", 0)))
             cur_cost = int(clean_num(row_l.get("単価原価", 0)))
             cur_name = str(row_l.get("商品名", "")).strip() if pd.notna(row_l.get("商品名")) else ""
-            cur_min = int(clean_num(row_e.get("最低下代", 0))) if "row_e" in locals() else int(clean_num(row_l.get("最低下代", 0)))
+            cur_min = int(clean_num(row_l.get("最低下代", 0)))
 
             if c_code != prev_code or not cur_name or cur_name == "None" or cur_price == 0:
                 auto_name, _, auto_price, auto_cost, auto_min, applied_lbl = get_sku_details(c_code, cur_rank if cur_rank != "None" else "ロット単価", sel_lot_comp)
@@ -2234,6 +2749,10 @@ else:
 
 prod_first_seen_dt = df.groupby("商品コード")["日付_dt"].min().to_dict()
 code_to_name = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
+for k_t, v_t in (jan_title_dict or {}).items():
+    if str(k_t).strip() not in code_to_name:
+        code_to_name[str(k_t).strip()] = str(v_t).strip()
+
 one_year_ago_date = pd.Timestamp(max_date) - pd.DateOffset(years=1)
 active_months_list = []
 
@@ -2364,7 +2883,7 @@ if view_type == '🏢 得意先別ランキング':
     st.stop()
 
 # ========================================================
-# ★ 📦 商品別売上ランキング
+# ★ 📦 商品別売上ランキング（🔍商品コードクリックで在庫・確保POP表示）
 # ========================================================
 elif view_type == '📦 商品別売上ランキング':
     group_cols = [c for c in ["得意先名", "担当者", "商品コード", "商品名"] if c in filtered.columns]
@@ -2395,7 +2914,19 @@ elif view_type == '📦 商品別売上ランキング':
             st.download_button(label="📥 Excelで保存", data=generate_excel_bytes(full_prod_df, "商品別売上ランキング"), file_name=f"商品別売上ランキング_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
     st.write("")
-    render_universal_table(show_df)
+    if not show_df.empty:
+        st.caption("💡 表内の **「🔍 商品コード」** をクリック（またはタップ）すると、その商品の **「ロジザード現在庫・弥生確保数・発注検討ステータス詳細」** がポップアップ表示されます。")
+        clicked_prod = render_clickable_product_table(show_df)
+        if clicked_prod and isinstance(clicked_prod, dict) and clicked_prod.get("sku"):
+            last_p_ts = st.session_state.get("_last_prod_click_ts", 0)
+            cur_p_ts = clicked_prod.get("ts", 0)
+            if cur_p_ts != last_p_ts:
+                st.session_state["_last_prod_click_ts"] = cur_p_ts
+                c_sku = clicked_prod["sku"]
+                c_pname = code_to_name.get(c_sku, c_sku)
+                show_product_inventory_dialog(c_sku, c_pname)
+    else:
+        st.info("該当期間のデータがありません。")
     st.stop()
 
 # ========================================================
