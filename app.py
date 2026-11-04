@@ -1644,7 +1644,7 @@ if view_type == '🏭 在庫・確保数＆発注検討アラート':
             """, unsafe_allow_html=True)
 
         if not yayoi_kakuho_df.empty:
-            sub_k_df = yayoi_kakuho_df[yayoi_kakuho_df["商品コード"] == sel_insp_sku].copy()
+            sub_k_df = yayoi_kakuho_df[yayoi_kakuho_df["商品コード"] == sel_insp_sku].sort_values(by=["受注日", "受注番号"], ascending=[False, False]).reset_index(drop=True)
             if not sub_k_df.empty:
                 with st.expander(f"🔒 【{sel_insp_sku}】弥生・在庫確保の得意先別明細（{len(sub_k_df)}件 / 合計 {int(sub_k_df['確保残数'].sum()):,} 個）", expanded=True):
                     render_universal_table(sub_k_df[["受注日", "受注番号", "得意先名", "担当者", "倉庫", "確保残数", "納入期日", "備考"]], max_h=240)
@@ -1839,7 +1839,7 @@ def show_product_inventory_dialog(sku_code, prod_name):
 
     st.markdown("##### 🔒 弥生・在庫確保の得意先別内訳")
     if not yayoi_kakuho_df.empty:
-        sub_k = yayoi_kakuho_df[yayoi_kakuho_df["商品コード"] == sku_code].copy()
+        sub_k = yayoi_kakuho_df[yayoi_kakuho_df["商品コード"] == sku_code].sort_values(by=["受注日", "受注番号"], ascending=[False, False]).reset_index(drop=True)
         if not sub_k.empty:
             render_universal_table(sub_k[["受注日", "受注番号", "得意先名", "担当者", "倉庫", "確保残数", "納入期日", "備考"]], max_h=260)
         else:
