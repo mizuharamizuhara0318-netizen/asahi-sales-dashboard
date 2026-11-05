@@ -1748,8 +1748,8 @@ def render_clickable_product_table(df_data, comp_key="prod_rank_clickable_tbl_v1
                 cells.append(f"<td style='text-align:{align}; {w_style} {style_extra}'>{val_str}</td>")
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
 
-    full_html = f"<div class='tbl-wrap'><table><thead><tr>{''.join(header_cells)}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>"
-    calc_h = min(max_h, 80 + len(df_data) * 36)
+    full_html = f"<div class='tbl-wrap' style='max-height:{max_h}px;'><table><thead><tr>{''.join(header_cells)}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>"
+    calc_h = min(max_h + 20, 80 + len(df_data) * 36)
     return _clickable_prod_table_func(table_html=full_html, height=calc_h, key=comp_key)
 
 @st.dialog("📦 商品別 在庫・確保数・発注検討ステータス詳細", width="large")
@@ -1837,7 +1837,7 @@ def show_product_inventory_dialog(sku_code, prod_name):
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("##### 🔒 弥生・在庫確保の得意先別内訳")
+    st.markdown("##### 🔒 弥生・在庫確保の得意先別内訳（受注日が新しい順）")
     if not yayoi_kakuho_df.empty:
         sub_k = yayoi_kakuho_df[yayoi_kakuho_df["商品コード"] == sku_code].sort_values(by=["受注日", "受注番号"], ascending=[False, False]).reset_index(drop=True)
         if not sub_k.empty:
@@ -2808,7 +2808,7 @@ if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊
     total_sales = int(filtered["金額"].sum()) if not filtered.empty else 0
 
 # ========================================================
-# ★ 🏢 得意先別ランキング（PC版：左ランキング＋右全商品パネル ｜ スマホ版：必須列＋タップでPOP）
+# ★ 🏢 得意先別ランキング（PC版：左ランキング＋右全商品パネル[商品コードクリック対応] ｜ スマホ版：必須列＋タップでPOP）
 # ========================================================
 if view_type == '🏢 得意先別ランキング':
     group_cols = [c for c in ["得意先名", "担当者"] if c in filtered.columns]
@@ -2875,7 +2875,14 @@ if view_type == '🏢 得意先別ランキング':
                         st.markdown(f"<div class='total-card' style='margin-bottom:6px; padding:7px 12px; font-size:13px;'><b>該当品目数:</b> <span style='color:#1a73e8; font-weight:bold;'>{s_cnt:,} 品目</span> &nbsp;|&nbsp; <b>数量合計:</b> {s_qty:,} 個 &nbsp;|&nbsp; <b>売上合計:</b> <span style='color:#d93025; font-weight:bold;'>¥{s_amt:,}</span></div>", unsafe_allow_html=True)
                     with sc2:
                         st.download_button(label="📥 この得意先の内訳をExcel保存", data=generate_excel_bytes(side_prod_df, f"{target_side_cust}_商品内訳"), file_name=f"得意先別商品内訳_{target_side_cust}_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, key=f"dl_side_cust_{target_side_cust}")
-                    render_universal_table(side_prod_df, max_h=525)
+                    clicked_side_prod = render_clickable_product_table(side_prod_df, comp_key=f"side_prod_tbl_{target_side_cust}", max_h=525)
+                    if clicked_side_prod and isinstance(clicked_side_prod, dict) and clicked_side_prod.get("sku"):
+                        last_sp_ts = st.session_state.get("_last_side_prod_click_ts", 0)
+                        cur_sp_ts = clicked_side_prod.get("ts", 0)
+                        if cur_sp_ts != last_sp_ts:
+                            st.session_state["_last_side_prod_click_ts"] = cur_sp_ts
+                            c_sku = clicked_side_prod["sku"]
+                            show_product_inventory_dialog(c_sku, code_to_name.get(c_sku, c_sku))
                 else:
                     st.info("該当期間の商品売上データはありません。")
     else:
@@ -2916,7 +2923,7 @@ elif view_type == '📦 商品別売上ランキング':
     st.write("")
     if not show_df.empty:
         st.caption("💡 表内の **「🔍 商品コード」** をクリック（またはタップ）すると、その商品の **「ロジザード現在庫・弥生確保数・発注検討ステータス詳細」** がポップアップ表示されます。")
-        clicked_prod = render_clickable_product_table(show_df)
+        clicked_prod = render_clickable_product_table(show_df, comp_key="prod_rank_clickable_tbl_v1", max_h=600)
         if clicked_prod and isinstance(clicked_prod, dict) and clicked_prod.get("sku"):
             last_p_ts = st.session_state.get("_last_prod_click_ts", 0)
             cur_p_ts = clicked_prod.get("ts", 0)
