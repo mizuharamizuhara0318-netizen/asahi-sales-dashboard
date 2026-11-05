@@ -1749,8 +1749,8 @@ def render_clickable_product_table(df_data, comp_key="prod_rank_clickable_tbl_v1
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
 
     full_html = f"<div class='tbl-wrap'><table><thead><tr>{''.join(header_cells)}</tr></thead><tbody>{''.join(body_rows)}</tbody></table></div>"
-    calc_h = min(620, 80 + len(df_data) * 36)
-    return _clickable_prod_table_func(table_html=full_html, height=calc_h, key="prod_rank_clickable_tbl_v1")
+    calc_h = min(max_h, 80 + len(df_data) * 36)
+    return _clickable_prod_table_func(table_html=full_html, height=calc_h, key=comp_key)
 
 @st.dialog("📦 商品別 在庫・確保数・発注検討ステータス詳細", width="large")
 def show_product_inventory_dialog(sku_code, prod_name):
