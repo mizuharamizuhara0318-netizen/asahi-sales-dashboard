@@ -1611,8 +1611,7 @@ if view_type == '🛒 アマゾン日別注文数＆利益計算出力':
     asin_map, sku_name_map, seller_prof_map, vendor_prof_map = load_amazon_sku_and_profit_masters()
     code_to_name_local = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict() if not df.empty else {}
     for k_t, v_t in (jan_title_dict or {}).items():
-        if str(k_t).strip() not in code_to_name_local:
-            code_to_name_local[str(k_t).strip()] = str(v_t).strip()
+        if str(k_t).strip() not in code_to_name_local: code_to_name_local[str(k_t).strip()] = str(v_t).strip()
 
     st.markdown("#### 🛒 アマゾン日別注文数 ＆『アマゾン利益計算』シート自動作成")
     st.caption("※セラーの日次CSV（例：`11-2.csv`）と弥生の売上データから、`注文数`（セラー）・`ベンダー注文数`（ベンダー）および日別31シート＋合計のExcelをワンクリックで作成します。")
@@ -1624,32 +1623,22 @@ if view_type == '🛒 アマゾン日別注文数＆利益計算出力':
         st.info(f"📁 `SKU.xlsx` 登録: **{len(sku_name_map):,} 品番**\n\n📊 利益計算マスタ: **読込済**")
 
     with col_up_daily:
-        up_daily_csvs = st.file_uploader(
-            f"📥 アマゾンセラー日次CSV（例: `{tgt_m_int}-1.csv`, `{tgt_m_int}-2.csv` ...）をドラッグ＆ドロップ（複数日まとめ入れOK）",
-            type=["csv"], accept_multiple_files=True, key="amz_daily_csv_uploader"
-        )
+        up_daily_csvs = st.file_uploader(f"📥 アマゾンセラー日次CSV（例: `{tgt_m_int}-1.csv`, `{tgt_m_int}-2.csv` ...）をドラッグ＆ドロップ（複数日まとめ入れOK）", type=["csv"], accept_multiple_files=True, key="amz_daily_csv_uploader")
         if up_daily_csvs:
             for u_f in up_daily_csvs:
-                with open(os.path.join(AMZ_DAILY_STORE_DIR, u_f.name), "wb") as f_out:
-                    f_out.write(u_f.getbuffer())
+                with open(os.path.join(AMZ_DAILY_STORE_DIR, u_f.name), "wb") as f_out: f_out.write(u_f.getbuffer())
             st.success(f"✅ {len(up_daily_csvs)} 件の日次CSVを読み込みました！")
 
-    daily_csv_map = {}
-    raw_daily_df_map = {}
-    search_csv_paths = []
+    daily_csv_map, raw_daily_df_map, search_csv_paths = {}, {}, []
     for s_dir in [AMZ_DAILY_STORE_DIR, BASE_DIR, BASE_SHARE]:
-        if os.path.exists(s_dir):
-            search_csv_paths.extend(glob.glob(os.path.join(s_dir, "*.csv")))
+        if os.path.exists(s_dir): search_csv_paths.extend(glob.glob(os.path.join(s_dir, "*.csv")))
     for c_path in sorted(list(set(search_csv_paths))):
         m_num, d_num = parse_month_day_from_csv_name(c_path, default_month=None)
         if m_num == tgt_m_int and d_num and 1 <= d_num <= 31:
             parsed_d, raw_d = read_seller_daily_business_report(c_path)
-            if not parsed_d.empty:
-                daily_csv_map[d_num] = parsed_d
-                raw_daily_df_map[d_num] = raw_d
+            if not parsed_d.empty: daily_csv_map[d_num], raw_daily_df_map[d_num] = parsed_d, raw_d
 
-    seller_sku_days = {}
-    seller_metrics = {}
+    seller_sku_days, seller_metrics = {}, {}
     for d_num, p_df in daily_csv_map.items():
         for _, r in p_df.iterrows():
             asin = r["asin"]
@@ -1657,9 +1646,7 @@ if view_type == '🛒 アマゾン日別注文数＆利益計算出力':
             if not sk:
                 m_sk = re.search(r'([A-Z]{2,4}-\d{2,5}[A-Z0-9]*)', r["raw_title"])
                 sk = m_sk.group(1) if m_sk else asin
-            if not clean_nm:
-                clean_nm = sku_name_map.get(sk, code_to_name_local.get(sk, r["raw_title"][:25]))
-
+            if not clean_nm: clean_nm = sku_name_map.get(sk, code_to_name_local.get(sk, r["raw_title"][:25]))
             if sk not in seller_sku_days:
                 seller_sku_days[sk] = {"asin": asin, "name": clean_nm, "days": {d: 0 for d in range(1, 32)}}
                 seller_metrics[sk] = {"sales": 0, "sess": 0, "pv": 0, "bb_sum": 0.0, "bb_cnt": 0}
@@ -1674,22 +1661,93 @@ if view_type == '🛒 アマゾン日別注文数＆利益計算出力':
     seller_rows = []
     for sk, info in seller_sku_days.items():
         tot_q = sum(info["days"].values())
-        m_info = seller_metrics[sk]
-        p_info = seller_prof_map.get(sk, {})
-        u_prof = p_info.get("unit_profit", 0.0)
-        m_rate = p_info.get("margin_rate", 0.0)
-        asahi_p = p_info.get("asahi_price", 0.0)
-        tot_prof = round(u_prof * tot_q, 1)
-        tot_asahi = round(asahi_p * tot_q, 1)
+        m_info, p_info = seller_metrics[sk], seller_prof_map.get(sk, {})
+        u_prof, m_rate, asahi_p = p_info.get("unit_profit", 0.0), p_info.get("margin_rate", 0.0), p_info.get("asahi_price", 0.0)
         avg_bb = round(m_info["bb_sum"] / m_info["bb_cnt"], 4) if m_info["bb_cnt"] > 0 else 0.0
-
         row_dict = {"（子）ASIN": info["asin"], "タイトル": sk, "商品名": info["name"]}
-        for d in range(1, 32):
-            row_dict[f"{d}日"] = info["days"][d] if d in daily_csv_map else None
-        row_dict["合計"] = tot_q
-        row_dict["売上額"] = m_info["sales"]
-        row_dict["粗利"] = u_prof
-        row_dict["粗利率"] = f"{m_rate*100:.1f}%"
+        for d in range(1, 32): row_dict[f"{d}日"] = info["days"][d] if d in daily_csv_map else None
+        row_dict.update({"合計": tot_q, "売上額": m_info["sales"], "粗利": u_prof, "粗利率": f"{m_rate*100:.1f}%" if m_rate else "-", "粗利合計": round(u_prof * tot_q, 1), "セッション": m_info["sess"], "ページビュー": m_info["pv"], "おすすめ率": f"{avg_bb*100:.1f}%" if avg_bb else "-", "旭電機売上計": round(asahi_p * tot_q, 1)})
+        seller_rows.append(row_dict)
+
+    seller_summary_df = pd.DataFrame(seller_rows)
+    if not seller_summary_df.empty: seller_summary_df = seller_summary_df.sort_values(by=["合計", "売上額"], ascending=[False, False]).reset_index(drop=True)
+
+    v_df_month = df[(df["年月"] == amz_target_ym) & (df["得意先名"].str.contains("アマゾンベンダー", na=False))].copy()
+    v_active_days, v_sku_days = set(), {sk: {d: 0 for d in range(1, 32)} for sk in (list(vendor_prof_map.keys()) if vendor_prof_map else list(sku_name_map.keys()))}
+    if not v_df_month.empty:
+        for _, r in v_df_month.iterrows():
+            sk, dt_val = str(r["商品コード"]).strip(), r["日付_dt"]
+            if pd.isna(dt_val) or not sk: continue
+            d_num = int(dt_val.day)
+            v_active_days.add(d_num)
+            if sk not in v_sku_days: v_sku_days[sk] = {d: 0 for d in range(1, 32)}
+            v_sku_days[sk][d_num] += int(r["数量"])
+
+    max_v_day = max(v_active_days) if v_active_days else 0
+    vendor_rows = []
+    for sk, d_map in v_sku_days.items():
+        tot_q = sum(d_map.values())
+        if tot_q == 0 and sk not in vendor_prof_map and sk not in sku_name_map: continue
+        vp = vendor_prof_map.get(sk, {})
+        clean_nm = sku_name_map.get(sk, vp.get("name", code_to_name_local.get(sk, sk)))
+        sell_p = int(vp.get("sell_price", 0))
+        if sell_p == 0 and not v_df_month[v_df_month["商品コード"] == sk].empty: sell_p = int(v_df_month[v_df_month["商品コード"] == sk]["単価"].iloc[-1])
+        cost_p = int(vp.get("cost", cost_master_dict.get(sk, 0)))
+        u_prof = sell_p - cost_p if sell_p > 0 else 0
+        r_dict = {"SKU": sk, "商品名": clean_nm}
+        for d in range(1, 32): r_dict[f"{d}日"] = d_map[d] if (d <= max_v_day or d in v_active_days) else None
+        r_dict.update({"合計": tot_q, "売値": sell_p, "原価": cost_p, "利益率": f"{(u_prof/sell_p)*100:.1f}%" if sell_p > 0 else "-", "粗利": u_prof, "売上合計": tot_q * sell_p, "粗利合計": tot_q * u_prof})
+        vendor_rows.append(r_dict)
+
+    vendor_summary_df = pd.DataFrame(vendor_rows)
+    if not vendor_summary_df.empty: vendor_summary_df = vendor_summary_df.sort_values(by=["合計", "売上合計"], ascending=[False, False]).reset_index(drop=True)
+
+    def generate_amazon_profit_sheets_excel(s_df, v_df):
+        out = io.BytesIO()
+        with pd.ExcelWriter(out, engine="openpyxl") as writer:
+            if not s_df.empty: s_df.drop(columns=["（子）ASIN"], errors="ignore").rename(columns={"商品名": ""}).to_excel(writer, index=False, sheet_name="注文数")
+            else: pd.DataFrame(columns=["タイトル", ""] + [f"{d}日" for d in range(1, 32)] + ["合計", "売上額", "粗利", "粗利率", "粗利合計", "セッション", "ページビュー", "おすすめ率", "旭電機売上計"]).to_excel(writer, index=False, sheet_name="注文数")
+            if not v_df.empty: v_df.to_excel(writer, index=False, sheet_name="ベンダー注文数")
+            else: pd.DataFrame(columns=["SKU", "商品名"] + [f"{d}日" for d in range(1, 32)] + ["合計", "売値", "原価", "利益率", "粗利", "売上合計", "粗利合計"]).to_excel(writer, index=False, sheet_name="ベンダー注文数")
+        return out.getvalue()
+
+    def generate_monthly_31_sheets_excel(mode_type, s_df, v_df, raw_s_map, v_month_df):
+        out = io.BytesIO()
+        with pd.ExcelWriter(out, engine="openpyxl") as writer:
+            for d in range(1, 32):
+                if mode_type == "seller":
+                    (raw_s_map[d] if d in raw_s_map else pd.DataFrame()).to_excel(writer, index=False, sheet_name=str(d))
+                else:
+                    sub_v = v_month_df[v_month_df["日付_dt"].dt.day == d] if not v_month_df.empty else pd.DataFrame()
+                    piv_v = sub_v.groupby("商品コード", as_index=False)["数量"].sum().rename(columns={"商品コード": "行ラベル", "数量": "合計 / ご購入明細数量"}) if not sub_v.empty else pd.DataFrame()
+                    piv_v.to_excel(writer, index=False, sheet_name=str(d))
+            if mode_type == "seller":
+                cols_g = ["（子）ASIN", "タイトル", "商品名"] + [f"{d}日" for d in range(1, 32)] + ["合計"]
+                (s_df[[c for c in cols_g if c in s_df.columns]].rename(columns={"商品名": ""}) if not s_df.empty else pd.DataFrame(columns=cols_g)).to_excel(writer, index=False, sheet_name="合計")
+            else:
+                cols_vg = ["SKU", "商品名"] + [f"{d}日" for d in range(1, 32)] + ["合計"]
+                (v_df[[c for c in cols_vg if c in v_df.columns]] if not v_df.empty else pd.DataFrame(columns=cols_vg)).to_excel(writer, index=False, sheet_name="合計")
+        return out.getvalue()
+
+    dl_c1, dl_c2, dl_c3 = st.columns(3)
+    with dl_c1:
+        st.download_button("📥 ① アマゾン利益計算用（注文数＋ベンダー注文数）Excel", data=generate_amazon_profit_sheets_excel(seller_summary_df, vendor_summary_df), file_name=f"アマゾン利益計算_注文数シート_{amz_target_ym}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
+    with dl_c2:
+        st.download_button(f"📥 ② セラー日別（{tgt_m_int}月.xlsx 形式：1〜31＋合計）", data=generate_monthly_31_sheets_excel("seller", seller_summary_df, vendor_summary_df, raw_daily_df_map, v_df_month), file_name=f"{tgt_m_int}月.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    with dl_c3:
+        st.download_button(f"📥 ③ ベンダー日別（{tgt_m_int}月ベンダー.xlsx 形式）", data=generate_monthly_31_sheets_excel("vendor", seller_summary_df, vendor_summary_df, raw_daily_df_map, v_df_month), file_name=f"{tgt_m_int}月ベンダー.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+
+    tab_s_view, tab_v_view = st.tabs([
+        f"🛒 セラー『注文数』シート（取込済日数: {len(daily_csv_map)}日分 / 合計: {int(seller_summary_df['合計'].sum()) if not seller_summary_df.empty else 0:,}個）",
+        f"🏢 ベンダー『ベンダー注文数』シート（弥生連動 / 合計: {int(vendor_summary_df['合計'].sum()) if not vendor_summary_df.empty else 0:,}個）"
+    ])
+    with tab_s_view:
+        if not seller_summary_df.empty: render_universal_table(seller_summary_df, max_h=560)
+        else: st.info(f"まだ {amz_target_ym} のセラー日次CSV（例: `{tgt_m_int}-2.csv`）がアップロードされていません。上の枠からCSVを入れてください。")
+    with tab_v_view:
+        if not vendor_summary_df.empty: render_universal_table(vendor_summary_df[vendor_summary_df["合計"] > 0] if st.checkbox("注文数1個以上の商品のみ画面表示（Excelには全件出力されます）", value=True) else vendor_summary_df, max_h=560)
+        else: st.info(f"{amz_target_ym} のアマゾンベンダー売上データがまだありません。")
+    st.stop()
 # ========================================================
 # ★ 🏭 在庫・確保数＆発注検討アラート
 # ========================================================
