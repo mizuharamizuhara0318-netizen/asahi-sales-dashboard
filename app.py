@@ -1714,7 +1714,7 @@ except Exception:
     pass
 _clickable_prod_table_func = components.declare_component("clickable_prod_table_v1", path=_CLICKABLE_PROD_DIR)
 
-def render_clickable_product_table(df_data):
+def render_clickable_product_table(df_data, comp_key="prod_rank_clickable_tbl_v1", max_h=620):
     if df_data is None or df_data.empty:
         st.info("該当するデータがありません。")
         return None
