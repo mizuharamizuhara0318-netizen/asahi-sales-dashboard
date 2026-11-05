@@ -1476,6 +1476,7 @@ VIEW_MODES = [
     '📑 営業会議用：上位客先別売上実績',
     '🏷️ ランク価格マスタ一覧',
     '👤 担当者別 売上＆目標達成分析',
+    '🛒 アマゾン日別注文数＆利益計算出力'
     '🏭 在庫・確保数＆発注検討アラート',
     '✨ 新商品売上分析（直近1年）',
     '📈 商品別 前年実績比較',
@@ -1497,7 +1498,199 @@ with col_top2:
         st.info(f"📦 ロジザード登録: **{len(logi_inv_map):,} 品番** | 🔒 弥生確保: **{len(yayoi_kakuho_map):,} 品番** | 📋 発注検討表: **{len(hacchu_master_map):,} 品番**")
     else:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
+# ========================================================
+# ★ 🛒 アマゾン日別注文数＆利益計算出力（セラー日次CSV ＆ 弥生ベンダー自動連動）
+# ========================================================
+AMZ_DAILY_STORE_DIR = os.path.join(BASE_DIR, "amazon_daily_csvs")
+os.makedirs(AMZ_DAILY_STORE_DIR, exist_ok=True)
 
+@st.cache_data(show_spinner=False)
+def load_amazon_sku_and_profit_masters():
+    asin_to_sku = {}
+    sku_to_clean_name = {}
+    sku_f, _ = find_file_multidir("*SKU*.xls*")
+    if sku_f and os.path.exists(sku_f):
+        try:
+            sdf = pd.read_excel(sku_f)
+            for _, r in sdf.iterrows():
+                c_asin = str(r.get("(子) ASIN", r.iloc[1] if len(r) > 1 else "")).strip()
+                p_asin = str(r.iloc[0]).strip() if len(r) > 0 else ""
+                sk = str(r.get("SKU", r.iloc[2] if len(r) > 2 else "")).strip()
+                nm = str(r.get("商品名", r.iloc[3] if len(r) > 3 else "")).strip()
+                if sk and sk not in ["nan", "None"]:
+                    if c_asin and c_asin not in ["nan", "None"]: asin_to_sku[c_asin] = (sk, nm)
+                    if p_asin and p_asin not in ["nan", "None"] and p_asin not in asin_to_sku: asin_to_sku[p_asin] = (sk, nm)
+                    if sk not in sku_to_clean_name and nm not in ["nan", "None", ""]: sku_to_clean_name[sk] = nm
+        except Exception: pass
+
+    seller_prof_map = {}
+    vendor_prof_map = {}
+    prof_f, _ = find_file_multidir("*アマゾン利益計算*.xls*")
+    if prof_f and os.path.exists(prof_f):
+        try:
+            xls_p = pd.ExcelFile(prof_f)
+            if "SKU" in xls_p.sheet_names and not asin_to_sku:
+                sdf2 = pd.read_excel(prof_f, sheet_name="SKU")
+                for _, r in sdf2.iterrows():
+                    c_asin = str(r.get("(子) ASIN", "")).strip()
+                    sk = str(r.get("SKU", "")).strip()
+                    nm = str(r.get("商品名", "")).strip()
+                    if sk and sk != "nan":
+                        if c_asin and c_asin != "nan": asin_to_sku[c_asin] = (sk, nm)
+                        if sk not in sku_to_clean_name: sku_to_clean_name[sk] = nm
+            if "アマゾン出荷商品" in xls_p.sheet_names:
+                adf = pd.read_excel(prof_f, sheet_name="アマゾン出荷商品")
+                for _, r in adf.iterrows():
+                    sk = str(r.get("商品", "")).strip()
+                    if not sk or sk == "nan": continue
+                    seller_prof_map[sk] = {
+                        "unit_profit": clean_num(r.get("粗利", 0)),
+                        "margin_rate": clean_num(r.get("粗利率", 0)),
+                        "asahi_price": clean_num(r.get("旭電機の売値", 0)),
+                        "name": str(r.get("商品名", "")).strip()
+                    }
+            if "ベンダー" in xls_p.sheet_names:
+                vdf = pd.read_excel(prof_f, sheet_name="ベンダー")
+                for _, r in vdf.iterrows():
+                    sk = str(r.get("SKU", "")).strip()
+                    if not sk or sk == "nan": continue
+                    vendor_prof_map[sk] = {
+                        "sell_price": clean_num(r.get("売値", 0)),
+                        "cost": clean_num(r.get("原価", 0)),
+                        "margin_rate": clean_num(r.get("利益率", 0)),
+                        "unit_profit": clean_num(r.get("粗利", 0)),
+                        "name": str(r.get("商品名", "")).strip()
+                    }
+        except Exception: pass
+
+    return asin_to_sku, sku_to_clean_name, seller_prof_map, vendor_prof_map
+
+def parse_month_day_from_csv_name(fname, default_month=None):
+    bname = os.path.basename(fname)
+    m_ymd = re.search(r'20\d{2}[年/\-_](\d{1,2})[月/\-_](\d{1,2})', bname)
+    if m_ymd: return int(m_ymd.group(1)), int(m_ymd.group(2))
+    m_md = re.search(r'(?<!\d)(\d{1,2})[月/\-_](\d{1,2})(?!\d)', bname)
+    if m_md: return int(m_md.group(1)), int(m_md.group(2))
+    m_d = re.search(r'^(\d{1,2})\.csv$', bname, re.IGNORECASE)
+    if m_d and default_month: return int(default_month), int(m_d.group(1))
+    return None, None
+
+def read_seller_daily_business_report(f_obj):
+    for enc in ["utf-8-sig", "utf-8", "cp932", "shift_jis"]:
+        try:
+            if hasattr(f_obj, "seek"): f_obj.seek(0)
+            d = pd.read_csv(f_obj, encoding=enc, low_memory=False)
+            if d.empty: continue
+            c_child = next((c for c in d.columns if "子" in str(c) and "ASIN" in str(c)), None)
+            if not c_child: c_child = next((c for c in d.columns if "ASIN" in str(c)), d.columns[1] if len(d.columns) > 1 else d.columns[0])
+            c_qty = next((c for c in d.columns if "注文された商品点数" in str(c) or "注文点数" in str(c)), None)
+            c_sales = next((c for c in d.columns if "注文商品の売上額" in str(c) and "B2B" not in str(c)), None)
+            c_sess = next((c for c in d.columns if "セッション数" in str(c) and "B2B" not in str(c)), None)
+            c_pv = next((c for c in d.columns if "ページビュー" in str(c) and "B2B" not in str(c)), None)
+            c_buybox = next((c for c in d.columns if "おすすめ出品" in str(c) and "B2B" not in str(c)), None)
+            c_title = next((c for c in d.columns if "タイトル" in str(c) or "商品名" in str(c)), None)
+
+            rows = []
+            for _, r in d.iterrows():
+                asin = str(r.get(c_child, "")).strip()
+                if not asin or asin in ["nan", "None"]: continue
+                qty = int(clean_num(r.get(c_qty, 0))) if c_qty else 0
+                sales = int(clean_num(r.get(c_sales, 0))) if c_sales else 0
+                sess = int(clean_num(r.get(c_sess, 0))) if c_sess else 0
+                pv = int(clean_num(r.get(c_pv, 0))) if c_pv else 0
+                bb_raw = str(r.get(c_buybox, "0")).strip() if c_buybox else "0"
+                bb_val = clean_num(bb_raw) / 100.0 if "%" in bb_raw or clean_num(bb_raw) > 1.0 else clean_num(bb_raw)
+                rows.append({
+                    "asin": asin, "raw_title": str(r.get(c_title, "")).strip() if c_title else "",
+                    "qty": qty, "sales": sales, "sess": sess, "pv": pv, "buybox": bb_val, "raw_row": r.to_dict()
+                })
+            return pd.DataFrame(rows), d
+        except Exception: continue
+    return pd.DataFrame(), pd.DataFrame()
+
+if view_type == '🛒 アマゾン日別注文数＆利益計算出力':
+    asin_map, sku_name_map, seller_prof_map, vendor_prof_map = load_amazon_sku_and_profit_masters()
+    code_to_name_local = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict() if not df.empty else {}
+    for k_t, v_t in (jan_title_dict or {}).items():
+        if str(k_t).strip() not in code_to_name_local:
+            code_to_name_local[str(k_t).strip()] = str(v_t).strip()
+
+    st.markdown("#### 🛒 アマゾン日別注文数 ＆『アマゾン利益計算』シート自動作成")
+    st.caption("※セラーの日次CSV（例：`11-2.csv`）と弥生の売上データから、`注文数`（セラー）・`ベンダー注文数`（ベンダー）および日別31シート＋合計のExcelをワンクリックで作成します。")
+
+    col_ym_sel, col_up_daily = st.columns([1.2, 2.8])
+    with col_ym_sel:
+        amz_target_ym = st.selectbox("📅 集計対象の年月を選択", desc_valid_ym, index=0, key="amz_daily_ym_sel")
+        tgt_y_int, tgt_m_int = int(amz_target_ym[:4]), int(amz_target_ym[5:7])
+        st.info(f"📁 `SKU.xlsx` 登録: **{len(sku_name_map):,} 品番**\n\n📊 利益計算マスタ: **読込済**")
+
+    with col_up_daily:
+        up_daily_csvs = st.file_uploader(
+            f"📥 アマゾンセラー日次CSV（例: `{tgt_m_int}-1.csv`, `{tgt_m_int}-2.csv` ...）をドラッグ＆ドロップ（複数日まとめ入れOK）",
+            type=["csv"], accept_multiple_files=True, key="amz_daily_csv_uploader"
+        )
+        if up_daily_csvs:
+            for u_f in up_daily_csvs:
+                with open(os.path.join(AMZ_DAILY_STORE_DIR, u_f.name), "wb") as f_out:
+                    f_out.write(u_f.getbuffer())
+            st.success(f"✅ {len(up_daily_csvs)} 件の日次CSVを読み込みました！")
+
+    daily_csv_map = {}
+    raw_daily_df_map = {}
+    search_csv_paths = []
+    for s_dir in [AMZ_DAILY_STORE_DIR, BASE_DIR, BASE_SHARE]:
+        if os.path.exists(s_dir):
+            search_csv_paths.extend(glob.glob(os.path.join(s_dir, "*.csv")))
+    for c_path in sorted(list(set(search_csv_paths))):
+        m_num, d_num = parse_month_day_from_csv_name(c_path, default_month=None)
+        if m_num == tgt_m_int and d_num and 1 <= d_num <= 31:
+            parsed_d, raw_d = read_seller_daily_business_report(c_path)
+            if not parsed_d.empty:
+                daily_csv_map[d_num] = parsed_d
+                raw_daily_df_map[d_num] = raw_d
+
+    seller_sku_days = {}
+    seller_metrics = {}
+    for d_num, p_df in daily_csv_map.items():
+        for _, r in p_df.iterrows():
+            asin = r["asin"]
+            sk, clean_nm = asin_map.get(asin, ("", ""))
+            if not sk:
+                m_sk = re.search(r'([A-Z]{2,4}-\d{2,5}[A-Z0-9]*)', r["raw_title"])
+                sk = m_sk.group(1) if m_sk else asin
+            if not clean_nm:
+                clean_nm = sku_name_map.get(sk, code_to_name_local.get(sk, r["raw_title"][:25]))
+
+            if sk not in seller_sku_days:
+                seller_sku_days[sk] = {"asin": asin, "name": clean_nm, "days": {d: 0 for d in range(1, 32)}}
+                seller_metrics[sk] = {"sales": 0, "sess": 0, "pv": 0, "bb_sum": 0.0, "bb_cnt": 0}
+            seller_sku_days[sk]["days"][d_num] += int(r["qty"])
+            seller_metrics[sk]["sales"] += int(r["sales"])
+            seller_metrics[sk]["sess"] += int(r["sess"])
+            seller_metrics[sk]["pv"] += int(r["pv"])
+            if r["buybox"] > 0:
+                seller_metrics[sk]["bb_sum"] += float(r["buybox"])
+                seller_metrics[sk]["bb_cnt"] += 1
+
+    seller_rows = []
+    for sk, info in seller_sku_days.items():
+        tot_q = sum(info["days"].values())
+        m_info = seller_metrics[sk]
+        p_info = seller_prof_map.get(sk, {})
+        u_prof = p_info.get("unit_profit", 0.0)
+        m_rate = p_info.get("margin_rate", 0.0)
+        asahi_p = p_info.get("asahi_price", 0.0)
+        tot_prof = round(u_prof * tot_q, 1)
+        tot_asahi = round(asahi_p * tot_q, 1)
+        avg_bb = round(m_info["bb_sum"] / m_info["bb_cnt"], 4) if m_info["bb_cnt"] > 0 else 0.0
+
+        row_dict = {"（子）ASIN": info["asin"], "タイトル": sk, "商品名": info["name"]}
+        for d in range(1, 32):
+            row_dict[f"{d}日"] = info["days"][d] if d in daily_csv_map else None
+        row_dict["合計"] = tot_q
+        row_dict["売上額"] = m_info["sales"]
+        row_dict["粗利"] = u_prof
+        row_dict["粗利率"] = f"{m_rate*100:.1f}%"
 # ========================================================
 # ★ 🏭 在庫・確保数＆発注検討アラート
 # ========================================================
@@ -2703,7 +2896,7 @@ if "analysis_ym_start_v3" not in st.session_state:
 if "analysis_ym_end_v3" not in st.session_state:
     st.session_state["analysis_ym_end_v3"] = e_def if e_def in desc_valid_ym else desc_valid_ym[0]
 
-if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート']:
+if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート',]:
     col_mode, col_p1, col_p2, col_staff = st.columns([1, 1.2, 1.2, 1.6])
     with col_mode:
         date_mode = st.radio("指定単位", ["年月で指定", "日で指定"], horizontal=True, key="date_mode_radio_analysis")
@@ -2780,7 +2973,7 @@ else:
         ly_filtered = df[(df["日付_dt"] >= (dt_s - pd.DateOffset(years=1))) & (df["日付_dt"] <= (dt_e - pd.DateOffset(years=1)))]
         active_months_list = [int(ym[5:7]) for ym in sorted(filtered["年月"].dropna().unique()) if len(ym) >= 7]
 
-if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート']:
+if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート','🛒 アマゾン日別注文数＆利益計算出力']:
     if sel_cust != "（すべて）":
         filtered = filtered[filtered["得意先名"] == sel_cust]
         if not ly_filtered.empty: ly_filtered = ly_filtered[ly_filtered["得意先名"] == sel_cust]
