@@ -1541,17 +1541,23 @@ with tab_s_view:
                     added_yayoi.append(amz_concat)
 
                 if added_yayoi:
-                    new_merged = pd.concat([base_df] + added_yayoi, ignore_index=True)
-                    name_lookup = dict(jan_title_dict or {})
-                    valid_names = new_merged[(new_merged["商品名"].notna()) & (new_merged["商品名"].astype(str) != new_merged["商品コード"].astype(str)) & (new_merged["商品名"].astype(str).str.strip() != "")]
-                    if not valid_names.empty:
-                        name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
-                    new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
-    try:
-        new_merged.to_parquet(CACHE_FILE, index=False)
-        upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
-    except Exception as e:
-        st.error(f"保存エラー: {e}")
+            new_merged = pd.concat([base_df] + added_yayoi, ignore_index=True)
+            name_lookup = dict(jan_title_dict or {})
+            valid_names = new_merged[(new_merged["商品名"].notna()) & (new_merged["商品名"].astype(str) != new_merged["商品コード"].astype(str)) & (new_merged["商品名"].astype(str).str.strip() != "")]
+            if not valid_names.empty:
+                name_lookup.update(valid_names.drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict())
+            new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
+
+            # ↑ここを「ボタンが押されたときの中」に含めるため、全体のインデントを右に合わせる
+            try:
+                new_merged.to_parquet(CACHE_FILE, index=False)
+                upload_to_gdrive(CACHE_FILE, "sales_cache.parquet")
+                st.success("データを追加・保存しました！")
+                st.rerun()
+            except Exception as e:
+                st.error(f"保存エラー: {e}")
+
+# ※ 1556〜1560行目にある重複したエクスパンダと「Googleドライブの最新ファイルを今すぐ同期」ボタンのブロックは削除する[cite: 11]
 
     with st.expander("📥 データ追加・在庫更新・バックアップ", expanded=False):
         if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
