@@ -192,19 +192,35 @@ def get_gdrive_service_and_folder():
         return None, None
 
 def sync_all_from_gdrive(force=False):
-    """Googleドライブ内の全ファイル（「済」などのサブフォルダ階層内も含めてCSV/Excel等を完全網羅）を自動取得"""
+    """Googleドライブ内のファイル一覧をスキャンし、未読込・更新されたファイルのみを効率的に差分同期する"""
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
         return False
+    
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
     if not force and (time.time() - last_sync < 300):
         return True
+
     try:
         from googleapiclient.http import MediaIoBaseDownload
         
+        meta_path = os.path.join(GDRIVE_SYNC_DIR, "_sync_meta.json")
+        local_meta = {}
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    local_meta = json.load(f)
+            except Exception:
+                pass
+
         def _download_file(f_item, dest_dir):
             fid, fname, mtime = f_item["id"], f_item["name"], f_item.get("modifiedTime", "")
             target_path = os.path.join(dest_dir, fname)
+            
+            # 💡 既に同じ更新日時のファイルがローカルにあればダウンロードを完全スキップ（差分同期）
+            if not force and local_meta.get(fid) == mtime and os.path.exists(target_path):
+                return
+
             try:
                 req = service.files().get_media(fileId=fid)
                 fh = io.BytesIO()
@@ -214,9 +230,13 @@ def sync_all_from_gdrive(force=False):
                     _, done = downloader.next_chunk()
                 with open(target_path, "wb") as out_f:
                     out_f.write(fh.getvalue())
+                
+                # 主要なキャッシュや設定ファイルはBASE_DIRにも直置きする
                 if fname.endswith((".parquet", ".json", ".xlsx", ".xls", ".csv")):
                     with open(os.path.join(BASE_DIR, fname), "wb") as out_b:
                         out_b.write(fh.getvalue())
+                
+                local_meta[fid] = mtime
             except Exception:
                 pass
 
@@ -238,7 +258,13 @@ def sync_all_from_gdrive(force=False):
                 if not page_token:
                     break
 
+        os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
         _process_folder(folder_id, GDRIVE_SYNC_DIR)
+        
+        # メタデータを保存
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(local_meta, f, ensure_ascii=False, indent=2)
+
         st.session_state["_last_gdrive_sync_ts"] = time.time()
         return True
     except Exception as e:
