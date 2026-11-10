@@ -221,29 +221,7 @@ def sync_all_from_gdrive(force=False):
             except Exception:
                 pass
 
-        def _process_folder(curr_folder_id, dest_dir):
-            page_token = None
-            while True:
-                q = f"'{curr_folder_id}' in parents and trashed = false"
-                res = service.files().list(q=q, fields="nextPageToken, files(id, name, mimeType, modifiedTime)", pageSize=500, pageToken=page_token).execute()
-                for item in res.get("files", []):
-                    mtype = item.get("mimeType", "")
-                    fname = item.get("name", "")
-                    if mtype == "application/vnd.google-apps.folder":
-                        sub_dest = os.path.join(dest_dir, fname)
-                        os.makedirs(sub_dest, exist_ok=True)
-                        _process_folder(item["id"], sub_dest)
-                    elif not mtype.startswith("application/vnd.google-apps."):
-                        _download_file(item, dest_dir)
-                page_token = res.get("nextPageToken")
-                if not page_token:
-                    break
-
-        _process_folder(folder_id, GDRIVE_SYNC_DIR)
-        st.session_state["_last_gdrive_sync_ts"] = time.time()
-        return True
-    except Exception:
-        return Falsedef sync_all_from_gdrive(force=False):
+def sync_all_from_gdrive(force=False):
     """Googleドライブ内の全ファイル（サブフォルダ階層内も含めてCSV/Excel/parquet/JSON等を完全網羅）を自動取得"""
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
