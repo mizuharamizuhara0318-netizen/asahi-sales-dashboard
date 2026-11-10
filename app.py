@@ -1521,46 +1521,43 @@ with tab_s_view:
     
     uploaded_files = st.file_uploader("CSVファイルを選択 (複数可)", type=["csv"], accept_multiple_files=True, key="csv_uploader_widget")
     if uploaded_files and st.button("＋ 売上データベースに追加反映", type="primary", use_container_width=True):
-        added_yayoi, added_amz = [], []
-        for uf in uploaded_files:
-            if up_csv_type == "弥生売上CSV":
-                raw_d = _read_single_csv(uf, explicit_name=uf.name)
-                if raw_d is not None and not raw_d.empty:
-                    added_yayoi.append(_parse_raw_df_to_standard(raw_d))
-            else:
-                has_m_in_name = bool(re.search(r'(20\d{2})[年/\-_]*(\d{1,2})月?', uf.name))
-                amz_d = _read_amazon_seller_csv(uf, explicit_name=uf.name, override_ym=(None if has_m_in_name else amz_ym_input))
-                if amz_d is not None and not amz_d.empty:
-                    added_amz.append(amz_d)
+            added_yayoi, added_amz = [], []
+            for uf in uploaded_files:
+                if up_csv_type == "弥生売上CSV":
+                    raw_d = _read_single_csv(uf, explicit_name=uf.name)
+                    if raw_d is not None and not raw_d.empty:
+                        added_yayoi.append(_parse_raw_df_to_standard(raw_d))
+                else:
+                    has_m_in_name = bool(re.search(r'(20\d{2})[年/\-_]*(\d{1,2})月?', uf.name))
+                    amz_d = _read_amazon_seller_csv(uf, explicit_name=uf.name, override_ym=(None if has_m_in_name else amz_ym_input))
+                    if amz_d is not None and not amz_d.empty:
+                        added_amz.append(amz_d)
 
-                base_df = df.copy()
-                if added_amz:
-                    amz_concat = pd.concat(added_amz, ignore_index=True)
-                    replace_yms = set(amz_concat["年月"].dropna().unique())
-                    base_df = base_df[~((base_df["得意先名"] == "アマゾンセラー") & (base_df["年月"].isin(replace_yms)))].copy()
-                    added_yayoi.append(amz_concat)
+            base_df = df.copy()
+            if added_amz:
+                amz_concat = pd.concat(added_amz, ignore_index=True)
+                replace_yms = set(amz_concat["年月"].dropna().unique())
+                base_df = base_df[~((base_df["得意先名"] == "アマゾンセラー") & (base_df["年月"].isin(replace_yms)))].copy()
+                added_yayoi.append(amz_concat)
 
-        if added_yayoi:
-            new_merged = pd.concat([base_df] + added_yayoi, ignore_index=True)
-            name_lookup = dict(jan_title_dict or {})
-            valid_names = new_merged[(new_merged["商品名"].notna()) & (new_merged["商品名"].astype(str) != new_merged["商品コード"].astype(str)) & (new_merged["商品名"].astype(str).str.strip() != "")]
-            if not valid_names.empty:
-                name_lookup.update(valid_names.drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict())
-            new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
+            if added_yayoi:
+                new_merged = pd.concat([base_df] + added_yayoi, ignore_index=True)
+                name_lookup = dict(jan_title_dict or {})
+                valid_names = new_merged[(new_merged["商品名"].notna()) & (new_merged["商品名"].astype(str) != new_merged["商品コード"].astype(str)) & (new_merged["商品名"].astype(str).str.strip() != "")]
+                if not valid_names.empty:
+                    name_lookup.update(valid_names.drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict())
+                new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
 
-            # try: のインデントは、上の処理と同じ深さに揃える
-           try:
-                new_merged.to_parquet(CACHE_FILE, index=False)
-                upload_to_gdrive(CACHE_FILE, "sales_cache.parquet")
-                st.success("データを追加・保存しました！")
-                st.rerun()
-            except Exception as e:
-                st.error(f"保存エラー: {e}")
+                try:
+                    new_merged.to_parquet(CACHE_FILE, index=False)
+                    upload_to_gdrive(CACHE_FILE, "sales_cache.parquet")
+                    st.success("データを追加・保存しました！")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"保存エラー: {e}")
 
-# ここから先はインデントを消して左端に揃える
 with up_tab2:
     st.caption("ロジザード在庫csv（青山・名古屋）、在庫確保.xlsx、発注検討表.xlsxを最新に上書きします。")
-    inv_up_files = st.file_uploader("在庫・確保ファイルを選択", type=["csv", "xlsx", "xls"], accept_multiple_files=True, key="inv_uploader_widget")
             
             
         with up_tab2:
