@@ -152,8 +152,9 @@ def clean_product_name(val):
     return re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]', '', val).strip()
 
 def find_file_multidir(filename_pattern, exclude_substr=None):
-    # GDRIVE_SYNC_DIR を最優先で検索するように修正
+    # Googleドライブ同期フォルダ（GDRIVE_SYNC_DIR）を最優先で検索し、最新の更新日時も返す
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
+    best_file, best_mtime = None, 0
     for d in search_dirs:
         if os.path.exists(d):
             fl = glob.glob(os.path.join(d, filename_pattern))
@@ -161,18 +162,19 @@ def find_file_multidir(filename_pattern, exclude_substr=None):
                 fl = glob.glob(os.path.join(d, "**", filename_pattern), recursive=True)
             if exclude_substr and fl:
                 fl = [f for f in fl if exclude_substr not in os.path.basename(f)]
-            if fl:
-                return fl[0], os.path.getmtime(fl[0])
-    return None, 0
+            for f in fl:
+                mt = os.path.getmtime(f)
+                if mt > best_mtime:
+                    best_file, best_mtime = f, mt
+    return best_file, best_mtime
 
 # ========================================================
-# ★ ☁️ Googleドライブ 双方向・完全自動同期エンジン
+# ★ ☁️ Googleドライブ 双方向・高速差分同期エンジン（コネクトエラー対策済）
 # ========================================================
-@st.cache_resource(show_spinner=False)
-def get_gdrive_service_and_folder():
+@st.cache_data(show_spinner=False)
+def _get_gdrive_creds_info():
+    """認証情報の辞書だけをキャッシュする（通信オブジェクト自体はキャッシュしない）"""
     try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
         folder_id = st.secrets.get("folder_id", "").strip()
         raw_json = st.secrets.get("gcp_service_account_json", "")
         if not folder_id:
@@ -183,6 +185,18 @@ def get_gdrive_service_and_folder():
             info = dict(st.secrets["gcp_service_account"])
         else:
             return None, None
+        return info, folder_id
+    except Exception:
+        return None, None
+
+def get_gdrive_service_and_folder():
+    """毎回新鮮な通信セッションを作成し、SSLエラーやコネクトエラーを防ぐ"""
+    info, folder_id = _get_gdrive_creds_info()
+    if not info or not folder_id:
+        return None, None
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/drive"]
         )
@@ -192,68 +206,115 @@ def get_gdrive_service_and_folder():
         return None, None
 
 def sync_all_from_gdrive(force=False):
-    """Googleドライブ内の最新ファイル（CSV/Excel/parquet/JSON/サブフォルダ内CSV）を自動取得"""
+    """未読の売上CSVと、更新された在庫・マスタファイルだけを高速に差分同期する"""
+    if not force and st.session_state.get("_gdrive_synced_in_session", False):
+        return True
+
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
         return False
-    last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    if not force and (time.time() - last_sync < 300):
-        return True
+
     try:
         from googleapiclient.http import MediaIoBaseDownload
-        q = f"'{folder_id}' in parents and trashed = false"
-        res = service.files().list(q=q, fields="files(id, name, mimeType, modifiedTime, size)", pageSize=500).execute()
-        items = res.get("files", [])
+        os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
+
+        # ローカルの同期履歴（ファイルIDごとの更新日時）を読込
         meta_path = os.path.join(GDRIVE_SYNC_DIR, "_sync_meta.json")
         local_meta = {}
         if os.path.exists(meta_path):
             try:
-                with open(meta_path, "r", encoding="utf-8") as f: local_meta = json.load(f)
-            except Exception: pass
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    local_meta = json.load(f)
+            except Exception:
+                local_meta = {}
 
-        def _download_file(f_item, dest_dir):
-            fid, fname, mtime = f_item["id"], f_item["name"], f_item.get("modifiedTime", "")
-            target_path = os.path.join(dest_dir, fname)
-            if not force and local_meta.get(fid) == mtime and os.path.exists(target_path):
-                return
+        def _download_single(fid, target_path, copy_to_base=False):
             req = service.files().get_media(fileId=fid)
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, req)
             done = False
             while not done:
                 _, done = downloader.next_chunk()
+            data_bytes = fh.getvalue()
             with open(target_path, "wb") as out_f:
-                out_f.write(fh.getvalue())
-            # 主要ファイルやマスタ類はBASE_DIR直下にもコピーして完全連動させる
-            if fname.endswith((".parquet", ".json", ".xlsx", ".xls", ".csv", ".png")):
+                out_f.write(data_bytes)
+            if copy_to_base:
                 try:
-                    with open(os.path.join(BASE_DIR, fname), "wb") as out_b:
-                        out_b.write(fh.getvalue())
-                except Exception: pass
-            local_meta[fid] = mtime
+                    with open(os.path.join(BASE_DIR, os.path.basename(target_path)), "wb") as out_b:
+                        out_b.write(data_bytes)
+                except Exception:
+                    pass
 
+        # 売上ダッシュボード直下のファイル一覧を取得（サブフォルダ「済」などは見ない）
+        q = f"'{folder_id}' in parents and trashed = false"
+        res = service.files().list(
+            q=q,
+            fields="files(id, name, mimeType, modifiedTime)",
+            pageSize=500
+        ).execute()
+        items = res.get("files", [])
+
+        # ① まず sales_cache.parquet がドライブ上で更新されていれば最優先で取得
+        for item in items:
+            if item.get("name") == "sales_cache.parquet":
+                fid, mtime = item["id"], item.get("modifiedTime", "")
+                t_path = os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet")
+                if local_meta.get(fid) != mtime or not os.path.exists(t_path):
+                    _download_single(fid, t_path, copy_to_base=True)
+                    local_meta[fid] = mtime
+                break
+
+        # ② 既に sales_cache.parquet に取り込み済みのCSVファイル名を取得（二度読み防止）
+        existing_sources = set()
+        for cf in [os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet"), CACHE_FILE]:
+            if os.path.exists(cf):
+                try:
+                    cdf = pd.read_parquet(cf, columns=["_source_file"])
+                    existing_sources = set(cdf["_source_file"].dropna().astype(str).unique())
+                    break
+                except Exception:
+                    pass
+
+        # ③ 残りのファイルをチェック（未読CSVと、更新されたExcel/在庫CSV/JSONのみ取得）
+        ignore_prefixes = ("app", "requirements", "run_all", "silent_start", "order_", "item_class_lotmember")
         for item in items:
             mtype = item.get("mimeType", "")
             fname = item.get("name", "")
-            if mtype == "application/vnd.google-apps.folder":
-                sub_q = f"'{item['id']}' in parents and trashed = false"
-                sub_res = service.files().list(q=sub_q, fields="files(id, name, mimeType, modifiedTime, size)", pageSize=500).execute()
-                sub_dest = AMZ_DAILY_STORE_DIR if "amazon" in fname.lower() else GDRIVE_SYNC_DIR
-                for s_item in sub_res.get("files", []):
-                    if not s_item.get("mimeType", "").startswith("application/vnd.google-apps."):
-                        _download_file(s_item, sub_dest)
-            elif not mtype.startswith("application/vnd.google-apps."):
-                _download_file(item, GDRIVE_SYNC_DIR)
+            fid = item["id"]
+            mtime = item.get("modifiedTime", "")
+
+            # フォルダやシステムファイル、既に処理したparquetはスキップ
+            if mtype.startswith("application/vnd.google-apps.") or fname == "sales_cache.parquet":
+                continue
+            if fname.lower().startswith(ignore_prefixes) or not fname.lower().endswith((".csv", ".xlsx", ".xls", ".json", ".png")):
+                continue
+
+            # 弥生売上CSVなどで、既にparquetに取り込み済みのファイルはダウンロード自体をスキップ！
+            is_inventory_csv = ("ロジザード" in fname or "在庫" in fname or "ランク" in fname)
+            if fname.lower().endswith(".csv") and not is_inventory_csv:
+                if fname in existing_sources:
+                    local_meta[fid] = mtime
+                    continue
+
+            target_path = os.path.join(GDRIVE_SYNC_DIR, fname)
+            # 更新日時（mtime）が前回と同じで、ローカルにファイルが存在すればスキップ（force時も未変更ならスキップして高速化）
+            if local_meta.get(fid) == mtime and os.path.exists(target_path):
+                continue
+
+            _download_single(fid, target_path, copy_to_base=True)
+            local_meta[fid] = mtime
 
         with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(local_meta, f)
+            json.dump(local_meta, f, ensure_ascii=False, indent=2)
+
+        st.session_state["_gdrive_synced_in_session"] = True
         st.session_state["_last_gdrive_sync_ts"] = time.time()
         return True
     except Exception:
         return False
 
 def upload_file_to_gdrive(local_path, drive_filename=None):
-    """更新されたDB（sales_cache.parquet）や見積JSON・アップロードCSVをGoogleドライブへ自動保存"""
+    """更新されたDB（sales_cache.parquet）や見積JSON・在庫ファイルをGoogleドライブへ自動保存"""
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id or not os.path.exists(local_path):
         return False
@@ -265,10 +326,22 @@ def upload_file_to_gdrive(local_path, drive_filename=None):
         existing = res.get("files", [])
         media = MediaFileUpload(local_path, resumable=True)
         if existing:
-            service.files().update(fileId=existing[0]["id"], media_body=media).execute()
+            up_res = service.files().update(fileId=existing[0]["id"], media_body=media, fields="id, modifiedTime").execute()
         else:
             meta = {"name": fname, "parents": [folder_id]}
-            service.files().create(body=meta, media_body=media, fields="id").execute()
+            up_res = service.files().create(body=meta, media_body=media, fields="id, modifiedTime").execute()
+
+        # アップロード直後のファイルも同期済みメタデータに記録して再ダウンロードを防ぐ
+        meta_path = os.path.join(GDRIVE_SYNC_DIR, "_sync_meta.json")
+        if os.path.exists(meta_path) and up_res.get("id"):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    local_meta = json.load(f)
+                local_meta[up_res["id"]] = up_res.get("modifiedTime", "")
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(local_meta, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
         return True
     except Exception:
         return False
@@ -276,6 +349,8 @@ def upload_file_to_gdrive(local_path, drive_filename=None):
 def save_parquet_and_sync(target_df, local_path, drive_filename="sales_cache.parquet"):
     try:
         target_df.to_parquet(local_path, index=False)
+        sync_copy = os.path.join(GDRIVE_SYNC_DIR, drive_filename)
+        target_df.to_parquet(sync_copy, index=False)
         upload_file_to_gdrive(local_path, drive_filename)
     except Exception:
         pass
@@ -955,7 +1030,7 @@ def finalize_sales_df(df, cost_master, code_name_dict=None):
         df["粗利額"] = df["金額"] - df["原価合計"]
     return df
 
-@st.cache_data(show_spinner=False, ttl=1)
+@st.cache_data(show_spinner=False)
 def load_and_prep_data():
     cost_path, cost_mtime = get_cost_master_file_info()
     cost_master = load_cost_master(cost_path, cost_mtime)
