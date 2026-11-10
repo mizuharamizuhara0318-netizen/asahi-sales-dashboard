@@ -3470,8 +3470,28 @@ elif view_type == '📊 営業会議用：上位社 売上比較シート':
     cur_cust_sales = cur_m_df.groupby("得意先名")["金額"].sum() if not cur_m_df.empty else pd.Series()
     top_custs = cur_cust_sales.nlargest(compare_cust_count).index.tolist() if not cur_cust_sales.empty else []
 
-    all_saved_meeting_dict = load_saved_meeting_sheet_data()
-    month_saved_dict = all_saved_meeting_dict.get(target_meeting_ym, {})
+import os
+import json
+
+MEETING_CACHE_FILE = "meeting_data_cache.json"
+
+def load_saved_meeting_sheet_data():
+    """保存されたミーティングデータを読み込む"""
+    if os.path.exists(MEETING_CACHE_FILE):
+        try:
+            with open(MEETING_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_meeting_sheet_data(data):
+    """ミーティングデータをファイルに保存する"""
+    try:
+        with open(MEETING_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"保存エラー: {e}")
 
     cards_data = [build_meeting_comparison_card_data(cust, cust_id_lookup.get(cust, ""), cur_m_df, ly_m_df, next_m_df, prev_fy_df, tgt_y, tgt_m, next_y, next_m, f_year, month_saved_dict) for cust in top_custs]
 
