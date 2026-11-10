@@ -273,7 +273,6 @@ def sync_all_from_gdrive(force=False):
         return True
     except Exception as e:
         return False
-
 def save_parquet_and_sync(target_df, local_path, drive_filename="sales_cache.parquet"):
     try:
         target_df.to_parquet(local_path, index=False)
