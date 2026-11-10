@@ -998,6 +998,7 @@ def load_and_prep_data():
             try:
                 try: df.to_parquet(CACHE_FILE, index=False); upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
         except Exception: pass
+        
     return df, len(csv_candidates), cost_master
 
 def render_universal_table(df_data, max_h=600):
