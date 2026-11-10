@@ -1002,9 +1002,10 @@ def load_and_prep_data():
         if not new_yayoi_df.empty or not new_amz_df.empty:
             try:
                 
+        # ↓ここのスペース数と
         try: df.to_parquet(CACHE_FILE, index=False); upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
         except Exception: pass
-        
+        # ↑ここのスペース数をピタッと揃える！
         
     return df, len(csv_candidates), cost_master
 
