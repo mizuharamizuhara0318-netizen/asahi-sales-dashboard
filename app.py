@@ -206,8 +206,8 @@ def get_gdrive_service_and_folder():
         return None, None
 
 def sync_all_from_gdrive(force=False):
-    """未読の売上CSVと、更新された在庫・マスタファイルだけを高速に差分同期する"""
-    if not force and st.session_state.get("_gdrive_synced_in_session", False):
+    last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
+    if not force and (time.time() - last_sync < 60):  # 1分以上経っていれば自動でドライブの新着をチェック
         return True
 
     service, folder_id = get_gdrive_service_and_folder()
@@ -1030,8 +1030,22 @@ def finalize_sales_df(df, cost_master, code_name_dict=None):
         df["粗利額"] = df["金額"] - df["原価合計"]
     return df
 
+def _get_data_files_signature():
+    """フォルダ内のCSVやparquetのファイル名・更新日時を監視する（新しいCSVが増えたら自動で再計算させるため）"""
+    sig = []
+    for d in [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR]:
+        if os.path.exists(d):
+            for fn in sorted(os.listdir(d)):
+                if fn.lower().endswith((".csv", ".parquet", ".xlsx")):
+                    full_p = os.path.join(d, fn)
+                    try:
+                        sig.append(f"{fn}_{int(os.path.getmtime(full_p))}_{os.path.getsize(full_p)}")
+                    except Exception:
+                        pass
+    return "|".join(sig)
+
 @st.cache_data(show_spinner=False)
-def load_and_prep_data():
+def load_and_prep_data(_file_sig=""):
     cost_path, cost_mtime = get_cost_master_file_info()
     cost_master = load_cost_master(cost_path, cost_mtime)
     jan_path, jan_mtime = get_jan_file_info()
