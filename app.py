@@ -1540,7 +1540,7 @@ with tab_s_view:
                     base_df = base_df[~((base_df["得意先名"] == "アマゾンセラー") & (base_df["年月"].isin(replace_yms)))].copy()
                     added_yayoi.append(amz_concat)
 
-                if added_yayoi:
+        if added_yayoi:
             new_merged = pd.concat([base_df] + added_yayoi, ignore_index=True)
             name_lookup = dict(jan_title_dict or {})
             valid_names = new_merged[(new_merged["商品名"].notna()) & (new_merged["商品名"].astype(str) != new_merged["商品コード"].astype(str)) & (new_merged["商品名"].astype(str).str.strip() != "")]
