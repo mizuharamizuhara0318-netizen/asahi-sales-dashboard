@@ -1000,9 +1000,11 @@ def load_and_prep_data():
             name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
         df = finalize_sales_df(df, cost_master, name_lookup)
         if not new_yayoi_df.empty or not new_amz_df.empty:
-            try:
-df.to_parquet(CACHE_FILE, index=False); upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
-    return df, len(csv_candidates), cost_master
+
+if not new_yayoi_df.empty or not new_mz_df.empty:
+        df.to_parquet(CACHE_FILE, index=False)
+        upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
+        return df, len(csv_candidates), cost_master
 
 def render_universal_table(df_data, max_h=600):
     if df_data is None or df_data.empty:
