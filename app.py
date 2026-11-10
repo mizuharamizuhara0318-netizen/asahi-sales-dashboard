@@ -1535,11 +1535,11 @@ with col_upload:
                     new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
                     try:
                         new_merged.to_parquet(CACHE_FILE, index=False)
-                if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
+               with st.expander("📥 データ追加・在庫更新・バックアップ", expanded=False):
+        if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
             sync_all_from_gdrive(force=True)
             st.cache_data.clear()
             st.rerun()
-            except Exception as e:
                 st.error(f"保存エラー: {e}")
 
         with up_tab2:
