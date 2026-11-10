@@ -1044,6 +1044,20 @@ def _get_data_files_signature():
                         pass
     return "|".join(sig)
 
+def _get_data_files_signature():
+    """フォルダ内のCSVやparquetの変化を検知する"""
+    sig = []
+    for d in [GDRIVE_SYNC_DIR, BASE_DIR]:
+        if os.path.exists(d):
+            for fn in sorted(os.listdir(d)):
+                if fn.lower().endswith((".csv", ".parquet", ".xlsx")):
+                    full_p = os.path.join(d, fn)
+                    try:
+                        sig.append(f"{fn}_{int(os.path.getmtime(full_p))}_{os.path.getsize(full_p)}")
+                    except Exception:
+                        pass
+    return "|".join(sig)
+
 @st.cache_data(show_spinner=False)
 def load_and_prep_data(_file_sig=""):
     cost_path, cost_mtime = get_cost_master_file_info()
@@ -1051,29 +1065,44 @@ def load_and_prep_data(_file_sig=""):
     jan_path, jan_mtime = get_jan_file_info()
     _, jan_title_dict_local, _ = load_jan_master_v2(jan_path, jan_mtime)
 
+    # ★修正1：Googleドライブ側とローカル側のparquetを比較し、必ず「データが多い（最新の）方」を採用する（先祖返り防止）
     cached_df = pd.DataFrame()
     existing_sources = set()
-    # GDRIVE_SYNC_DIR内のparquetも含めてチェック
-    cache_candidates = [CACHE_FILE, os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet")]
+    gdrive_pq = os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet")
+    cache_candidates = [gdrive_pq, CACHE_FILE]
+    
+    best_df = pd.DataFrame()
     for cf in cache_candidates:
         if os.path.exists(cf):
             try:
-                cached_df = pd.read_parquet(cf)
-                if not cached_df.empty:
-                    if "_source_file" in cached_df.columns:
-                        existing_sources = set(cached_df["_source_file"].dropna().astype(str).unique())
-                    break
+                tmp_df = pd.read_parquet(cf)
+                if len(tmp_df) > len(best_df):
+                    best_df = tmp_df
             except Exception:
-                cached_df = pd.DataFrame()
+                pass
 
+    if not best_df.empty:
+        cached_df = best_df
+        if "_source_file" in cached_df.columns:
+            existing_sources = set(cached_df["_source_file"].dropna().astype(str).unique())
+
+    # ★修正2：GDRIVE_SYNC_DIR と BASE_DIR のCSVを確実にスキャン
     raw_candidates = []
     for search_root in [GDRIVE_SYNC_DIR, BASE_SHARE, BASE_DIR]:
         if os.path.exists(search_root):
+            raw_candidates.extend(glob.glob(os.path.join(search_root, "*.csv")))
             raw_candidates.extend(glob.glob(os.path.join(search_root, "**", "*.csv"), recursive=True))
 
-    csv_candidates = []
-    for f in sorted(list(set(raw_candidates))):
+    # 同じファイル名が複数フォルダにある場合は1つに絞る（GDRIVE_SYNC_DIR優先）
+    unique_by_name = {}
+    for f in raw_candidates:
         bname = os.path.basename(f)
+        if bname not in unique_by_name or GDRIVE_SYNC_DIR in os.path.abspath(f):
+            unique_by_name[bname] = f
+
+    csv_candidates = []
+    for bname in sorted(unique_by_name.keys()):
+        f = unique_by_name[bname]
         if bname.startswith("order_") or bname.startswith("item_class_lotmember") or "ランク" in bname or "ロジザード" in bname or "在庫" in bname:
             continue
         if AMZ_DAILY_STORE_DIR in os.path.abspath(f) or re.match(r'^\d{1,2}[-_]\d{1,2}\.csv$', bname):
@@ -1090,7 +1119,7 @@ def load_and_prep_data(_file_sig=""):
             yayoi_files = csv_candidates
 
         if yayoi_files:
-            with ThreadPoolExecutor(max_workers=16) as executor:
+            with ThreadPoolExecutor(max_workers=8) as executor:
                 res_list = list(executor.map(_read_single_csv, yayoi_files))
             valid_res = [d for d in res_list if d is not None and not d.empty]
             if valid_res:
@@ -1117,8 +1146,7 @@ def load_and_prep_data(_file_sig=""):
         df = finalize_sales_df(df, cost_master, name_lookup)
         if not new_yayoi_df.empty or not new_amz_df.empty:
             try:
-                df.to_parquet(CACHE_FILE, index=False)
-                upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
+                save_parquet_and_sync(df, CACHE_FILE, "sales_cache.parquet")
             except Exception:
                 pass
     return df, len(csv_candidates), cost_master
