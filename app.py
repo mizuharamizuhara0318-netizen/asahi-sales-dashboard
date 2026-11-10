@@ -1001,9 +1001,7 @@ def load_and_prep_data():
         df = finalize_sales_df(df, cost_master, name_lookup)
         if not new_yayoi_df.empty or not new_amz_df.empty:
             try:
-                
-       df.to_parquet(CACHE_FILE, index=False); upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
-        
+df.to_parquet(CACHE_FILE, index=False); upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
     return df, len(csv_candidates), cost_master
 
 def render_universal_table(df_data, max_h=600):
