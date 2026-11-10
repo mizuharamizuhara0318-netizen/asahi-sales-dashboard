@@ -1555,8 +1555,8 @@ with tab_s_view:
                     st.rerun()
                 except Exception as e:
                     st.error(f"保存エラー: {e}")
-
-with up_tab2:
+                    
+with tab_v_view:
     st.caption("ロジザード在庫csv（青山・名古屋）、在庫確保.xlsx、発注検討表.xlsxを最新に上書きします。")
     inv_up_files = st.file_uploader("在庫・確保ファイルを選択", type=["csv", "xlsx", "xls"], accept_multiple_files=True, key="inv_uploader_widget")
     if inv_up_files and st.button("📁 在庫・確保データを最新に更新", type="primary", use_container_width=True):
