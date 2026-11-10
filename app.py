@@ -1548,14 +1548,18 @@ with tab_s_view:
                 name_lookup.update(valid_names.drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict())
             new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
 
-            # ↑ここを「ボタンが押されたときの中」に含めるため、全体のインデントを右に合わせる
-           try:
+            # try: のインデントは、上の処理と同じ深さに揃える
+            try:
                 new_merged.to_parquet(CACHE_FILE, index=False)
                 upload_to_gdrive(CACHE_FILE, "sales_cache.parquet")
                 st.success("データを追加・保存しました！")
                 st.rerun()
             except Exception as e:
                 st.error(f"保存エラー: {e}")
+
+# その次のタブ定義はインデントを0に戻す
+with up_tab2:
+    st.caption("ロジザード在庫csv（青山・名古屋）、在庫確保.xlsx、発注検討表.xlsxを最新に上書きします。")
             
             
         with up_tab2:
