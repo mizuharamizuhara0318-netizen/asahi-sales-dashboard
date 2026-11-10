@@ -160,6 +160,125 @@ def find_file_multidir(filename_pattern, exclude_substr=None):
     return None, 0
 
 # ========================================================
+# ★ ☁️ Googleドライブ 双方向・完全自動同期エンジン
+# ========================================================
+GDRIVE_SYNC_DIR = os.path.join(BASE_DIR, "_gdrive_sync_cache")
+os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
+if "GDRIVE_SYNC_DIR" not in locals() or GDRIVE_SYNC_DIR not in SEARCH_DIRS:
+    SEARCH_DIRS.insert(0, GDRIVE_SYNC_DIR)
+
+@st.cache_resource(show_spinner=False)
+def get_gdrive_service_and_folder():
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        folder_id = st.secrets.get("folder_id", "").strip()
+        raw_json = st.secrets.get("gcp_service_account_json", "")
+        if not folder_id:
+            return None, None
+        if raw_json:
+            info = json.loads(raw_json, strict=False)
+        elif "gcp_service_account" in st.secrets:
+            info = dict(st.secrets["gcp_service_account"])
+        else:
+            return None, None
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return service, folder_id
+    except Exception as e:
+        return None, None
+
+def sync_all_from_gdrive(force=False):
+    """Googleドライブ内の最新ファイル（CSV/Excel/parquet/JSON/サブフォルダ内CSV）を自動取得"""
+    service, folder_id = get_gdrive_service_and_folder()
+    if not service or not folder_id:
+        return False
+    # 5分以内に同期済みならスキップ（高速表示のため）
+    last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
+    if not force and (time.time() - last_sync < 300):
+        return True
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+        q = f"'{folder_id}' in parents and trashed = false"
+        res = service.files().list(q=q, fields="files(id, name, mimeType, modifiedTime, size)", pageSize=500).execute()
+        items = res.get("files", [])
+        meta_path = os.path.join(GDRIVE_SYNC_DIR, "_sync_meta.json")
+        local_meta = {}
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f: local_meta = json.load(f)
+            except Exception: pass
+
+        def _download_file(f_item, dest_dir):
+            fid, fname, mtime = f_item["id"], f_item["name"], f_item.get("modifiedTime", "")
+            # ローカルや直下の主要ファイル（parquetやjson）はBASE_DIRにも同期
+            target_path = os.path.join(dest_dir, fname)
+            if local_meta.get(fid) == mtime and os.path.exists(target_path):
+                return
+            req = service.files().get_media(fileId=fid)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, req)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            with open(target_path, "wb") as out_f:
+                out_f.write(fh.getvalue())
+            # キャッシュDBや設定JSONはBASE_DIR直下にもコピーして既存コードと完全連動させる
+            if fname in ["sales_cache.parquet", "saved_estimates.json", "meeting_sheet_saved.json", "staff_targets.json"]:
+                try:
+                    with open(os.path.join(BASE_DIR, fname), "wb") as out_b:
+                        out_b.write(fh.getvalue())
+                except Exception: pass
+            local_meta[fid] = mtime
+
+        for item in items:
+            mtype = item.get("mimeType", "")
+            fname = item.get("name", "")
+            if mtype == "application/vnd.google-apps.folder":
+                # サブフォルダ（01_売上CSVアップロード、amazon_daily_csvs 等）の中身も同期
+                sub_q = f"'{item['id']}' in parents and trashed = false"
+                sub_res = service.files().list(q=sub_q, fields="files(id, name, mimeType, modifiedTime, size)", pageSize=500).execute()
+                sub_dest = AMZ_DAILY_STORE_DIR if "amazon" in fname.lower() else GDRIVE_SYNC_DIR
+                for s_item in sub_res.get("files", []):
+                    if not s_item.get("mimeType", "").startswith("application/vnd.google-apps."):
+                        _download_file(s_item, sub_dest)
+            elif not mtype.startswith("application/vnd.google-apps."):
+                _download_file(item, GDRIVE_SYNC_DIR)
+
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(local_meta, f)
+        st.session_state["_last_gdrive_sync_ts"] = time.time()
+        return True
+    except Exception:
+        return False
+
+def upload_file_to_gdrive(local_path, drive_filename=None):
+    """更新されたDB（sales_cache.parquet）や見積JSON・アップロードCSVをGoogleドライブへ自動保存"""
+    service, folder_id = get_gdrive_service_and_folder()
+    if not service or not folder_id or not os.path.exists(local_path):
+        return False
+    try:
+        from googleapiclient.http import MediaFileUpload
+        fname = drive_filename or os.path.basename(local_path)
+        q = f"'{folder_id}' in parents and name = '{fname}' and trashed = false"
+        res = service.files().list(q=q, fields="files(id, name)").execute()
+        existing = res.get("files", [])
+        media = MediaFileUpload(local_path, resumable=True)
+        if existing:
+            service.files().update(fileId=existing[0]["id"], media_body=media).execute()
+        else:
+            meta = {"name": fname, "parents": [folder_id]}
+            service.files().create(body=meta, media_body=media, fields="id").execute()
+        return True
+    except Exception:
+        return False
+
+# 起動時に自動同期を実行
+_gdrive_ok = sync_all_from_gdrive(force=False)
+
+# ========================================================
 # ★ 在庫・確保数・発注検討表 データ読込エンジン
 # ========================================================
 def get_inventory_files_info():
@@ -557,28 +676,31 @@ def load_saved_quotes():
 def save_quotes_list(q_list):
     target_f = SAVED_QUOTES_FILE if os.path.exists(os.path.dirname(SAVED_QUOTES_FILE)) else LOCAL_QUOTES_FILE
     try:
-        with open(target_f, "w", encoding="utf-8") as f: json.dump(q_list, f, ensure_ascii=False, indent=2)
+        with open(target_f, "w", encoding="utf-8") as f:
+            json.dump(q_list, f, ensure_ascii=False, indent=2)
+        upload_file_to_gdrive(target_f, "saved_estimates.json")
     except Exception:
         try:
-            with open(LOCAL_QUOTES_FILE, "w", encoding="utf-8") as f: json.dump(q_list, f, ensure_ascii=False, indent=2)
-        except Exception: pass
-
-def load_saved_meeting_sheet_data():
-    for f in [SAVED_MEETING_FILE, LOCAL_MEETING_FILE]:
-        if os.path.exists(f):
-            try:
-                with open(f, "r", encoding="utf-8") as fp: return json.load(fp)
-            except Exception: pass
+            with open(LOCAL_QUOTES_FILE, "w", encoding="utf-8") as f:
+                json.dump(q_list, f, ensure_ascii=False, indent=2)
+            upload_file_to_gdrive(LOCAL_QUOTES_FILE, "saved_estimates.json")
+        except Exception:
+            pass
     return {}
 
 def save_meeting_sheet_data(data_dict):
     target_f = SAVED_MEETING_FILE if os.path.exists(os.path.dirname(SAVED_MEETING_FILE)) else LOCAL_MEETING_FILE
     try:
-        with open(target_f, "w", encoding="utf-8") as fp: json.dump(data_dict, fp, ensure_ascii=False, indent=2)
+        with open(target_f, "w", encoding="utf-8") as fp:
+            json.dump(data_dict, fp, ensure_ascii=False, indent=2)
+        upload_file_to_gdrive(target_f, "meeting_sheet_saved.json")
     except Exception:
         try:
-            with open(LOCAL_MEETING_FILE, "w", encoding="utf-8") as fp: json.dump(data_dict, fp, ensure_ascii=False, indent=2)
-        except Exception: pass
+            with open(LOCAL_MEETING_FILE, "w", encoding="utf-8") as fp:
+                json.dump(data_dict, fp, ensure_ascii=False, indent=2)
+            upload_file_to_gdrive(LOCAL_MEETING_FILE, "meeting_sheet_saved.json")
+        except Exception:
+            pass
 
 def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
     rows = []
@@ -873,8 +995,11 @@ def load_and_prep_data():
             name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
         df = finalize_sales_df(df, cost_master, name_lookup)
         if not new_yayoi_df.empty or not new_amz_df.empty:
-            try: df.to_parquet(CACHE_FILE, index=False)
-            except Exception: pass
+            try:
+            df.to_parquet(CACHE_FILE, index=False)
+            upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
+        except Exception:
+            pass
 
     return df, len(csv_candidates), cost_master
 
@@ -1368,6 +1493,10 @@ with col_mob_toggle:
 with col_upload:
     with st.expander("📥 データ追加・在庫更新・バックアップ", expanded=False):
         up_tab1, up_tab2, up_tab3 = st.tabs(["📊 売上CSV追加", "📦 在庫・確保更新", "💾 バックアップ"])
+        if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
+    sync_all_from_gdrive(force=True)
+    st.cache_data.clear()
+    st.rerun()
         with up_tab1:
             up_csv_type = st.radio("種類", ["弥生売上CSV", "アマゾンセラーCSV"], horizontal=True, key="up_csv_type_radio")
             amz_ym_input = ""
@@ -1403,12 +1532,13 @@ with col_upload:
                     new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
                     try:
                         new_merged.to_parquet(CACHE_FILE, index=False)
-                        st.cache_data.clear()
-                        st.success(f"✅ {len(uploaded_files)}件のCSVを反映しました！")
-                        time.sleep(0.5)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"保存エラー: {e}")
+                upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
+                st.cache_data.clear()
+                st.success(f"✅ {len(uploaded_files)}件のCSVを反映しました！")
+                time.sleep(0.5)
+                st.rerun()
+            except Exception as e:
+                st.error(f"保存エラー: {e}")
 
         with up_tab2:
             st.caption("ロジザード在庫CSV（青山・名古屋）、在庫確保.xlsx、発注検討表.xlsx を最新に上書きします。")
