@@ -1549,7 +1549,7 @@ with tab_s_view:
             new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
 
             # try: のインデントは、上の処理と同じ深さに揃える
-            try:
+           try:
                 new_merged.to_parquet(CACHE_FILE, index=False)
                 upload_to_gdrive(CACHE_FILE, "sales_cache.parquet")
                 st.success("データを追加・保存しました！")
@@ -1557,9 +1557,10 @@ with tab_s_view:
             except Exception as e:
                 st.error(f"保存エラー: {e}")
 
-# その次のタブ定義はインデントを0に戻す
+# ここから先はインデントを消して左端に揃える
 with up_tab2:
     st.caption("ロジザード在庫csv（青山・名古屋）、在庫確保.xlsx、発注検討表.xlsxを最新に上書きします。")
+    inv_up_files = st.file_uploader("在庫・確保ファイルを選択", type=["csv", "xlsx", "xls"], accept_multiple_files=True, key="inv_uploader_widget")
             
             
         with up_tab2:
