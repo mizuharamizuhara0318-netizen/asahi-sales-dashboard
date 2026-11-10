@@ -1535,11 +1535,10 @@ with col_upload:
                     new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
                     try:
                         new_merged.to_parquet(CACHE_FILE, index=False)
-                upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
-                st.cache_data.clear()
-                st.success(f"✅ {len(uploaded_files)}件のCSVを反映しました！")
-                time.sleep(0.5)
-                st.rerun()
+                if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
+            sync_all_from_gdrive(force=True)
+            st.cache_data.clear()
+            st.rerun()
             except Exception as e:
                 st.error(f"保存エラー: {e}")
 
