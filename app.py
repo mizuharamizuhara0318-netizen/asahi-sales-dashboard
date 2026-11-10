@@ -1506,24 +1506,32 @@ with col_upload:
             sync_all_from_gdrive(force=True)
             st.cache_data.clear()
             st.rerun()
-        with tab_s_view:
-            up_csv_type = st.radio("種類", ["弥生売上CSV", "アマゾンセラーCSV"], horizontal=True, key="up_csv_type_radio")
-            amz_ym_input = ""
-            if up_csv_type == "アマゾンセラーCSV":
-                amz_ym_input = st.text_input("対象年月（ファイル名に年月が無い場合に適用）", value=datetime.now().strftime("%Y年%m月"), key="amz_ym_input_box")
-            uploaded_files = st.file_uploader("CSVファイルを選択（複数可）", type=["csv"], accept_multiple_files=True, key="csv_uploader_widget")
-            if uploaded_files and st.button("➕ 売上データベースに追加反映", type="primary", use_container_width=True):
-                added_yayoi, added_amz = [], []
-                for uf in uploaded_files:
-                    if up_csv_type == "弥生売上CSV":
-                        raw_d = _read_single_csv(uf, explicit_name=uf.name)
-                        if raw_d is not None and not raw_d.empty:
-                            added_yayoi.append(_parse_raw_df_to_standard(raw_d))
-                    else:
-                        has_m_in_name = bool(re.search(r'(20\d{2})[年/\-_ ]*(\d{1,2})月?|(?<!\d)(1[0-2]|0?[1-9])月', uf.name))
-                        amz_d = _read_amazon_seller_csv(uf, explicit_name=uf.name, override_ym=(None if has_m_in_name else amz_ym_input))
-                        if amz_d is not None and not amz_d.empty:
-                            added_amz.append(amz_d)
+# 1. タブの定義は一番上で1回だけ行う
+tab_s_view, tab_v_view = st.tabs([
+    "セラー『注文数』シート (取込済日数: ...)",
+    "ベンダー 『ベンダー注文数』シート (弥生連動 / 合計: ...)"
+])
+
+# 2. セラー側タブの中身（インデントを1段下げて配置）
+with tab_s_view:
+    up_csv_type = st.radio("種類", ["弥生売上CSV", "アマゾンセラーCSV"], horizontal=True, key="up_csv_type_radio")
+    amz_ym_input = ""
+    if up_csv_type == "アマゾンセラーCSV":
+        amz_ym_input = st.text_input("対象年月 (ファイル名に年月が無い場合に適用)", value=datetime.now().strftime("%Y年%m月"), key="amz_ym_input_box")
+    
+    uploaded_files = st.file_uploader("CSVファイルを選択 (複数可)", type=["csv"], accept_multiple_files=True, key="csv_uploader_widget")
+    if uploaded_files and st.button("＋ 売上データベースに追加反映", type="primary", use_container_width=True):
+        added_yayoi, added_amz = [], []
+        for uf in uploaded_files:
+            if up_csv_type == "弥生売上CSV":
+                raw_d = _read_single_csv(uf, explicit_name=uf.name)
+                if raw_d is not None and not raw_d.empty:
+                    added_yayoi.append(_parse_raw_df_to_standard(raw_d))
+            else:
+                has_m_in_name = bool(re.search(r'(20\d{2})[年/\-_]*(\d{1,2})月?', uf.name))
+                amz_d = _read_amazon_seller_csv(uf, explicit_name=uf.name, override_ym=(None if has_m_in_name else amz_ym_input))
+                if amz_d is not None and not amz_d.empty:
+                    added_amz.append(amz_d)
 
                 base_df = df.copy()
                 if added_amz:
