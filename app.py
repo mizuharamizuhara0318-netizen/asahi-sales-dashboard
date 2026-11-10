@@ -1560,10 +1560,10 @@ with tab_s_view:
 # ※ 1556〜1560行目にある重複したエクスパンダと「Googleドライブの最新ファイルを今すぐ同期」ボタンのブロックは削除する[cite: 11]
 
     with st.expander("📥 データ追加・在庫更新・バックアップ", expanded=False):
-        if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
-            sync_all_from_gdrive(force=True)
-            st.cache_data.clear()
-            st.rerun()
+        if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True, key="sync_gdrive_button_unique"):
+    　　　　sync_all_from_gdrive(force=True)
+    　　　　st.cache_data.clear()
+    　　　　st.rerun()
             
         with up_tab2:
             st.caption("ロジザード在庫CSV（青山・名古屋）、在庫確保.xlsx、発注検討表.xlsx を最新に上書きします。")
