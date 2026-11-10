@@ -1506,7 +1506,7 @@ with col_upload:
             sync_all_from_gdrive(force=True)
             st.cache_data.clear()
             st.rerun()
-        with up_tab1:
+        with tab_s_view:
             up_csv_type = st.radio("種類", ["弥生売上CSV", "アマゾンセラーCSV"], horizontal=True, key="up_csv_type_radio")
             amz_ym_input = ""
             if up_csv_type == "アマゾンセラーCSV":
