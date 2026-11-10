@@ -1556,23 +1556,23 @@ with tab_s_view:
                 except Exception as e:
                     st.error(f"保存エラー: {e}")
 
-        with up_tab2:
-            st.caption("ロジザード在庫CSV（青山・名古屋）、在庫確保.xlsx、発注検討表.xlsx を最新に上書きします。")
-            inv_up_files = st.file_uploader("在庫・確保ファイルを選択", type=["csv", "xlsx", "xls"], accept_multiple_files=True, key="inv_uploader_widget")
-            if inv_up_files and st.button("🔄 在庫・確保データを最新に更新", type="primary", use_container_width=True):
-                for iuf in inv_up_files:
-                    fn = iuf.name
-                    save_name = fn
-                    if "青山" in fn and fn.endswith(".csv"): save_name = "ロジザード在庫（青山）.csv"
-                    elif "名古屋" in fn and fn.endswith(".csv"): save_name = "ロジザード在庫（名古屋）.csv"
-                    elif "在庫確保" in fn: save_name = "在庫確保.xlsx"
-                    elif "発注検討" in fn: save_name = "発注検討表.xlsx"
-                    with open(os.path.join(BASE_DIR, save_name), "wb") as f_out:
-                        f_out.write(iuf.getbuffer())
-                st.cache_data.clear()
-                st.success("✅ 在庫・確保データを更新しました！")
-                time.sleep(0.4)
-                st.rerun()
+with up_tab2:
+    st.caption("ロジザード在庫csv（青山・名古屋）、在庫確保.xlsx、発注検討表.xlsxを最新に上書きします。")
+    inv_up_files = st.file_uploader("在庫・確保ファイルを選択", type=["csv", "xlsx", "xls"], accept_multiple_files=True, key="inv_uploader_widget")
+    if inv_up_files and st.button("📁 在庫・確保データを最新に更新", type="primary", use_container_width=True):
+        for iuf in inv_up_files:
+            fn = iuf.name
+            save_name = fn
+            if "青山" in fn and fn.endswith(".csv"): save_name = "ロジザード在庫 (青山).csv"
+            elif "名古屋" in fn and fn.endswith(".csv"): save_name = "ロジザード在庫 (名古屋).csv"
+            elif "在庫確保" in fn: save_name = "在庫確保.xlsx"
+            elif "発注検討" in fn: save_name = "発注検討表.xlsx"
+            with open(os.path.join(BASE_DIR, save_name), "wb") as f_out:
+                f_out.write(iuf.getbuffer())
+        st.cache_data.clear()
+        st.success("✅ 在庫・確保データを更新しました！")
+        time.sleep(0.4)
+        st.rerun()
 
         with up_tab3:
             if os.path.exists(CACHE_FILE):
