@@ -206,27 +206,20 @@ def get_gdrive_service_and_folder():
         return None, None
 
 def sync_all_from_gdrive(force=False):
+    """ロックや複雑なメタ判定を廃止し、実ファイルの有無とparquetの履歴だけで確実に同期する"""
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    if not force and (time.time() - last_sync < 60):  # 1分以上経っていれば自動でドライブの新着をチェック
+    # force=Falseでも、30秒経過していれば毎回チェックする
+    if not force and (time.time() - last_sync < 30):
         return True
 
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
+        st.session_state["_gdrive_diag"] = "❌ Googleドライブの認証またはfolder_idが取得できていません"
         return False
 
     try:
         from googleapiclient.http import MediaIoBaseDownload
         os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
-
-        # ローカルの同期履歴（ファイルIDごとの更新日時）を読込
-        meta_path = os.path.join(GDRIVE_SYNC_DIR, "_sync_meta.json")
-        local_meta = {}
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    local_meta = json.load(f)
-            except Exception:
-                local_meta = {}
 
         def _download_single(fid, target_path, copy_to_base=False):
             req = service.files().get_media(fileId=fid)
@@ -245,72 +238,73 @@ def sync_all_from_gdrive(force=False):
                 except Exception:
                     pass
 
-        # 売上ダッシュボード直下のファイル一覧を取得（サブフォルダ「済」などは見ない）
+        # ドライブ直下のファイル一覧を取得
         q = f"'{folder_id}' in parents and trashed = false"
         res = service.files().list(
             q=q,
-            fields="files(id, name, mimeType, modifiedTime)",
+            fields="files(id, name, mimeType, modifiedTime, size)",
             pageSize=500
         ).execute()
         items = res.get("files", [])
+        drive_csv_names = [it.get("name") for it in items if it.get("name", "").lower().endswith(".csv")]
 
-        # ① まず sales_cache.parquet がドライブ上で更新されていれば最優先で取得
+        # ① まず sales_cache.parquet の同期（ローカルに無いか、ドライブ側の方がサイズが大きければ取得）
         for item in items:
             if item.get("name") == "sales_cache.parquet":
-                fid, mtime = item["id"], item.get("modifiedTime", "")
+                fid = item["id"]
+                d_size = int(item.get("size", 0))
                 t_path = os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet")
-                if local_meta.get(fid) != mtime or not os.path.exists(t_path):
+                l_size = os.path.getsize(t_path) if os.path.exists(t_path) else 0
+                if not os.path.exists(t_path) or d_size > l_size:
                     _download_single(fid, t_path, copy_to_base=True)
-                    local_meta[fid] = mtime
                 break
 
-        # ② 既に sales_cache.parquet に取り込み済みのCSVファイル名を取得（二度読み防止）
+        # ② 現在の sales_cache.parquet にすでに入っているファイル名（_source_file）を確認
         existing_sources = set()
         for cf in [os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet"), CACHE_FILE]:
             if os.path.exists(cf):
                 try:
                     cdf = pd.read_parquet(cf, columns=["_source_file"])
-                    existing_sources = set(cdf["_source_file"].dropna().astype(str).unique())
-                    break
+                    existing_sources.update(cdf["_source_file"].dropna().astype(str).unique())
                 except Exception:
                     pass
 
-        # ③ 残りのファイルをチェック（未読CSVと、更新されたExcel/在庫CSV/JSONのみ取得）
+        # ③ まだ parquet に入っていないCSVと、在庫・マスタ系ファイルを確実にダウンロード
+        downloaded_files = []
         ignore_prefixes = ("app", "requirements", "run_all", "silent_start", "order_", "item_class_lotmember")
         for item in items:
             mtype = item.get("mimeType", "")
             fname = item.get("name", "")
             fid = item["id"]
-            mtime = item.get("modifiedTime", "")
+            d_size = int(item.get("size", 0))
 
-            # フォルダやシステムファイル、既に処理したparquetはスキップ
             if mtype.startswith("application/vnd.google-apps.") or fname == "sales_cache.parquet":
                 continue
             if fname.lower().startswith(ignore_prefixes) or not fname.lower().endswith((".csv", ".xlsx", ".xls", ".json", ".png")):
                 continue
 
-            # 弥生売上CSVなどで、既にparquetに取り込み済みのファイルはダウンロード自体をスキップ！
-            is_inventory_csv = ("ロジザード" in fname or "在庫" in fname or "ランク" in fname)
-            if fname.lower().endswith(".csv") and not is_inventory_csv:
-                if fname in existing_sources:
-                    local_meta[fid] = mtime
-                    continue
-
             target_path = os.path.join(GDRIVE_SYNC_DIR, fname)
-            # 更新日時（mtime）が前回と同じで、ローカルにファイルが存在すればスキップ（force時も未変更ならスキップして高速化）
-            if local_meta.get(fid) == mtime and os.path.exists(target_path):
-                continue
+            is_inventory_or_master = ("ロジザード" in fname or "在庫" in fname or "ランク" in fname or fname.lower().endswith((".xlsx", ".xls", ".json")))
 
-            _download_single(fid, target_path, copy_to_base=True)
-            local_meta[fid] = mtime
+            # 売上CSVの場合：すでにparquetに入っていて、かつローカルにも実ファイルがあればスキップ
+            if fname.lower().endswith(".csv") and not is_inventory_or_master:
+                if fname in existing_sources and os.path.exists(target_path):
+                    continue
+                # まだparquetに入っていないCSV（yayoi_1110.csv等）は、ローカルに無いかサイズが違えば無条件でダウンロード！
+                if not os.path.exists(target_path) or os.path.getsize(target_path) != d_size or force:
+                    _download_single(fid, target_path, copy_to_base=True)
+                    downloaded_files.append(fname)
+            else:
+                # 在庫・Excelマスタ系：サイズが変わっているか、force=True なら最新をダウンロード
+                if not os.path.exists(target_path) or os.path.getsize(target_path) != d_size or force:
+                    _download_single(fid, target_path, copy_to_base=True)
+                    downloaded_files.append(fname)
 
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(local_meta, f, ensure_ascii=False, indent=2)
-
-        st.session_state["_gdrive_synced_in_session"] = True
+        st.session_state["_gdrive_diag"] = f"✅ ドライブ内CSV: {drive_csv_names} / 今回DL: {downloaded_files} / 既読数: {len(existing_sources)}"
         st.session_state["_last_gdrive_sync_ts"] = time.time()
         return True
-    except Exception:
+    except Exception as e:
+        st.session_state["_gdrive_diag"] = f"❌ 同期エラー詳細: {str(e)}"
         return False
 
 def upload_file_to_gdrive(local_path, drive_filename=None):
