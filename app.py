@@ -1002,11 +1002,7 @@ def load_and_prep_data():
         if not new_yayoi_df.empty or not new_amz_df.empty:
             try:
                 
-        try:
-            df.to_parquet(CACHE_FILE, index=False)
-            upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
-        except Exception:
-            pass
+       df.to_parquet(CACHE_FILE, index=False); upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
         
     return df, len(csv_candidates), cost_master
 
