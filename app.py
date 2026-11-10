@@ -221,8 +221,31 @@ def sync_all_from_gdrive(force=False):
             except Exception:
                 pass
 
+@st.cache_resource(show_spinner=False)
+def get_gdrive_service_and_folder():
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        folder_id = st.secrets.get("folder_id", "").strip()
+        raw_json = st.secrets.get("gcp_service_account_json", "")
+        if not folder_id:
+            return None, None
+        if raw_json:
+            info = json.loads(raw_json, strict=False)
+        elif "gcp_service_account" in st.secrets:
+            info = dict(st.secrets["gcp_service_account"])
+        else:
+            return None, None
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return service, folder_id
+    except Exception:
+        return None, None
+
 def sync_all_from_gdrive(force=False):
-    """Googleドライブ内の全ファイル（「済」などのサブフォルダ階層内も含めてCSV/Excel等を完全網羅）を自動取得"""
+    """Googleドライブ内の全ファイル（サブフォルダ階層内も含めてCSV/Excel等を完全網羅）を自動取得"""
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
         return False
@@ -272,8 +295,7 @@ def sync_all_from_gdrive(force=False):
         st.session_state["_last_gdrive_sync_ts"] = time.time()
         return True
     except Exception as e:
-        return False
-        
+        return False        
 def save_parquet_and_sync(target_df, local_path, drive_filename="sales_cache.parquet"):
     try:
         target_df.to_parquet(local_path, index=False)
