@@ -164,8 +164,9 @@ def find_file_multidir(filename_pattern, exclude_substr=None):
 # ========================================================
 GDRIVE_SYNC_DIR = os.path.join(BASE_DIR, "_gdrive_sync_cache")
 os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
-if "GDRIVE_SYNC_DIR" not in locals() or GDRIVE_SYNC_DIR not in SEARCH_DIRS:
-    SEARCH_DIRS.insert(0, GDRIVE_SYNC_DIR)
+if "SEARCH_DIRS" in globals() or "SEARCH_DIRS" in locals():
+    if GDRIVE_SYNC_DIR not in SEARCH_DIRS:
+        SEARCH_DIRS.insert(0, GDRIVE_SYNC_DIR)
 
 @st.cache_resource(show_spinner=False)
 def get_gdrive_service_and_folder():
