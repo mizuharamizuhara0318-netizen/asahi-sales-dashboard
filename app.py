@@ -221,31 +221,8 @@ def sync_all_from_gdrive(force=False):
             except Exception:
                 pass
 
-@st.cache_resource(show_spinner=False)
-def get_gdrive_service_and_folder():
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        folder_id = st.secrets.get("folder_id", "").strip()
-        raw_json = st.secrets.get("gcp_service_account_json", "")
-        if not folder_id:
-            return None, None
-        if raw_json:
-            info = json.loads(raw_json, strict=False)
-        elif "gcp_service_account" in st.secrets:
-            info = dict(st.secrets["gcp_service_account"])
-        else:
-            return None, None
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        service = build("drive", "v3", credentials=creds, cache_discovery=False)
-        return service, folder_id
-    except Exception:
-        return None, None
-
 def sync_all_from_gdrive(force=False):
-    """Googleドライブ内の全ファイル（サブフォルダ階層内も含めてCSV/Excel等を完全網羅）を自動取得"""
+    """Googleドライブ内の最新ファイル（CSV/Excel/parquet/JSON/サブフォルダ内CSV）を自動取得"""
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
         return False
@@ -254,48 +231,57 @@ def sync_all_from_gdrive(force=False):
         return True
     try:
         from googleapiclient.http import MediaIoBaseDownload
-        
+        q = f"'{folder_id}' in parents and trashed = false"
+        res = service.files().list(q=q, fields="files(id, name, mimeType, modifiedTime, size)", pageSize=500).execute()
+        items = res.get("files", [])
+        meta_path = os.path.join(GDRIVE_SYNC_DIR, "_sync_meta.json")
+        local_meta = {}
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f: local_meta = json.load(f)
+            except Exception: pass
+
         def _download_file(f_item, dest_dir):
             fid, fname, mtime = f_item["id"], f_item["name"], f_item.get("modifiedTime", "")
             target_path = os.path.join(dest_dir, fname)
-            try:
-                req = service.files().get_media(fileId=fid)
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, req)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                with open(target_path, "wb") as out_f:
-                    out_f.write(fh.getvalue())
-                if fname.endswith((".parquet", ".json", ".xlsx", ".xls", ".csv")):
+            if not force and local_meta.get(fid) == mtime and os.path.exists(target_path):
+                return
+            req = service.files().get_media(fileId=fid)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, req)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            with open(target_path, "wb") as out_f:
+                out_f.write(fh.getvalue())
+            # 主要ファイルやマスタ類はBASE_DIR直下にもコピーして完全連動させる
+            if fname.endswith((".parquet", ".json", ".xlsx", ".xls", ".csv", ".png")):
+                try:
                     with open(os.path.join(BASE_DIR, fname), "wb") as out_b:
                         out_b.write(fh.getvalue())
-            except Exception:
-                pass
+                except Exception: pass
+            local_meta[fid] = mtime
 
-        def _process_folder(curr_folder_id, dest_dir):
-            page_token = None
-            while True:
-                q = f"'{curr_folder_id}' in parents and trashed = false"
-                res = service.files().list(q=q, fields="nextPageToken, files(id, name, mimeType, modifiedTime)", pageSize=500, pageToken=page_token).execute()
-                for item in res.get("files", []):
-                    mtype = item.get("mimeType", "")
-                    fname = item.get("name", "")
-                    if mtype == "application/vnd.google-apps.folder":
-                        sub_dest = os.path.join(dest_dir, fname)
-                        os.makedirs(sub_dest, exist_ok=True)
-                        _process_folder(item["id"], sub_dest)
-                    elif not mtype.startswith("application/vnd.google-apps."):
-                        _download_file(item, dest_dir)
-                page_token = res.get("nextPageToken")
-                if not page_token:
-                    break
+        for item in items:
+            mtype = item.get("mimeType", "")
+            fname = item.get("name", "")
+            if mtype == "application/vnd.google-apps.folder":
+                sub_q = f"'{item['id']}' in parents and trashed = false"
+                sub_res = service.files().list(q=sub_q, fields="files(id, name, mimeType, modifiedTime, size)", pageSize=500).execute()
+                sub_dest = AMZ_DAILY_STORE_DIR if "amazon" in fname.lower() else GDRIVE_SYNC_DIR
+                for s_item in sub_res.get("files", []):
+                    if not s_item.get("mimeType", "").startswith("application/vnd.google-apps."):
+                        _download_file(s_item, sub_dest)
+            elif not mtype.startswith("application/vnd.google-apps."):
+                _download_file(item, GDRIVE_SYNC_DIR)
 
-        _process_folder(folder_id, GDRIVE_SYNC_DIR)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(local_meta, f)
         st.session_state["_last_gdrive_sync_ts"] = time.time()
         return True
-    except Exception as e:
-        return False        
+    except Exception:
+        return False
+
 def save_parquet_and_sync(target_df, local_path, drive_filename="sales_cache.parquet"):
     try:
         target_df.to_parquet(local_path, index=False)
