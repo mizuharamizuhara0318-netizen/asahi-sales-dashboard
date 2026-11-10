@@ -936,7 +936,7 @@ def finalize_sales_df(df, cost_master, code_name_dict=None):
         df["粗利額"] = df["金額"] - df["原価合計"]
     return df
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=1)
 def load_and_prep_data():
     cost_path, cost_mtime = get_cost_master_file_info()
     cost_master = load_cost_master(cost_path, cost_mtime)
