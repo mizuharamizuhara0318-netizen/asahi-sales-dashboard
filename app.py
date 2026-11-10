@@ -244,7 +244,6 @@ def sync_all_from_gdrive(force=False):
                     _, done = downloader.next_chunk()
                 with open(target_path, "wb") as out_f:
                     out_f.write(fh.getvalue())
-                # 主要なキャッシュや設定ファイルはBASE_DIRにも直置きする
                 if fname.endswith((".parquet", ".json", ".xlsx", ".xls", ".csv")):
                     with open(os.path.join(BASE_DIR, fname), "wb") as out_b:
                         out_b.write(fh.getvalue())
@@ -272,7 +271,7 @@ def sync_all_from_gdrive(force=False):
         _process_folder(folder_id, GDRIVE_SYNC_DIR)
         st.session_state["_last_gdrive_sync_ts"] = time.time()
         return True
-    except Exception:
+    except Exception as e:
         return False
 
 def save_parquet_and_sync(target_df, local_path, drive_filename="sales_cache.parquet"):
