@@ -222,7 +222,7 @@ def sync_all_from_gdrive(force=False):
                 pass
 
 def sync_all_from_gdrive(force=False):
-    """Googleドライブ内の全ファイル（サブフォルダ階層内も含めてCSV/Excel/parquet/JSON等を完全網羅）を自動取得"""
+    """Googleドライブ内の全ファイル（「済」などのサブフォルダ階層内も含めてCSV/Excel等を完全網羅）を自動取得"""
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
         return False
