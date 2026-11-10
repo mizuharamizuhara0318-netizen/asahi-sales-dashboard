@@ -1496,11 +1496,10 @@ with col_mob_toggle:
     is_mobile_view = st.toggle("📱 スマホ最適化表示", value=False, key="mobile_opt_toggle")
 with col_upload:
     with st.expander("📥 データ追加・在庫更新・バックアップ", expanded=False):
-        up_tab1, up_tab2, up_tab3 = st.tabs(["📊 売上CSV追加", "📦 在庫・確保更新", "💾 バックアップ"])
         if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
-    sync_all_from_gdrive(force=True)
-    st.cache_data.clear()
-    st.rerun()
+            sync_all_from_gdrive(force=True)
+            st.cache_data.clear()
+            st.rerun()
         with up_tab1:
             up_csv_type = st.radio("種類", ["弥生売上CSV", "アマゾンセラーCSV"], horizontal=True, key="up_csv_type_radio")
             amz_ym_input = ""
