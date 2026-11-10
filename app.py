@@ -1533,7 +1533,7 @@ with col_upload:
                     if not valid_names.empty:
                         name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
                     new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
-                   try:
+　　　　try:
         new_merged.to_parquet(CACHE_FILE, index=False)
         upload_file_to_gdrive(CACHE_FILE, "sales_cache.parquet")
     except Exception as e:
@@ -1543,7 +1543,7 @@ with col_upload:
         if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
             sync_all_from_gdrive(force=True)
             st.cache_data.clear()
-            st.rerun()
+            st.rerun()    
                 st.error(f"保存エラー: {e}")
 
         with up_tab2:
