@@ -3577,7 +3577,8 @@ def save_meeting_sheet_data(data):
 # ========================================================
 # ★ 📑 営業会議用：上位客先別売上実績
 # ========================================================
-elif view_type == '📑 営業会議用：上位客先別売上実績':
+# 3580行目の 「elif」 を 「if」 に書き換える
+if view_type == '📑 営業会議用：上位客先別売上実績':
     if "tgt_ym_topcust_v3" not in st.session_state:
         st.session_state["tgt_ym_topcust_v3"] = ym_start if ym_start in desc_valid_ym else desc_valid_ym[0]
 
