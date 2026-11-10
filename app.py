@@ -1549,11 +1549,13 @@ with tab_s_view:
             new_merged = finalize_sales_df(new_merged, cost_master_dict, name_lookup)
 
             # ↑ここを「ボタンが押されたときの中」に含めるため、全体のインデントを右に合わせる
-            try:
+           try:
                 new_merged.to_parquet(CACHE_FILE, index=False)
                 upload_to_gdrive(CACHE_FILE, "sales_cache.parquet")
                 st.success("データを追加・保存しました！")
                 st.rerun()
+            except Exception as e:
+                st.error(f"保存エラー: {e}")
             
             
         with up_tab2:
