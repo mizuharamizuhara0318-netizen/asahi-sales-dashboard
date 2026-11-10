@@ -192,36 +192,6 @@ def get_gdrive_service_and_folder():
         return None, None
 
 def sync_all_from_gdrive(force=False):
-    """Googleドライブ内の全ファイル（サブフォルダ階層内も含めてCSV/Excel/parquet/JSON等を完全網羅）を自動取得"""
-    service, folder_id = get_gdrive_service_and_folder()
-    if not service or not folder_id:
-        return False
-    last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    if not force and (time.time() - last_sync < 300):
-        return True
-    try:
-        from googleapiclient.http import MediaIoBaseDownload
-        
-        def _download_file(f_item, dest_dir):
-            fid, fname, mtime = f_item["id"], f_item["name"], f_item.get("modifiedTime", "")
-            target_path = os.path.join(dest_dir, fname)
-            try:
-                req = service.files().get_media(fileId=fid)
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, req)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                with open(target_path, "wb") as out_f:
-                    out_f.write(fh.getvalue())
-                # 主要なキャッシュや設定ファイルはBASE_DIRにも直置きする
-                if fname.endswith((".parquet", ".json", ".xlsx", ".xls", ".csv")):
-                    with open(os.path.join(BASE_DIR, fname), "wb") as out_b:
-                        out_b.write(fh.getvalue())
-            except Exception:
-                pass
-
-def sync_all_from_gdrive(force=False):
     """Googleドライブ内の最新ファイル（CSV/Excel/parquet/JSON/サブフォルダ内CSV）を自動取得"""
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
@@ -278,6 +248,27 @@ def sync_all_from_gdrive(force=False):
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(local_meta, f)
         st.session_state["_last_gdrive_sync_ts"] = time.time()
+        return True
+    except Exception:
+        return False
+
+def upload_file_to_gdrive(local_path, drive_filename=None):
+    """更新されたDB（sales_cache.parquet）や見積JSON・アップロードCSVをGoogleドライブへ自動保存"""
+    service, folder_id = get_gdrive_service_and_folder()
+    if not service or not folder_id or not os.path.exists(local_path):
+        return False
+    try:
+        from googleapiclient.http import MediaFileUpload
+        fname = drive_filename or os.path.basename(local_path)
+        q = f"'{folder_id}' in parents and name = '{fname}' and trashed = false"
+        res = service.files().list(q=q, fields="files(id, name)").execute()
+        existing = res.get("files", [])
+        media = MediaFileUpload(local_path, resumable=True)
+        if existing:
+            service.files().update(fileId=existing[0]["id"], media_body=media).execute()
+        else:
+            meta = {"name": fname, "parents": [folder_id]}
+            service.files().create(body=meta, media_body=media, fields="id").execute()
         return True
     except Exception:
         return False
