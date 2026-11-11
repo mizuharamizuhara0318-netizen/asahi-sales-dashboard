@@ -371,9 +371,114 @@ def save_parquet_and_sync(target_df, local_path, drive_filename="sales_cache.par
 _gdrive_ok = sync_all_from_gdrive(force=False)
 
 # ========================================================
-# ★ 👑 order_r（マスター）.xlsx 一括高速読込エンジン（完全版）
+# ★ 在庫・確保数・発注検討表 データ読込エンジン
 # ========================================================
-    hacchu_map[sku] = {
+def get_inventory_files_info():
+    p_ao, m_ao = find_file_multidir("*ロジザード在庫*青山*.csv")
+    p_ng, m_ng = find_file_multidir("*ロジザード在庫*名古屋*.csv")
+    p_kk, m_kk = find_file_multidir("*在庫確保*.xls*")
+    p_hc, m_hc = find_file_multidir("*発注検討表*.xls*")
+    return (p_ao, m_ao), (p_ng, m_ng), (p_kk, m_kk), (p_hc, m_hc)
+
+@st.cache_data(show_spinner=False)
+def load_inventory_and_order_data(ao_info, ng_info, kk_info, hc_info):
+    logi_map = {}
+    for p, _ in [ao_info, ng_info]:
+        if p and os.path.exists(p):
+            for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
+                try:
+                    ldf = pd.read_csv(p, encoding=enc, low_memory=False)
+                    for _, r in ldf.iterrows():
+                        sku = str(r.get("商品ID", "")).strip()
+                        if not sku or sku in ["nan", "None"]: continue
+                        wh = str(r.get("倉庫名", "")).strip()
+                        wh_short = "青山" if ("三重" in wh or "青山" in wh) else ("名古屋" if "名古屋" in wh else wh)
+                        q_id = int(clean_num(r.get("品質区分ID", 0)))
+                        qty = int(clean_num(r.get("在庫数(引当数を含む)", 0)))
+                        avail = int(clean_num(r.get("出荷可能数", 0)))
+                        inc = int(clean_num(r.get("入荷予定数", 0)))
+                        if sku not in logi_map:
+                            logi_map[sku] = {
+                                "name": str(r.get("商品名", "")).strip(),
+                                "wh_set": set(),
+                                "good_qty": 0, "avail_qty": 0, "uninspected_qty": 0,
+                                "reserved_logi": 0, "defective_qty": 0, "incoming_qty": 0,
+                                "aoyama_good": 0, "nagoya_good": 0
+                            }
+                        if wh_short: logi_map[sku]["wh_set"].add(wh_short)
+                        logi_map[sku]["incoming_qty"] += inc
+                        if q_id == 1:
+                            logi_map[sku]["good_qty"] += qty
+                            logi_map[sku]["avail_qty"] += avail
+                            if wh_short == "青山": logi_map[sku]["aoyama_good"] += qty
+                            elif wh_short == "名古屋": logi_map[sku]["nagoya_good"] += qty
+                        elif q_id == 2:
+                            logi_map[sku]["uninspected_qty"] += qty
+                        elif q_id == 13:
+                            logi_map[sku]["reserved_logi"] += qty
+                        elif q_id in [3, 4, 7]:
+                            logi_map[sku]["defective_qty"] += qty
+                    break
+                except Exception: continue
+
+    kakuho_sum_map = {}
+    kakuho_details_list = []
+    p_kk, _ = kk_info
+    if p_kk and os.path.exists(p_kk):
+        try:
+            raw_k = pd.read_excel(p_kk, header=None)
+            h_idx = 3
+            for i in range(min(15, len(raw_k))):
+                row_vals = [str(x).strip() for x in raw_k.iloc[i].values if pd.notna(x)]
+                if "商品コード" in row_vals and ("受注残数" in row_vals or "得意先名" in row_vals):
+                    h_idx = i
+                    break
+            kdf = pd.read_excel(p_kk, header=h_idx)
+            for _, r in kdf.iterrows():
+                sku = str(r.get("商品コード", "")).strip()
+                if not sku or sku in ["nan", "None", ""]: continue
+                rem_qty = int(clean_num(r.get("受注残数", r.get("数量", 0))))
+                if rem_qty == 0 and int(clean_num(r.get("数量", 0))) == 0: continue
+                kakuho_sum_map[sku] = kakuho_sum_map.get(sku, 0) + rem_qty
+                dt_v = r.get("受注日")
+                dt_str = pd.to_datetime(dt_v).strftime("%Y/%m/%d") if pd.notna(dt_v) else ""
+                due_v = r.get("納入期日")
+                due_str = pd.to_datetime(due_v).strftime("%Y/%m/%d") if pd.notna(due_v) else ""
+                kakuho_details_list.append({
+                    "商品コード": sku,
+                    "商品名": str(r.get("商品名/摘要", "")).strip() if pd.notna(r.get("商品名/摘要")) else "",
+                    "受注日": dt_str,
+                    "受注番号": clean_code_str(r.get("受注番号", "")),
+                    "得意先名": str(r.get("得意先名", "")).strip() if pd.notna(r.get("得意先名")) else "",
+                    "担当者": str(r.get("担当者名", "")).strip() if pd.notna(r.get("担当者名")) else "",
+                    "倉庫": str(r.get("倉庫名", "")).strip() if pd.notna(r.get("倉庫名")) else "",
+                    "確保残数": rem_qty,
+                    "納入期日": due_str,
+                    "備考": str(r.get("備考", "")).strip() if pd.notna(r.get("備考")) else ""
+                })
+        except Exception: pass
+
+    hacchu_map = {}
+    p_hc, _ = hc_info
+    if p_hc and os.path.exists(p_hc):
+        try:
+            hdf = pd.read_excel(p_hc)
+            c_o = next((c for c in hdf.columns if "発注点" in str(c) and "5ヶ月" in str(c)), None)
+            c_r = next((c for c in hdf.columns if "在庫数" in str(c) and "ロジザード" in str(c)), None)
+            c_s = next((c for c in hdf.columns if "入荷予定" in str(c) and "日" not in str(c)), None)
+            c_u = next((c for c in hdf.columns if "入荷予定日" in str(c)), None)
+            c_v = next((c for c in hdf.columns if "在庫確保" in str(c) and "ロジザード" in str(c)), None)
+            c_w = next((c for c in hdf.columns if "在庫確保" in str(c) and "弥生" in str(c)), None)
+            c_y = next((c for c in hdf.columns if "丸藤" in str(c)), None)
+            c_ac = next((c for c in hdf.columns if "ﾘﾝﾍﾞﾙ" in str(c) or "リンベル" in str(c)), None)
+            c_ad = next((c for c in hdf.columns if "前回決定事項" in str(c)), None)
+            c_ae = next((c for c in hdf.columns if str(c).strip() == "決定事項"), None)
+            c_l = next((c for c in hdf.columns if "77期" in str(c)), None)
+
+            for _, r in hdf.iterrows():
+                sku = str(r.get("品番", "")).strip()
+                if not sku or sku in ["nan", "None"]: continue
+                hacchu_map[sku] = {
                     "center": str(r.get("商品センター", "")).strip() if pd.notna(r.get("商品センター")) else "",
                     "category": str(r.get("商品区分", "")).strip() if pd.notna(r.get("商品区分")) else "",
                     "color": str(r.get("カラー", "")).strip() if pd.notna(r.get("カラー")) else "",
@@ -390,7 +495,7 @@ _gdrive_ok = sync_all_from_gdrive(force=False)
                     "decision": str(r.get(c_ae, "")).strip() if (c_ae and pd.notna(r.get(c_ae))) else "",
                     "term77_qty": int(clean_num(r.get(c_l, 0))) if c_l else 0
                 }
-    except Exception: pass
+        except Exception: pass
 
     return logi_map, kakuho_sum_map, pd.DataFrame(kakuho_details_list), hacchu_map
 
