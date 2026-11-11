@@ -950,49 +950,11 @@ def load_customer_master(file_path, file_mtime):
         except Exception: pass
     return pd.DataFrame()
 
-def get_jan_file_info():
-    return find_file_multidir("*JAN*.xls*")
-
-@st.cache_data(show_spinner=False)
-def load_jan_master_v2(file_path, file_mtime):
-    jan_dict, full_title_dict, std_price_dict = {}, {}, {}
-    if file_path and os.path.exists(file_path):
-        try:
-            jdf = pd.read_excel(file_path)
-            c_sku = [c for c in jdf.columns if any(k in str(c) for k in ['商品番号', '商品コード', 'SKU', '品番'])]
-            c_jan = [c for c in jdf.columns if any(k in str(c) for k in ['カタログID', 'JAN', 'JANコード'])]
-            c_name = [c for c in jdf.columns if any(k in str(c) for k in ['商品名', '品名'])]
-            c_std = [c for c in jdf.columns if any(k in str(c) for k in ['上代', '標準', '定価', '税抜上代'])]
-            s_col = c_sku[0] if c_sku else jdf.columns[0]
-            j_col = c_jan[0] if c_jan else (jdf.columns[1] if len(jdf.columns) > 1 else None)
-            n_col = c_name[0] if c_name else None
-            p_col = c_std[0] if c_std else None
-            for _, r in jdf.iterrows():
-                sk = str(r[s_col]).strip()
-                if not sk or sk == "nan": continue
-                if j_col and pd.notna(r[j_col]):
-                    try: jan_dict[sk] = str(int(float(r[j_col])))
-                    except: jan_dict[sk] = str(r[j_col]).replace(".0", "").strip()
-                if n_col and pd.notna(r[n_col]): full_title_dict[sk] = str(r[n_col]).strip()
-                if p_col and pd.notna(r[p_col]): std_price_dict[sk] = int(clean_num(r[p_col]))
-        except Exception: pass
-    return jan_dict, full_title_dict, std_price_dict
-
-def get_customer_file_info():
-    return find_file_multidir("*注文者会社名*.xls*")
-
-@st.cache_data(show_spinner=False)
-def load_customer_master(file_path, file_mtime):
-    if file_path and os.path.exists(file_path):
-        try: return pd.read_excel(file_path)
-        except Exception: pass
-    return pd.DataFrame()
-
 def get_hanko_bytes():
     for d in [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]:
         if os.path.exists(d):
             for p in ["hanko.png", "*hanko*.png", "*hanko*.jpg", "*05171642*.png", "*印鑑*.png", "input_file_5.png"]:
-                fl = glob.glob(os.path.join(d, p))
+                fl = glob.glob(os.path.join(d, p))ｆ
                 if not fl:
                     fl = glob.glob(os.path.join(d, "**", p), recursive=True)
                 if fl:
