@@ -245,48 +245,27 @@ def sync_all_from_gdrive(force=False):
                 except Exception:
                     pass
 
-        def _list_drive(query_str):
-            return service.files().list(
-                q=query_str,
-                fields="files(id, name, mimeType, modifiedTime, shortcutDetails)",
-                pageSize=300,
-                supportsAllDrives=True,
-                includeItemsFromAllDrives=True
-            ).execute().get("files", [])
+        # メインフォルダ直下のファイル一覧を取得
+        q = f"'{folder_id}' in parents and trashed = false"
+        res = service.files().list(
+            q=q,
+            fields="files(id, name, mimeType, modifiedTime, shortcutDetails)",
+            pageSize=300,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True
+        ).execute()
+        items = res.get("files", [])
 
-        # ① 「売上ダッシュボード」直下のファイルを取得
-        items = _list_drive(f"'{folder_id}' in parents and trashed = false")
-
-        # ② 「その他データ」フォルダ内のマスタ類も取得（「済」フォルダ等の過去CSVは拾わない！）
-        other_folders = [it["id"] for it in items if it.get("mimeType") == "application/vnd.google-apps.folder" and it.get("name") == "その他データ"]
-        for of_id in other_folders:
-            try:
-                items.extend(_list_drive(f"'{of_id}' in parents and trashed = false"))
-            except Exception:
-                pass
-
-        # ショートカットの解決と重複除外（更新日時が新しい順）
-        items.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
-        unique_items = []
-        seen_names = set()
-        for it in items:
-            mtype = it.get("mimeType", "")
-            if mtype == "application/vnd.google-apps.folder":
-                continue
-            if mtype == "application/vnd.google-apps.shortcut":
-                sc_info = it.get("shortcutDetails", {})
-                if sc_info.get("targetId"):
-                    it["id"] = sc_info["targetId"]
-                    it["mimeType"] = sc_info.get("targetMimeType", "")
-            nm = it.get("name", "")
-            if nm and nm not in seen_names:
-                seen_names.add(nm)
-                unique_items.append(it)
-        items = unique_items
+        # ローカルに残っている古い yayoi_*.csv のうち、今ドライブ直下に無い（『済』に移動された）ものを掃除
+        current_drive_names = {it.get("name", "") for it in items}
+        for old_f in glob.glob(os.path.join(GDRIVE_SYNC_DIR, "yayoi_*.csv")):
+            if os.path.basename(old_f) not in current_drive_names:
+                try: os.remove(old_f)
+                except Exception: pass
 
         downloaded_files = []
 
-        # ③ sales_cache.parquet の同期
+        # ① sales_cache.parquet の同期
         for item in items:
             if item.get("name") == "sales_cache.parquet":
                 fid, mtime = item["id"], item.get("modifiedTime", "")
@@ -297,16 +276,37 @@ def sync_all_from_gdrive(force=False):
                     downloaded_files.append("sales_cache.parquet")
                 break
 
-        # ④ 売上ダッシュボード直下にあるCSVとマスタ類を同期
+        # ② ドライブ直下の売上CSV・マスタ類（ショートカット含む）を同期
         ignore_prefixes = ("app", "requirements", "run_all", "silent_start", "item_class_lotmember")
         drive_csv_names = []
         master_detected_name = "未検出"
 
         for item in items:
             mtype = item.get("mimeType", "")
+            if mtype == "application/vnd.google-apps.folder":
+                continue
+
             fname = item.get("name", "")
             fid = item["id"]
             mtime = item.get("modifiedTime", "")
+
+            # ★重要：ショートカットの場合は、リンク先（本体ファイル）のIDと「本体の最新更新日時」を取得する！
+            if mtype == "application/vnd.google-apps.shortcut":
+                sc_info = item.get("shortcutDetails", {})
+                target_id = sc_info.get("targetId")
+                if target_id:
+                    fid = target_id
+                    mtype = sc_info.get("targetMimeType", "")
+                    try:
+                        t_meta = service.files().get(
+                            fileId=fid,
+                            fields="name, mimeType, modifiedTime",
+                            supportsAllDrives=True
+                        ).execute()
+                        mtime = t_meta.get("modifiedTime", mtime)
+                        mtype = t_meta.get("mimeType", mtype)
+                    except Exception:
+                        pass
 
             if fname == "sales_cache.parquet":
                 continue
@@ -318,6 +318,10 @@ def sync_all_from_gdrive(force=False):
                         fname = fname + ".xlsx"
                 else:
                     continue
+
+            # ショートカット名に拡張子(.xlsx)が付いていない場合も自動で補完
+            if ("order_r" in fname.lower() or "マスター" in fname) and not fname.lower().endswith((".xlsx", ".xls")):
+                fname = fname + ".xlsx"
 
             if fname.lower().startswith(ignore_prefixes):
                 continue
@@ -334,9 +338,8 @@ def sync_all_from_gdrive(force=False):
 
             if fname.lower().endswith(".csv") and not is_inventory_or_master:
                 drive_csv_names.append(fname)
-                # ★重要：メインフォルダ直下に置かれている売上CSVは、昨年の同名ファイルがparquetにあっても絶対にスキップせずローカルにDLする！
                 if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime:
-                    _download_single(fid, target_path, copy_to_base=True, is_gsheet=False)
+                    _download_single(fid, target_path, copy_to_base=False, is_gsheet=False)
                     local_meta[fid] = mtime
                     downloaded_files.append(fname)
             else:
@@ -344,18 +347,6 @@ def sync_all_from_gdrive(force=False):
                     _download_single(fid, target_path, copy_to_base=True, is_gsheet=is_gsheet)
                     local_meta[fid] = mtime
                     downloaded_files.append(fname)
-
-        # ドライブ直下から「済」フォルダへ移動されたCSVは、GDRIVE_SYNC_DIR からも掃除する
-        for old_f in glob.glob(os.path.join(GDRIVE_SYNC_DIR, "*.csv")):
-            b_old = os.path.basename(old_f)
-            if not ("ロジザード" in b_old or "在庫" in b_old or "ランク" in b_old):
-                if b_old not in drive_csv_names:
-                    try: os.remove(old_f)
-                    except Exception: pass
-                    try:
-                        b_copy = os.path.join(BASE_DIR, b_old)
-                        if os.path.exists(b_copy): os.remove(b_copy)
-                    except Exception: pass
 
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(local_meta, f, ensure_ascii=False, indent=2)
@@ -683,7 +674,7 @@ def _load_order_r_all_sheets(master_path, master_mtime):
         if "ランク価格" in s_names:
             res["rank_df"] = pd.read_excel(xls, sheet_name="ランク価格")
 
-        # item シート（B列[1]:商品番号 / F列[5]:】〜（の商品名 / O列[14]:カタログID[JAN]）
+        # item シート（B列[1]:商品番号 / F列[5]:】〜（の商品名 / O列[14]:カタログID[JAN] / Q列[16]:原価）
         if "item" in s_names:
             idf = pd.read_excel(xls, sheet_name="item")
             for _, r in idf.iterrows():
@@ -710,9 +701,43 @@ def _load_order_r_all_sheets(master_path, master_mtime):
                 sell_p = int(clean_num(r.iloc[8])) if len(r) > 8 else 0
                 if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
                     res["default_min_map"][sk] = sell_p
-                if sk not in res["cost_dict"] or res["cost_dict"][sk] == 0:
-                    c_val = clean_num(r.iloc[16]) if len(r) > 16 else 0.0
-                    if c_val > 0: res["cost_dict"][sk] = c_val
+                # ★修正：itemシートのQ列（iloc[16]）の原価を最優先で登録！
+                c_val = clean_num(r.iloc[16]) if len(r) > 16 else 0.0
+                if c_val > 0:
+                    res["cost_dict"][sk] = c_val
+
+        # select シート（A列[0]:商品番号 / I列[8]:】以降の商品名 / Q列[16]:カタログID[JAN] / J列[9]:原価）
+        if "select" in s_names:
+            sdf = pd.read_excel(xls, sheet_name="select")
+            for _, r in sdf.iterrows():
+                sk = clean_code_str(r.iloc[0]) if len(r) > 0 else ""
+                if not sk:
+                    sk = clean_code_str(r.iloc[7]) if len(r) > 7 else ""
+                if not sk:
+                    continue
+                raw_nm = str(r.iloc[8]).strip() if len(r) > 8 and pd.notna(r.iloc[8]) else ""
+                cat_id = r.iloc[16] if len(r) > 16 else None
+                opt_d = str(r.iloc[3]).strip() if len(r) > 3 and pd.notna(r.iloc[3]) else ""
+
+                jan_str = _extract_jan_13digits(cat_id, opt_d, raw_nm)
+                if jan_str:
+                    res["jan_dict"][sk] = jan_str
+
+                if raw_nm and raw_nm != "nan":
+                    res["raw_title_dict"][sk] = raw_nm
+                    nm_clean = raw_nm.split("】", 1)[-1].strip() if "】" in raw_nm else raw_nm.strip()
+                    nm_clean = re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]\s*$', '', nm_clean).strip()
+                    res["full_title_dict"][sk] = nm_clean
+
+                std_p = int(clean_num(r.iloc[10])) if len(r) > 10 else 0
+                if std_p > 0: res["std_price_dict"][sk] = std_p
+                sell_p = int(clean_num(r.iloc[11])) if len(r) > 11 else 0
+                if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
+                    res["default_min_map"][sk] = sell_p
+                # ★修正：selectシートのJ列（iloc[9]）の原価を最優先で登録！
+                c_val = clean_num(r.iloc[9]) if len(r) > 9 else 0.0
+                if c_val > 0:
+                    res["cost_dict"][sk] = c_val
 
         # select シート（A列[0]:商品番号 / I列[8]:】以降の商品名 / Q列[16]:カタログID[JAN]）
         if "select" in s_names:
@@ -3154,9 +3179,9 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 if (not cur_jan or cur_jan in ["None", "nan"]) and auto_jan and str(auto_jan) != cur_jan:
                     cur_jan = str(auto_jan)
                     needs_rerun = True
-                if cur_cost == 0 and int(auto_cost) > 0:
-                    cur_cost = int(auto_cost)
-                    needs_rerun = True
+                if int(auto_cost) > 0 and cur_cost != int(auto_cost):
+                 cur_cost = int(auto_cost)
+                 needs_rerun = True
                 if cur_min == 0 and int(auto_min) > 0:
                     cur_min = int(auto_min)
                     needs_rerun = True
