@@ -1678,8 +1678,9 @@ for k_t, v_t in (jan_title_dict or {}).items():
 
 col_status, col_mob_toggle, col_upload = st.columns([2.4, 1.0, 1.8])
 with col_status:
-    # 🔍 画面左上に常に「同期診断ステータス」と「反映済み最終日」を表示
-    _max_dt_str = df["日付_dt"].max().strftime("%Y/%m/%d") if (not df.empty and "日付_dt" in df.columns and df["日付_dt"].notna().any()) else "未取得"
+    # アマゾンセラーの月末自動日付(11/30等)を除いた、実際の弥生売上の最新日を表示する
+    _yayoi_only = df[df["得意先名"] != "アマゾンセラー"] if not df.empty and "得意先名" in df.columns else df
+    _max_dt_str = _yayoi_only["日付_dt"].max().strftime("%Y/%m/%d") if (not _yayoi_only.empty and "日付_dt" in _yayoi_only.columns and _yayoi_only["日付_dt"].notna().any()) else "未取得"
     _diag_msg = st.session_state.get("_gdrive_diag", "同期ステータス未実行")
     st.caption(f"📊 **反映済データ最新日: {_max_dt_str}** （全 {len(df):,} 行）\n\n🔍 {_diag_msg}")
 with col_mob_toggle:
