@@ -2862,7 +2862,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             cur_name = str(row_l.get("商品名", "")).strip() if pd.notna(row_l.get("商品名")) else ""
             cur_min = int(clean_num(row_l.get("最低下代", 0)))
 
-            if c_code != prev_code or not cur_name or cur_name == "None" or cur_price == 0:
+            if c_code != prev_code or not cur_name or cur_name == "None" or not cur_jan or cur_price == 0:
                 auto_name, _, auto_price, auto_cost, auto_min, applied_lbl = get_sku_details(c_code, cur_rank if cur_rank != "None" else "ロット単価", sel_lot_comp)
                 cur_name, cur_price, cur_cost, cur_min, cur_rank = auto_name, int(auto_price), int(auto_cost), int(auto_min), applied_lbl
                 lot_needs_rerun = True
