@@ -204,9 +204,9 @@ def get_gdrive_service_and_folder():
 
 def sync_all_from_gdrive(force=False):
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    # 通常の操作時は5秒間隔で自動チェック（ドライブに入れたらすぐ自動反映させる）
-    if not force and (time.time() - last_sync < 5):
-        return False
+    # 画面操作のたびに詰まらないよう、自動チェックは60秒に1回（手動ボタン押下時は即時）にする
+    if not force and (time.time() - last_sync < 60):
+        return True
 
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
@@ -250,30 +250,21 @@ def sync_all_from_gdrive(force=False):
             return service.files().list(
                 q=query_str,
                 fields="files(id, name, mimeType, modifiedTime, shortcutDetails)",
-                pageSize=500,
+                pageSize=300,
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True
             ).execute().get("files", [])
 
-        # ① メインフォルダ直下を取得
+        # ① メインフォルダ直下を取得（サブフォルダのループは詰まりの原因になるため行わない）
         items = _list_drive(f"'{folder_id}' in parents and trashed = false")
 
-        # ② サブフォルダ（その他データ・済・月別フォルダ等）もスキャン
-        sub_folders = [it["id"] for it in items if it.get("mimeType") == "application/vnd.google-apps.folder"]
-        for sf_id in sub_folders:
-            try:
-                items.extend(_list_drive(f"'{sf_id}' in parents and trashed = false"))
-            except Exception:
-                pass
-
-        # ③ ★決定打：フォルダ階層やショートカットの違いで漏れないよう、ドライブ全体から yayoi_*.csv と order_r を直接指名検索して合流！
+        # ② 共有設定やショートカットで直下クエリから漏れた yayoi_*.csv と order_r だけ軽量クエリで合流
         try:
-            direct_yayoi = _list_drive("(name contains 'yayoi' or name contains 'order_r' or name contains 'マスター') and trashed = false")
-            items.extend(direct_yayoi)
+            direct_items = _list_drive("(name contains 'yayoi_' or name contains 'order_r') and trashed = false")
+            items.extend(direct_items)
         except Exception:
             pass
 
-        # ショートカットファイルがあれば実体のIDに変換し、同名ファイルは最新(modifiedTime)を優先
         items.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
         unique_items = []
         seen_names = set()
@@ -293,9 +284,8 @@ def sync_all_from_gdrive(force=False):
         items = unique_items
 
         downloaded_files = []
-        new_csv_downloaded = False
 
-        # ④ sales_cache.parquet の同期
+        # ③ sales_cache.parquet の同期
         for item in items:
             if item.get("name") == "sales_cache.parquet":
                 fid, mtime = item["id"], item.get("modifiedTime", "")
@@ -306,7 +296,7 @@ def sync_all_from_gdrive(force=False):
                     downloaded_files.append("sales_cache.parquet")
                 break
 
-        # ⑤ 既に sales_cache.parquet に入っている _source_file を確認
+        # ④ 既に sales_cache.parquet に入っている _source_file を確認
         existing_sources = set()
         for cf in [os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet"), CACHE_FILE]:
             if os.path.exists(cf):
@@ -316,7 +306,7 @@ def sync_all_from_gdrive(force=False):
                 except Exception:
                     pass
 
-        # ⑥ 売上CSV・マスタ類を同期
+        # ⑤ 未取込の売上CSV・更新されたマスタ類のみをダウンロード
         ignore_prefixes = ("app", "requirements", "run_all", "silent_start", "item_class_lotmember")
         drive_csv_names = []
         master_detected_name = "未検出"
@@ -332,11 +322,8 @@ def sync_all_from_gdrive(force=False):
 
             is_gsheet = (mtype == "application/vnd.google-apps.spreadsheet")
             if is_gsheet:
-                if any(k in fname.lower() for k in ["order_r", "マスター", "在庫確保", "発注検討", "yayoi"]):
-                    if "yayoi" in fname.lower():
-                        # もし弥生データがスプレッドシート形式になっていてもCSVとしてエクスポート対応
-                        pass
-                    elif not fname.lower().endswith(".xlsx"):
+                if any(k in fname.lower() for k in ["order_r", "マスター", "在庫確保", "発注検討"]):
+                    if not fname.lower().endswith(".xlsx"):
                         fname = fname + ".xlsx"
                 else:
                     continue
@@ -356,12 +343,12 @@ def sync_all_from_gdrive(force=False):
 
             if fname.lower().endswith(".csv") and not is_inventory_or_master:
                 drive_csv_names.append(fname)
-                # まだparquetに未登録、またはドライブ上で更新されたCSVは自動DL！
-                if (fname not in existing_sources) or (local_meta.get(fid) != mtime) or force or (not os.path.exists(target_path)):
-                    _download_single(fid, target_path, copy_to_base=True, is_gsheet=False)
-                    local_meta[fid] = mtime
-                    downloaded_files.append(fname)
-                    new_csv_downloaded = True
+                # ★重要：まだparquetに入っていないCSV、またはドライブ上で更新されたCSVだけをDLする（毎回全件DLしない）
+                if (fname not in existing_sources) or (local_meta.get(fid) != mtime):
+                    if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime or (fname not in existing_sources):
+                        _download_single(fid, target_path, copy_to_base=True, is_gsheet=False)
+                        local_meta[fid] = mtime
+                        downloaded_files.append(fname)
             else:
                 if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime:
                     _download_single(fid, target_path, copy_to_base=True, is_gsheet=is_gsheet)
@@ -375,15 +362,11 @@ def sync_all_from_gdrive(force=False):
         st.session_state["_gdrive_diag"] = (
             f"☁️ 同期OK（{datetime.now().strftime('%H:%M:%S')}）｜"
             f"マスターExcel: {master_detected_name} ｜ "
-            f"検出した売上CSV: {sorted(list(set(drive_csv_names)))} ｜ "
+            f"検出CSV: {len(drive_csv_names)}件 ｜ "
             f"未取込CSV: {unprocessed_csvs if unprocessed_csvs else 'なし(全て反映済)'} ｜ "
             f"今回DL: {downloaded_files if downloaded_files else '変更なし'}"
         )
         st.session_state["_last_gdrive_sync_ts"] = time.time()
-
-        # ★重要：新しいCSVやマスタが1件でも落ちてきたら、ボタンを押さなくても自動でキャッシュをクリアして最新データを反映させる！
-        if new_csv_downloaded or downloaded_files:
-            st.cache_data.clear()
         return True
     except Exception as e:
         st.session_state["_gdrive_diag"] = f"❌ ドライブ同期エラー: {str(e)}"
@@ -1411,18 +1394,16 @@ def load_and_prep_data(_file_sig=""):
         if bname not in unique_by_name or GDRIVE_SYNC_DIR in os.path.abspath(f):
             unique_by_name[bname] = f
 
+    # ★重要：まだ sales_cache.parquet に登録されていない新しいCSVだけを処理対象にする（毎回全CSVを再処理しない！）
     csv_candidates = []
-    reprocess_sources = set()
     for bname in sorted(unique_by_name.keys()):
         f = unique_by_name[bname]
         if bname.startswith("order_") or bname.startswith("item_class_lotmember") or "ランク" in bname or "ロジザード" in bname or "在庫" in bname:
             continue
         if AMZ_DAILY_STORE_DIR in os.path.abspath(f) or re.match(r'^\d{1,2}[-_]\d{1,2}\.csv$', bname):
             continue
-        if bname not in existing_sources or (GDRIVE_SYNC_DIR in os.path.abspath(f) and "yayoi_" in bname.lower()):
+        if bname not in existing_sources:
             csv_candidates.append(f)
-            if bname in existing_sources:
-                reprocess_sources.add(bname)
 
     new_yayoi_df = pd.DataFrame()
     new_amz_df = pd.DataFrame()
@@ -1445,9 +1426,6 @@ def load_and_prep_data(_file_sig=""):
             if valid_amz:
                 new_amz_df = pd.concat(valid_amz, ignore_index=True)
 
-    if not cached_df.empty and reprocess_sources and not new_yayoi_df.empty:
-        cached_df = cached_df[~cached_df["_source_file"].astype(str).isin(reprocess_sources)].copy()
-
     if not cached_df.empty and not new_amz_df.empty:
         amz_yms = set(new_amz_df["年月"].dropna().unique())
         cached_df = cached_df[~((cached_df["得意先名"] == "アマゾンセラー") & (cached_df["年月"].isin(amz_yms)))].copy()
@@ -1461,6 +1439,7 @@ def load_and_prep_data(_file_sig=""):
         if not valid_names.empty:
             name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
         df = finalize_sales_df(df, cost_master, name_lookup)
+        # 新しいCSVが追加されたときだけ parquet を保存・アップロードする
         if not new_yayoi_df.empty or not new_amz_df.empty:
             try:
                 save_parquet_and_sync(df, CACHE_FILE, "sales_cache.parquet")
