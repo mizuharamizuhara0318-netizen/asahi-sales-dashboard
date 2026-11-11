@@ -204,8 +204,7 @@ def get_gdrive_service_and_folder():
 
 def sync_all_from_gdrive(force=False):
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    # 画面操作のたびに詰まらないよう、自動チェックは60秒に1回（手動ボタン押下時は即時）にする
-    if not force and (time.time() - last_sync < 60):
+    if not force and (time.time() - last_sync < 30):
         return True
 
     service, folder_id = get_gdrive_service_and_folder()
@@ -255,16 +254,18 @@ def sync_all_from_gdrive(force=False):
                 includeItemsFromAllDrives=True
             ).execute().get("files", [])
 
-        # ① メインフォルダ直下を取得（サブフォルダのループは詰まりの原因になるため行わない）
+        # ① 「売上ダッシュボード」直下のファイルを取得
         items = _list_drive(f"'{folder_id}' in parents and trashed = false")
 
-        # ② 共有設定やショートカットで直下クエリから漏れた yayoi_*.csv と order_r だけ軽量クエリで合流
-        try:
-            direct_items = _list_drive("(name contains 'yayoi_' or name contains 'order_r') and trashed = false")
-            items.extend(direct_items)
-        except Exception:
-            pass
+        # ② 「その他データ」フォルダ内のマスタ類も取得（「済」フォルダ等の過去CSVは拾わない！）
+        other_folders = [it["id"] for it in items if it.get("mimeType") == "application/vnd.google-apps.folder" and it.get("name") == "その他データ"]
+        for of_id in other_folders:
+            try:
+                items.extend(_list_drive(f"'{of_id}' in parents and trashed = false"))
+            except Exception:
+                pass
 
+        # ショートカットの解決と重複除外（更新日時が新しい順）
         items.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
         unique_items = []
         seen_names = set()
@@ -296,17 +297,7 @@ def sync_all_from_gdrive(force=False):
                     downloaded_files.append("sales_cache.parquet")
                 break
 
-        # ④ 既に sales_cache.parquet に入っている _source_file を確認
-        existing_sources = set()
-        for cf in [os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet"), CACHE_FILE]:
-            if os.path.exists(cf):
-                try:
-                    cdf = pd.read_parquet(cf, columns=["_source_file"])
-                    existing_sources.update(cdf["_source_file"].dropna().astype(str).unique())
-                except Exception:
-                    pass
-
-        # ⑤ 未取込の売上CSV・更新されたマスタ類のみをダウンロード
+        # ④ 売上ダッシュボード直下にあるCSVとマスタ類を同期
         ignore_prefixes = ("app", "requirements", "run_all", "silent_start", "item_class_lotmember")
         drive_csv_names = []
         master_detected_name = "未検出"
@@ -343,27 +334,36 @@ def sync_all_from_gdrive(force=False):
 
             if fname.lower().endswith(".csv") and not is_inventory_or_master:
                 drive_csv_names.append(fname)
-                # ★重要：まだparquetに入っていないCSV、またはドライブ上で更新されたCSVだけをDLする（毎回全件DLしない）
-                if (fname not in existing_sources) or (local_meta.get(fid) != mtime):
-                    if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime or (fname not in existing_sources):
-                        _download_single(fid, target_path, copy_to_base=True, is_gsheet=False)
-                        local_meta[fid] = mtime
-                        downloaded_files.append(fname)
+                # ★重要：メインフォルダ直下に置かれている売上CSVは、昨年の同名ファイルがparquetにあっても絶対にスキップせずローカルにDLする！
+                if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime:
+                    _download_single(fid, target_path, copy_to_base=True, is_gsheet=False)
+                    local_meta[fid] = mtime
+                    downloaded_files.append(fname)
             else:
                 if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime:
                     _download_single(fid, target_path, copy_to_base=True, is_gsheet=is_gsheet)
                     local_meta[fid] = mtime
                     downloaded_files.append(fname)
 
+        # ドライブ直下から「済」フォルダへ移動されたCSVは、GDRIVE_SYNC_DIR からも掃除する
+        for old_f in glob.glob(os.path.join(GDRIVE_SYNC_DIR, "*.csv")):
+            b_old = os.path.basename(old_f)
+            if not ("ロジザード" in b_old or "在庫" in b_old or "ランク" in b_old):
+                if b_old not in drive_csv_names:
+                    try: os.remove(old_f)
+                    except Exception: pass
+                    try:
+                        b_copy = os.path.join(BASE_DIR, b_old)
+                        if os.path.exists(b_copy): os.remove(b_copy)
+                    except Exception: pass
+
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(local_meta, f, ensure_ascii=False, indent=2)
 
-        unprocessed_csvs = [c for c in sorted(list(set(drive_csv_names))) if c not in existing_sources]
         st.session_state["_gdrive_diag"] = (
             f"☁️ 同期OK（{datetime.now().strftime('%H:%M:%S')}）｜"
             f"マスターExcel: {master_detected_name} ｜ "
-            f"検出CSV: {len(drive_csv_names)}件 ｜ "
-            f"未取込CSV: {unprocessed_csvs if unprocessed_csvs else 'なし(全て反映済)'} ｜ "
+            f"直下の売上CSV: {sorted(drive_csv_names)} ｜ "
             f"今回DL: {downloaded_files if downloaded_files else '変更なし'}"
         )
         st.session_state["_last_gdrive_sync_ts"] = time.time()
@@ -1354,6 +1354,7 @@ def load_and_prep_data(_file_sig=""):
 
     cached_df = pd.DataFrame()
     existing_sources = set()
+    existing_date_sources = set()
     gdrive_pq = os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet")
     cache_candidates = [gdrive_pq, CACHE_FILE]
 
@@ -1373,15 +1374,20 @@ def load_and_prep_data(_file_sig=""):
         loaded_pqs.sort(key=lambda x: len(x), reverse=True)
         base_pq = loaded_pqs[0]
         other_pq = loaded_pqs[1]
-        if "_source_file" in base_pq.columns and "_source_file" in other_pq.columns:
-            base_srcs = set(base_pq["_source_file"].dropna().astype(str).unique())
-            missing_part = other_pq[~other_pq["_source_file"].astype(str).isin(base_srcs)]
+        if "_source_file" in base_pq.columns and "_source_file" in other_pq.columns and "日付" in base_pq.columns and "日付" in other_pq.columns:
+            base_keys = set(zip(base_pq["日付"].astype(str), base_pq["_source_file"].astype(str)))
+            other_keys = list(zip(other_pq["日付"].astype(str), other_pq["_source_file"].astype(str)))
+            mask_missing = [k not in base_keys for k in other_keys]
+            missing_part = other_pq[mask_missing]
             cached_df = pd.concat([base_pq, missing_part], ignore_index=True) if not missing_part.empty else base_pq
         else:
             cached_df = base_pq
 
     if not cached_df.empty and "_source_file" in cached_df.columns:
         existing_sources = set(cached_df["_source_file"].dropna().astype(str).unique())
+        if "日付" in cached_df.columns:
+            # ★重要：「2025/11/11 の yayoi_1111.csv」と「2026/11/11 の yayoi_1111.csv」を明確に区別する！
+            existing_date_sources = set(zip(cached_df["日付"].fillna("").astype(str), cached_df["_source_file"].fillna("").astype(str)))
 
     raw_candidates = []
     for search_root in [GDRIVE_SYNC_DIR, BASE_SHARE, BASE_DIR]:
@@ -1394,7 +1400,6 @@ def load_and_prep_data(_file_sig=""):
         if bname not in unique_by_name or GDRIVE_SYNC_DIR in os.path.abspath(f):
             unique_by_name[bname] = f
 
-    # ★重要：まだ sales_cache.parquet に登録されていない新しいCSVだけを処理対象にする（毎回全CSVを再処理しない！）
     csv_candidates = []
     for bname in sorted(unique_by_name.keys()):
         f = unique_by_name[bname]
@@ -1402,8 +1407,19 @@ def load_and_prep_data(_file_sig=""):
             continue
         if AMZ_DAILY_STORE_DIR in os.path.abspath(f) or re.match(r'^\d{1,2}[-_]\d{1,2}\.csv$', bname):
             continue
-        if bname not in existing_sources:
-            csv_candidates.append(f)
+
+        # yayoi_MMDD.csv の場合、今年の推定日付（例: 2026/11/11）がすでにキャッシュにあるか確認する
+        m_yayoi = re.search(r'yayoi_(\d{2})(\d{2})', bname, re.IGNORECASE)
+        if m_yayoi:
+            mm_s, dd_s = m_yayoi.group(1), m_yayoi.group(2)
+            inf_y = 2026 if int(mm_s) >= 7 else 2027
+            expected_dt_str = f"{inf_y}/{mm_s}/{dd_s}"
+            # 昨年の yayoi_1111.csv が入っていても、2026/11/11 の yayoi_1111.csv が無ければ必ず取り込む！
+            if (expected_dt_str, bname) not in existing_date_sources:
+                csv_candidates.append(f)
+        else:
+            if bname not in existing_sources:
+                csv_candidates.append(f)
 
     new_yayoi_df = pd.DataFrame()
     new_amz_df = pd.DataFrame()
@@ -1426,6 +1442,12 @@ def load_and_prep_data(_file_sig=""):
             if valid_amz:
                 new_amz_df = pd.concat(valid_amz, ignore_index=True)
 
+    # もし同じ（日付, _source_file）のデータが既にあれば重複しないように入れ替える（昨年の同名ファイルは絶対に消さない！）
+    if not cached_df.empty and not new_yayoi_df.empty:
+        new_keys = set(zip(new_yayoi_df["日付"].astype(str), new_yayoi_df["_source_file"].astype(str)))
+        old_keys = list(zip(cached_df["日付"].astype(str), cached_df["_source_file"].astype(str)))
+        cached_df = cached_df[[k not in new_keys for k in old_keys]].copy()
+
     if not cached_df.empty and not new_amz_df.empty:
         amz_yms = set(new_amz_df["年月"].dropna().unique())
         cached_df = cached_df[~((cached_df["得意先名"] == "アマゾンセラー") & (cached_df["年月"].isin(amz_yms)))].copy()
@@ -1439,7 +1461,6 @@ def load_and_prep_data(_file_sig=""):
         if not valid_names.empty:
             name_lookup.update(valid_names.drop_duplicates("商品コード").set_index("商品コード")["商品名"].to_dict())
         df = finalize_sales_df(df, cost_master, name_lookup)
-        # 新しいCSVが追加されたときだけ parquet を保存・アップロードする
         if not new_yayoi_df.empty or not new_amz_df.empty:
             try:
                 save_parquet_and_sync(df, CACHE_FILE, "sales_cache.parquet")
