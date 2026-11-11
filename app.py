@@ -373,6 +373,42 @@ _gdrive_ok = sync_all_from_gdrive(force=False)
 # ========================================================
 # ★ 👑 order_r（マスター）.xlsx 一括高速読込エンジン（完全版）
 # ========================================================
+        def get_target_file_info():
+    return find_file_multidir("*今期目標*.xls*")
+
+@st.cache_data(show_spinner=False)
+def load_staff_target_master(file_path, file_mtime):
+    targets = {k: dict(v) for k, v in DEFAULT_STAFF_TARGETS.items()}
+    if file_path and os.path.exists(file_path):
+        try:
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+            ws = wb.active
+            col_to_month = {3: 7, 4: 8, 5: 9, 6: 10, 7: 11, 8: 12, 10: 1, 11: 2, 12: 3, 13: 4, 14: 5, 15: 6}
+            curr_person = None
+            for r in range(1, ws.max_row + 1):
+                p = ws.cell(row=r, column=1).value
+                if p is not None and str(p).strip() != "":
+                    curr_person = normalize_target_staff_name(str(p).strip())
+                metric = str(ws.cell(row=r, column=2).value or "").strip()
+                if curr_person and metric == "今期目標":
+                    m_dict = {}
+                    for c_idx, m_num in col_to_month.items():
+                        v = ws.cell(row=r, column=c_idx).value
+                        try: m_dict[m_num] = int(float(v) * 1000) if v is not None else 0
+                        except: m_dict[m_num] = 0
+                    v_h1 = ws.cell(row=r, column=9).value
+                    v_h2 = ws.cell(row=r, column=16).value
+                    v_fy = ws.cell(row=r, column=17).value
+                    try: h1_val = int(float(v_h1) * 1000) if v_h1 is not None else sum(m_dict[m] for m in [7,8,9,10,11,12])
+                    except: h1_val = sum(m_dict[m] for m in [7,8,9,10,11,12])
+                    try: h2_val = int(float(v_h2) * 1000) if v_h2 is not None else sum(m_dict[m] for m in [1,2,3,4,5,6])
+                    except: h2_val = sum(m_dict[m] for m in [1,2,3,4,5,6])
+                    try: fy_val = int(float(v_fy) * 1000) if v_fy is not None else (h1_val + h2_val)
+                    except: fy_val = h1_val + h2_val
+                    targets[curr_person] = {"monthly": m_dict, "h1": h1_val, "h2": h2_val, "annual": fy_val}
+        except Exception:
+            pass
+    return targets
 def get_order_r_master_info():
     return find_file_multidir("*order_r*マスター*.xls*")
 
@@ -1753,7 +1789,7 @@ raw_prod_title_map = {}
 if "元商品名" in df.columns and "商品コード" in df.columns:
     raw_prod_title_map = df.dropna(subset=["商品コード", "元商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["元商品名"].to_dict()
 for k_t, v_t in (jan_title_dict or {}).items():
-    sk_trim = str(k_t).strip()
+    sk_trim = str(k_t).strip()ｆ
     if sk_trim not in raw_prod_title_map:
         raw_prod_title_map[sk_trim] = str(v_t).strip()
 
