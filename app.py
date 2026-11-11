@@ -883,6 +883,7 @@ def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
 
 def _read_single_csv(f, explicit_name=None):
     fname = explicit_name if explicit_name else str(f)
+    bname = os.path.basename(fname)
     path_date = None
     ym_match = re.search(r'(\d{4})年?[/\\_]?(\d{1,2})月?[/\\_]?yayoi_(\d{2})(\d{2})', fname, re.IGNORECASE)
     if ym_match:
@@ -890,24 +891,38 @@ def _read_single_csv(f, explicit_name=None):
         path_date = f"{y}{md_m}{md_d}"
     else:
         y_m = re.search(r'(\d{4})年', fname)
-        d_m = re.search(r'yayoi_(\d{4})', fname, re.IGNORECASE)
+        d_m = re.search(r'yayoi_(\d{2})(\d{2})', fname, re.IGNORECASE)
         if y_m and d_m:
-            path_date = f"{y_m.group(1)}{d_m.group(1)}"
+            path_date = f"{y_m.group(1)}{d_m.group(1)}{d_m.group(2)}"
         elif d_m:
-            mmdd = d_m.group(1)
-            mm_int = int(mmdd[:2]) if mmdd[:2].isdigit() else 9
+            mm_str, dd_str = d_m.group(1), d_m.group(2)
+            mm_int = int(mm_str) if mm_str.isdigit() else 11
             inferred_y = 2026 if mm_int >= 7 else 2027
-            path_date = f"{inferred_y}{mmdd}"
+            path_date = f"{inferred_y}{mm_str}{dd_str}"
 
     for enc in ["cp932", "shift_jis", "utf-8", "utf-8-sig"]:
         try:
             if hasattr(f, "seek"): f.seek(0)
+            # まず通常通り1行目をヘッダーとして読んでみる
             d = pd.read_csv(f, encoding=enc, encoding_errors="replace", low_memory=False)
+            if d.empty:
+                continue
             cols = [str(c).strip() for c in d.columns]
+            has_header = any(any(k in c for k in ["商品", "得意先", "数量", "単価", "金額", "日付", "売上", "伝票"]) for c in cols)
+
+            # ★重要：1行目に見出し文字が無い（弥生のヘッダー無し出力）場合は、header=Noneで1行目からデータとして読み直す！
+            if not has_header and len(cols) >= 20:
+                if hasattr(f, "seek"): f.seek(0)
+                d = pd.read_csv(f, encoding=enc, encoding_errors="replace", header=None, low_memory=False)
+                # 弥生販売の標準エクスポート列位置を自動マッピング
+                col_map = {3: "売上日", 5: "得意先名", 11: "担当者コード", 14: "商品コード", 15: "商品名", 19: "数量", 21: "単価", 22: "金額"}
+                d = d.rename(columns={idx: name for idx, name in col_map.items() if idx < len(d.columns)})
+                cols = [str(c).strip() for c in d.columns]
+
             qty_cols = [c for c in cols if "数量" in c]
-            d["_auto_qty"] = d[qty_cols[0]].apply(clean_num) if qty_cols else (d.iloc[:, 21].apply(clean_num) if len(cols) >= 22 else 0.0)
+            d["_auto_qty"] = d[qty_cols[0]].apply(clean_num) if qty_cols else (d.iloc[:, 19].apply(clean_num) if len(cols) >= 20 else 0.0)
             price_cols = [c for c in cols if "単価" in c]
-            d["_auto_price"] = d[price_cols[0]].apply(clean_num) if price_cols else (d.iloc[:, 20].apply(clean_num) if len(cols) >= 21 else 0.0)
+            d["_auto_price"] = d[price_cols[0]].apply(clean_num) if price_cols else (d.iloc[:, 21].apply(clean_num) if len(cols) >= 22 else 0.0)
             amt_cols = [c for c in cols if c in ["金額", "売上金額", "販売金額"]]
             if amt_cols:
                 d["_auto_amt"] = d[amt_cols[0]].apply(clean_num)
@@ -915,9 +930,10 @@ def _read_single_csv(f, explicit_name=None):
             else:
                 d["_auto_amt"] = d["_auto_qty"] * d["_auto_price"]
             d["_fallback_date"] = path_date
-            d["_source_file"] = os.path.basename(fname)
+            d["_source_file"] = bname
             return d
-        except Exception: continue
+        except Exception:
+            continue
     return None
 
 def _parse_ym_from_filename_or_override(fname, override_ym=None):
@@ -992,9 +1008,12 @@ def _parse_raw_df_to_standard(df_all):
 
     res = pd.DataFrame()
     if c_pcode: res["商品コード"] = df_all[c_pcode].fillna("").astype(str).str.strip()
+    else: res["商品コード"] = ""
     if c_pname:
-        res["元商品名"] = df_all[c_pname].fillna("").astype(str).str.strip()
+        res["元商品名"] = df_all[c_pname].fillna("").astype(str).strip() if hasattr(df_all[c_pname].fillna("").astype(str), "strip") else df_all[c_pname].fillna("").astype(str).str.strip()
         res["商品名"] = df_all[c_pname].fillna("").astype(str).map(clean_product_name)
+    else:
+        res["元商品名"], res["商品名"] = "", ""
     res["得意先名"] = df_all[c_cname].fillna("").astype(str).str.strip().map(clean_cust_name) if c_cname else ""
     res["担当者"] = df_all[c_staff].map(convert_staff_name).fillna("").astype(str).replace("nan", "") if c_staff else ""
     res["数量"] = df_all["_auto_qty"].fillna(0).astype(int)
@@ -1002,15 +1021,21 @@ def _parse_raw_df_to_standard(df_all):
     res["金額"] = df_all["_auto_amt"].fillna(res["数量"] * res["単価"]).astype(int)
     if "_source_file" in df_all.columns: res["_source_file"] = df_all["_source_file"].fillna("").astype(str)
 
+    # ★日付解析の強化：日付列が空欄または変換不能な行は、ファイル名の日付（yayoi_1110 -> 20261110）で確実に補完する
     raw_s = df_all[c_date].fillna("").astype(str).str.strip() if c_date else pd.Series([""] * len(df_all))
-    clean_date = raw_s.str.replace(r'\.0$', '', regex=True).str.replace(r'[-/.\s]', '', regex=True)
-    if "_fallback_date" in df_all.columns:
-        clean_date = clean_date.where(clean_date.str.len() == 8, df_all["_fallback_date"].fillna("").astype(str))
+    clean_date = raw_s.str.replace(r'\.0$', '', regex=True).str.replace(r'[-/.\s年月日]', '', regex=True)
     dt = pd.to_datetime(clean_date, format="%Y%m%d", errors="coerce").fillna(pd.to_datetime(raw_s, errors="coerce"))
+    if "_fallback_date" in df_all.columns:
+        fb_dt = pd.to_datetime(df_all["_fallback_date"].fillna("").astype(str), format="%Y%m%d", errors="coerce")
+        dt = dt.fillna(fb_dt)
+
     res["日付_dt"] = dt
     res["日付"] = dt.dt.strftime('%Y/%m/%d').fillna("")
     res["年月"] = dt.dt.strftime('%Y年%m月').fillna("")
-    if "商品名" in res.columns: res = res[~res["商品名"].str.contains("送料", na=False)].copy()
+    # 商品コードが空欄または送料の行、金額も数量も0の空行を除外
+    res = res[(res["商品コード"] != "") & ~res["商品コード"].isin(["nan", "None"])].copy()
+    if "商品名" in res.columns:
+        res = res[~res["商品名"].str.contains("送料", na=False)].copy()
     return res
 
 def finalize_sales_df(df, cost_master, code_name_dict=None):
@@ -1109,14 +1134,18 @@ def load_and_prep_data(_file_sig=""):
             unique_by_name[bname] = f
 
     csv_candidates = []
+    reprocess_sources = set()
     for bname in sorted(unique_by_name.keys()):
         f = unique_by_name[bname]
         if bname.startswith("order_") or bname.startswith("item_class_lotmember") or "ランク" in bname or "ロジザード" in bname or "在庫" in bname:
             continue
         if AMZ_DAILY_STORE_DIR in os.path.abspath(f) or re.match(r'^\d{1,2}[-_]\d{1,2}\.csv$', bname):
             continue
-        if bname not in existing_sources:
+        # ★改善：GDRIVE_SYNC_DIR（ドライブ直下）にあるCSVは、万が一過去の取込不全があっても最新状態で再反映させる
+        if bname not in existing_sources or (GDRIVE_SYNC_DIR in os.path.abspath(f) and "yayoi_" in bname.lower()):
             csv_candidates.append(f)
+            if bname in existing_sources:
+                reprocess_sources.add(bname)
 
     new_yayoi_df = pd.DataFrame()
     new_amz_df = pd.DataFrame()
@@ -1138,6 +1167,10 @@ def load_and_prep_data(_file_sig=""):
             valid_amz = [ad for ad in amz_res if ad is not None and not ad.empty]
             if valid_amz:
                 new_amz_df = pd.concat(valid_amz, ignore_index=True)
+
+    # 再処理対象のCSVがあれば、古いキャッシュ側の同名CSV行を一度消して新しいデータで置き換える（重複防止）
+    if not cached_df.empty and reprocess_sources and not new_yayoi_df.empty:
+        cached_df = cached_df[~cached_df["_source_file"].astype(str).isin(reprocess_sources)].copy()
 
     if not cached_df.empty and not new_amz_df.empty:
         amz_yms = set(new_amz_df["年月"].dropna().unique())
