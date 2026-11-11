@@ -560,8 +560,28 @@ def load_cost_master(file_path, file_mtime):
 # ========================================================
 # ★ 👑 order_r（マスター）.xlsx 一括高速読込エンジン（個別ファイルにも自動フォールバック）
 # ========================================================
-def get_order_r_master_info():
-    return find_file_multidir("*order_r*マスター*.xls*")
+def _extract_jan_13digits(*texts):
+    """カタログIDや文字列内のカッコ（49... / 45...）から13桁のJANコードを確実に抽出する"""
+    for val in texts:
+        if pd.isna(val):
+            continue
+        s = str(val).strip()
+        if not s or s.lower() == "nan":
+            continue
+        # 浮動小数点 (4.962645e+12 や 4962644783540.0) の変換
+        try:
+            f_val = float(s)
+            if f_val >= 1e11:
+                i_str = str(int(round(f_val)))
+                if len(i_str) in (12, 13):
+                    return i_str
+        except Exception:
+            pass
+        # 文字列の中から13桁（または12桁）の数字を探す
+        m = re.search(r'(?<!\d)(\d{13}|\d{12})(?!\d)', s)
+        if m:
+            return m.group(1)
+    return ""
 
 @st.cache_data(show_spinner=False)
 def _load_order_r_all_sheets(master_path, master_mtime):
@@ -574,7 +594,7 @@ def _load_order_r_all_sheets(master_path, master_mtime):
         res = {
             "cost_dict": {}, "cust_sku_map": {}, "default_min_map": {},
             "sku_meta": {}, "grp_map": {}, "rank_df": pd.DataFrame(),
-            "jan_dict": {}, "full_title_dict": {}, "std_price_dict": {},
+            "jan_dict": {}, "full_title_dict": {}, "raw_title_dict": {}, "std_price_dict": {},
             "customer_df": pd.DataFrame()
         }
 
@@ -642,26 +662,51 @@ def _load_order_r_all_sheets(master_path, master_mtime):
         if "ランク価格" in s_names:
             res["rank_df"] = pd.read_excel(xls, sheet_name="ランク価格")
 
-        # 6. item ＆ select シート（JAN・商品名・標準価格・原価補完）
+        # 6. item ＆ select シート（JAN・商品名・標準価格・原価・最低下代の補完）
         for sh in ["item", "select"]:
             if sh in s_names:
                 idf = pd.read_excel(xls, sheet_name=sh)
                 for _, r in idf.iterrows():
                     sk = str(r.get("商品番号", "")).strip()
-                    if not sk or sk == "nan": continue
+                    if not sk or sk == "nan":
+                        sk = str(r.get("商品番号.1", "")).strip()
+                    if not sk or sk == "nan":
+                        continue
+
+                    raw_nm = str(r.get("商品名", "")).strip() if pd.notna(r.get("商品名")) else ""
+                    opt_x = str(r.get("項目選択肢別在庫用横軸選択肢", "")).strip() if pd.notna(r.get("項目選択肢別在庫用横軸選択肢")) else ""
                     cat_id = r.get("カタログID")
-                    if pd.notna(cat_id) and str(cat_id).strip() not in ["", "nan"]:
-                        try: res["jan_dict"][sk] = str(int(float(cat_id)))
-                        except Exception: res["jan_dict"][sk] = str(cat_id).replace(".0", "").strip()
-                    nm = str(r.get("商品名", "")).strip()
-                    if nm and nm != "nan":
-                        res["full_title_dict"][sk] = clean_product_name(nm)
+
+                    # ★JANコード抽出：カタログID列 -> 横軸選択肢のカッコ内 -> 商品名のカッコ内 の順で100%拾う
+                    jan_str = _extract_jan_13digits(cat_id, opt_x, raw_nm)
+                    if jan_str:
+                        res["jan_dict"][sk] = jan_str
+
+                    # ★商品名抽出：selectシートで横軸選択肢（色など）がある場合は綺麗に補完
+                    if raw_nm and raw_nm != "nan":
+                        res["raw_title_dict"][sk] = raw_nm
+                        clean_nm = clean_product_name(raw_nm)
+                        if sh == "select" and opt_x and opt_x != "nan":
+                            clean_opt = clean_product_name(opt_x)
+                            if clean_opt and clean_opt not in clean_nm:
+                                clean_nm = f"{clean_nm} {clean_opt}".strip()
+                        res["full_title_dict"][sk] = clean_nm
+
+                    # 表示価格（上代）
                     std_p = int(clean_num(r.get("表示価格", 0)))
                     if std_p > 0:
                         res["std_price_dict"][sk] = std_p
-                    if sk not in res["cost_dict"]:
+
+                    # 販売価格（最低下代の補完：新原価や加盟店価格に無い場合のフォールバック）
+                    sell_p = int(clean_num(r.get("販売価格", 0)))
+                    if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
+                        res["default_min_map"][sk] = sell_p
+
+                    # 原価の補完
+                    if sk not in res["cost_dict"] or res["cost_dict"][sk] == 0:
                         c_val = clean_num(r.get("原価", 0))
-                        if c_val > 0: res["cost_dict"][sk] = c_val
+                        if c_val > 0:
+                            res["cost_dict"][sk] = c_val
 
         # 7. 注文者会社名シート
         if "注文者会社名" in s_names:
@@ -882,6 +927,7 @@ def get_jan_file_info():
     return find_file_multidir("*JAN*.xls*")
 
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def load_jan_master_v2(file_path, file_mtime):
     jan_dict, full_title_dict, std_price_dict = {}, {}, {}
     m_p, m_t = get_order_r_master_info()
@@ -891,7 +937,6 @@ def load_jan_master_v2(file_path, file_mtime):
             jan_dict.update(m_data["jan_dict"])
             full_title_dict.update(m_data["full_title_dict"])
             std_price_dict.update(m_data["std_price_dict"])
-    # もし個別の JAN.xlsx も置いてあれば補完として読み込む（order_r優先）
     j_p, _ = find_file_multidir("*JAN*.xls*")
     if j_p and os.path.exists(j_p) and j_p != m_p:
         try:
@@ -908,10 +953,10 @@ def load_jan_master_v2(file_path, file_mtime):
                 sk = str(r[s_col]).strip()
                 if not sk or sk == "nan": continue
                 if sk not in jan_dict and j_col and pd.notna(r[j_col]):
-                    try: jan_dict[sk] = str(int(float(r[j_col])))
-                    except Exception: jan_dict[sk] = str(r[j_col]).replace(".0", "").strip()
+                    jan_s = _extract_jan_13digits(r[j_col])
+                    if jan_s: jan_dict[sk] = jan_s
                 if sk not in full_title_dict and n_col and pd.notna(r[n_col]):
-                    full_title_dict[sk] = str(r[n_col]).strip()
+                    full_title_dict[sk] = clean_product_name(str(r[n_col]).strip())
                 if sk not in std_price_dict and p_col and pd.notna(r[p_col]):
                     std_price_dict[sk] = int(clean_num(r[p_col]))
         except Exception: pass
