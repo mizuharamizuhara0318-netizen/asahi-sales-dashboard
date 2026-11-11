@@ -373,7 +373,6 @@ _gdrive_ok = sync_all_from_gdrive(force=False)
 # ========================================================
 # ★ 👑 order_r（マスター）.xlsx 一括高速読込エンジン（完全版）
 # ========================================================
-return logi_map, kakuho_sum_map, pd.DataFrame(kakuho_details_list), hacchu_map
 
 def get_target_file_info():
     return find_file_multidir("*今期目標*.xls*")
