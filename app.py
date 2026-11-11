@@ -954,7 +954,7 @@ def get_hanko_bytes():
     for d in [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]:
         if os.path.exists(d):
             for p in ["hanko.png", "*hanko*.png", "*hanko*.jpg", "*05171642*.png", "*印鑑*.png", "input_file_5.png"]:
-                fl = glob.glob(os.path.join(d, p))ｆ
+                fl = glob.glob(os.path.join(d, p))
                 if not fl:
                     fl = glob.glob(os.path.join(d, "**", p), recursive=True)
                 if fl:
