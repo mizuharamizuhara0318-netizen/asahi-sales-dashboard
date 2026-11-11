@@ -1792,7 +1792,7 @@ raw_prod_title_map = {}
 if "元商品名" in df.columns and "商品コード" in df.columns:
     raw_prod_title_map = df.dropna(subset=["商品コード", "元商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["元商品名"].to_dict()
 for k_t, v_t in (jan_title_dict or {}).items():
-    sk_trim = str(k_t).strip()ｆ
+    sk_trim = str(k_t).strip()
     if sk_trim not in raw_prod_title_map:
         raw_prod_title_map[sk_trim] = str(v_t).strip()
 
