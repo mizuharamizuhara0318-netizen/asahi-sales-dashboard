@@ -373,9 +373,8 @@ _gdrive_ok = sync_all_from_gdrive(force=False)
 # ========================================================
 # ★ 👑 order_r（マスター）.xlsx 一括高速読込エンジン（完全版）
 # ========================================================
-  def get_target_file_info():
-    return find_file_multidir("*今期目標*.xls*")
-
+def get_order_r_master_info():
+    return find_file_multidir("*order_r*マスター*.xls*")
 @st.cache_data(show_spinner=False)
 def load_staff_target_master(file_path, file_mtime):
     targets = {k: dict(v) for k, v in DEFAULT_STAFF_TARGETS.items()}
