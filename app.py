@@ -371,195 +371,11 @@ def save_parquet_and_sync(target_df, local_path, drive_filename="sales_cache.par
 _gdrive_ok = sync_all_from_gdrive(force=False)
 
 # ========================================================
-# ★ 在庫・確保数・発注検討表 データ読込エンジン
+# ★ 👑 order_r（マスター）.xlsx 一括高速読込エンジン（完全版）
 # ========================================================
-def get_inventory_files_info():
-    p_ao, m_ao = find_file_multidir("*ロジザード在庫*青山*.csv")
-    p_ng, m_ng = find_file_multidir("*ロジザード在庫*名古屋*.csv")
-    p_kk, m_kk = find_file_multidir("*在庫確保*.xls*")
-    p_hc, m_hc = find_file_multidir("*発注検討表*.xls*")
-    return (p_ao, m_ao), (p_ng, m_ng), (p_kk, m_kk), (p_hc, m_hc)
+def get_order_r_master_info():
+    return find_file_multidir("*order_r*マスター*.xls*")
 
-@st.cache_data(show_spinner=False)
-def load_inventory_and_order_data(ao_info, ng_info, kk_info, hc_info):
-    logi_map = {}
-    for p, _ in [ao_info, ng_info]:
-        if p and os.path.exists(p):
-            for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
-                try:
-                    ldf = pd.read_csv(p, encoding=enc, low_memory=False)
-                    for _, r in ldf.iterrows():
-                        sku = str(r.get("商品ID", "")).strip()
-                        if not sku or sku in ["nan", "None"]: continue
-                        wh = str(r.get("倉庫名", "")).strip()
-                        wh_short = "青山" if ("三重" in wh or "青山" in wh) else ("名古屋" if "名古屋" in wh else wh)
-                        q_id = int(clean_num(r.get("品質区分ID", 0)))
-                        qty = int(clean_num(r.get("在庫数(引当数を含む)", 0)))
-                        avail = int(clean_num(r.get("出荷可能数", 0)))
-                        inc = int(clean_num(r.get("入荷予定数", 0)))
-                        if sku not in logi_map:
-                            logi_map[sku] = {
-                                "name": str(r.get("商品名", "")).strip(),
-                                "wh_set": set(),
-                                "good_qty": 0, "avail_qty": 0, "uninspected_qty": 0,
-                                "reserved_logi": 0, "defective_qty": 0, "incoming_qty": 0,
-                                "aoyama_good": 0, "nagoya_good": 0
-                            }
-                        if wh_short: logi_map[sku]["wh_set"].add(wh_short)
-                        logi_map[sku]["incoming_qty"] += inc
-                        if q_id == 1:
-                            logi_map[sku]["good_qty"] += qty
-                            logi_map[sku]["avail_qty"] += avail
-                            if wh_short == "青山": logi_map[sku]["aoyama_good"] += qty
-                            elif wh_short == "名古屋": logi_map[sku]["nagoya_good"] += qty
-                        elif q_id == 2:
-                            logi_map[sku]["uninspected_qty"] += qty
-                        elif q_id == 13:
-                            logi_map[sku]["reserved_logi"] += qty
-                        elif q_id in [3, 4, 7]:
-                            logi_map[sku]["defective_qty"] += qty
-                    break
-                except Exception: continue
-
-    kakuho_sum_map = {}
-    kakuho_details_list = []
-    p_kk, _ = kk_info
-    if p_kk and os.path.exists(p_kk):
-        try:
-            raw_k = pd.read_excel(p_kk, header=None)
-            h_idx = 3
-            for i in range(min(15, len(raw_k))):
-                row_vals = [str(x).strip() for x in raw_k.iloc[i].values if pd.notna(x)]
-                if "商品コード" in row_vals and ("受注残数" in row_vals or "得意先名" in row_vals):
-                    h_idx = i
-                    break
-            kdf = pd.read_excel(p_kk, header=h_idx)
-            for _, r in kdf.iterrows():
-                sku = str(r.get("商品コード", "")).strip()
-                if not sku or sku in ["nan", "None", ""]: continue
-                rem_qty = int(clean_num(r.get("受注残数", r.get("数量", 0))))
-                if rem_qty == 0 and int(clean_num(r.get("数量", 0))) == 0: continue
-                kakuho_sum_map[sku] = kakuho_sum_map.get(sku, 0) + rem_qty
-                dt_v = r.get("受注日")
-                dt_str = pd.to_datetime(dt_v).strftime("%Y/%m/%d") if pd.notna(dt_v) else ""
-                due_v = r.get("納入期日")
-                due_str = pd.to_datetime(due_v).strftime("%Y/%m/%d") if pd.notna(due_v) else ""
-                kakuho_details_list.append({
-                    "商品コード": sku,
-                    "商品名": str(r.get("商品名/摘要", "")).strip() if pd.notna(r.get("商品名/摘要")) else "",
-                    "受注日": dt_str,
-                    "受注番号": clean_code_str(r.get("受注番号", "")),
-                    "得意先名": str(r.get("得意先名", "")).strip() if pd.notna(r.get("得意先名")) else "",
-                    "担当者": str(r.get("担当者名", "")).strip() if pd.notna(r.get("担当者名")) else "",
-                    "倉庫": str(r.get("倉庫名", "")).strip() if pd.notna(r.get("倉庫名")) else "",
-                    "確保残数": rem_qty,
-                    "納入期日": due_str,
-                    "備考": str(r.get("備考", "")).strip() if pd.notna(r.get("備考")) else ""
-                })
-        except Exception: pass
-
-    hacchu_map = {}
-    p_hc, _ = hc_info
-    if p_hc and os.path.exists(p_hc):
-        try:
-            hdf = pd.read_excel(p_hc)
-            c_o = next((c for c in hdf.columns if "発注点" in str(c) and "5ヶ月" in str(c)), None)
-            c_r = next((c for c in hdf.columns if "在庫数" in str(c) and "ロジザード" in str(c)), None)
-            c_s = next((c for c in hdf.columns if "入荷予定" in str(c) and "日" not in str(c)), None)
-            c_u = next((c for c in hdf.columns if "入荷予定日" in str(c)), None)
-            c_v = next((c for c in hdf.columns if "在庫確保" in str(c) and "ロジザード" in str(c)), None)
-            c_w = next((c for c in hdf.columns if "在庫確保" in str(c) and "弥生" in str(c)), None)
-            c_y = next((c for c in hdf.columns if "丸藤" in str(c)), None)
-            c_ac = next((c for c in hdf.columns if "ﾘﾝﾍﾞﾙ" in str(c) or "リンベル" in str(c)), None)
-            c_ad = next((c for c in hdf.columns if "前回決定事項" in str(c)), None)
-            c_ae = next((c for c in hdf.columns if str(c).strip() == "決定事項"), None)
-            c_l = next((c for c in hdf.columns if "77期" in str(c)), None)
-
-            for _, r in hdf.iterrows():
-                sku = str(r.get("品番", "")).strip()
-                if not sku or sku in ["nan", "None"]: continue
-                hacchu_map[sku] = {
-                    "center": str(r.get("商品センター", "")).strip() if pd.notna(r.get("商品センター")) else "",
-                    "category": str(r.get("商品区分", "")).strip() if pd.notna(r.get("商品区分")) else "",
-                    "color": str(r.get("カラー", "")).strip() if pd.notna(r.get("カラー")) else "",
-                    "discontinued": str(r.get("処分品", "")).strip() if pd.notna(r.get("処分品")) else "",
-                    "order_point": round(clean_num(r.get(c_o, 0)), 1) if c_o else 0.0,
-                    "sheet_logi_stock": int(clean_num(r.get(c_r, 0))) if c_r else 0,
-                    "sheet_incoming": int(clean_num(r.get(c_s, 0))) if c_s else 0,
-                    "incoming_date": str(r.get(c_u, "")).strip() if (c_u and pd.notna(r.get(c_u))) else "",
-                    "sheet_logi_res": int(clean_num(r.get(c_v, 0))) if c_v else 0,
-                    "sheet_yayoi_res": int(clean_num(r.get(c_w, 0))) if c_w else 0,
-                    "marufuji_res": int(clean_num(r.get(c_y, 0))) if c_y else 0,
-                    "ringbell_res": int(clean_num(r.get(c_ac, 0))) if c_ac else 0,
-                    "prev_note": str(r.get(c_ad, "")).strip() if (c_ad and pd.notna(r.get(c_ad))) else "",
-                    "decision": str(r.get(c_ae, "")).strip() if (c_ae and pd.notna(r.get(c_ae))) else "",
-                    "term77_qty": int(clean_num(r.get(c_l, 0))) if c_l else 0
-                }
-        except Exception: pass
-
-    return logi_map, kakuho_sum_map, pd.DataFrame(kakuho_details_list), hacchu_map
-
-def get_target_file_info():
-    return find_file_multidir("*今期目標*.xls*")
-
-@st.cache_data(show_spinner=False)
-def load_staff_target_master(file_path, file_mtime):
-    targets = {k: dict(v) for k, v in DEFAULT_STAFF_TARGETS.items()}
-    if file_path and os.path.exists(file_path):
-        try:
-            wb = openpyxl.load_workbook(file_path, data_only=True)
-            ws = wb.active
-            col_to_month = {3: 7, 4: 8, 5: 9, 6: 10, 7: 11, 8: 12, 10: 1, 11: 2, 12: 3, 13: 4, 14: 5, 15: 6}
-            curr_person = None
-            for r in range(1, ws.max_row + 1):
-                p = ws.cell(row=r, column=1).value
-                if p is not None and str(p).strip() != "":
-                    curr_person = normalize_target_staff_name(str(p).strip())
-                metric = str(ws.cell(row=r, column=2).value or "").strip()
-                if curr_person and metric == "今期目標":
-                    m_dict = {}
-                    for c_idx, m_num in col_to_month.items():
-                        v = ws.cell(row=r, column=c_idx).value
-                        try: m_dict[m_num] = int(float(v) * 1000) if v is not None else 0
-                        except: m_dict[m_num] = 0
-                    v_h1 = ws.cell(row=r, column=9).value
-                    v_h2 = ws.cell(row=r, column=16).value
-                    v_fy = ws.cell(row=r, column=17).value
-                    try: h1_val = int(float(v_h1) * 1000) if v_h1 is not None else sum(m_dict[m] for m in [7,8,9,10,11,12])
-                    except: h1_val = sum(m_dict[m] for m in [7,8,9,10,11,12])
-                    try: h2_val = int(float(v_h2) * 1000) if v_h2 is not None else sum(m_dict[m] for m in [1,2,3,4,5,6])
-                    except: h2_val = sum(m_dict[m] for m in [1,2,3,4,5,6])
-                    try: fy_val = int(float(v_fy) * 1000) if v_fy is not None else (h1_val + h2_val)
-                    except: fy_val = h1_val + h2_val
-                    targets[curr_person] = {"monthly": m_dict, "h1": h1_val, "h2": h2_val, "annual": fy_val}
-        except Exception:
-            pass
-    return targets
-
-def get_cost_master_file_info():
-    return find_file_multidir("*原価*.xls*")
-
-@st.cache_data(show_spinner=False)
-def load_cost_master(file_path, file_mtime):
-    cost_dict = {}
-    if file_path and os.path.exists(file_path):
-        try:
-            cdf = pd.read_excel(file_path)
-            c_sku = [c for c in cdf.columns if any(k in str(c) for k in ['商品管理', 'SKU', 'コード', '品番', '商品番号'])]
-            c_cost = [c for c in cdf.columns if '原価' in str(c)]
-            sku_col = c_sku[0] if c_sku else cdf.columns[0]
-            cost_col = c_cost[0] if c_cost else (cdf.columns[1] if len(cdf.columns) > 1 else None)
-            if cost_col:
-                for _, r in cdf.iterrows():
-                    sk = str(r[sku_col]).strip()
-                    co = clean_num(r[cost_col])
-                    if sk: cost_dict[sk] = co
-        except Exception: pass
-    return cost_dict
-
-# ========================================================
-# ★ 👑 order_r（マスター）.xlsx 一括高速読込エンジン（個別ファイルにも自動フォールバック）
-# ========================================================
 def _extract_jan_13digits(*texts):
     """カタログIDや文字列内のカッコ（49... / 45...）から13桁のJANコードを確実に抽出する"""
     for val in texts:
@@ -568,7 +384,6 @@ def _extract_jan_13digits(*texts):
         s = str(val).strip()
         if not s or s.lower() == "nan":
             continue
-        # 浮動小数点 (4.962645e+12 や 4962644783540.0) の変換
         try:
             f_val = float(s)
             if f_val >= 1e11:
@@ -577,7 +392,6 @@ def _extract_jan_13digits(*texts):
                     return i_str
         except Exception:
             pass
-        # 文字列の中から13桁（または12桁）の数字を探す
         m = re.search(r'(?<!\d)(\d{13}|\d{12})(?!\d)', s)
         if m:
             return m.group(1)
@@ -677,12 +491,10 @@ def _load_order_r_all_sheets(master_path, master_mtime):
                     opt_x = str(r.get("項目選択肢別在庫用横軸選択肢", "")).strip() if pd.notna(r.get("項目選択肢別在庫用横軸選択肢")) else ""
                     cat_id = r.get("カタログID")
 
-                    # ★JANコード抽出：カタログID列 -> 横軸選択肢のカッコ内 -> 商品名のカッコ内 の順で100%拾う
                     jan_str = _extract_jan_13digits(cat_id, opt_x, raw_nm)
                     if jan_str:
                         res["jan_dict"][sk] = jan_str
 
-                    # ★商品名抽出：selectシートで横軸選択肢（色など）がある場合は綺麗に補完
                     if raw_nm and raw_nm != "nan":
                         res["raw_title_dict"][sk] = raw_nm
                         clean_nm = clean_product_name(raw_nm)
@@ -692,17 +504,14 @@ def _load_order_r_all_sheets(master_path, master_mtime):
                                 clean_nm = f"{clean_nm} {clean_opt}".strip()
                         res["full_title_dict"][sk] = clean_nm
 
-                    # 表示価格（上代）
                     std_p = int(clean_num(r.get("表示価格", 0)))
                     if std_p > 0:
                         res["std_price_dict"][sk] = std_p
 
-                    # 販売価格（最低下代の補完：新原価や加盟店価格に無い場合のフォールバック）
                     sell_p = int(clean_num(r.get("販売価格", 0)))
                     if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
                         res["default_min_map"][sk] = sell_p
 
-                    # 原価の補完
                     if sk not in res["cost_dict"] or res["cost_dict"][sk] == 0:
                         c_val = clean_num(r.get("原価", 0))
                         if c_val > 0:
@@ -926,7 +735,6 @@ def get_jan_file_info():
     if p: return p, m
     return find_file_multidir("*JAN*.xls*")
 
-@st.cache_data(show_spinner=False)
 @st.cache_data(show_spinner=False)
 def load_jan_master_v2(file_path, file_mtime):
     jan_dict, full_title_dict, std_price_dict = {}, {}, {}
