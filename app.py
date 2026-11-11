@@ -639,46 +639,70 @@ def _load_order_r_all_sheets(master_path, master_mtime):
         if "ランク価格" in s_names:
             res["rank_df"] = pd.read_excel(xls, sheet_name="ランク価格")
 
-        # 6. item ＆ select シート（JAN・商品名・標準価格・原価・最低下代の補完）
-        for sh in ["item", "select"]:
-            if sh in s_names:
-                idf = pd.read_excel(xls, sheet_name=sh)
-                for _, r in idf.iterrows():
-                    sk = str(r.get("商品番号", "")).strip()
-                    if not sk or sk == "nan":
-                        sk = str(r.get("商品番号.1", "")).strip()
-                    if not sk or sk == "nan":
-                        continue
+        # 6-A. item シート（B列:商品番号 / F列:】〜（の商品名 / O列:カタログID[JAN]）
+        if "item" in s_names:
+            idf = pd.read_excel(xls, sheet_name="item")
+            for _, r in idf.iterrows():
+                sk = str(r.iloc[1]).strip() if len(r) > 1 and pd.notna(r.iloc[1]) else ""
+                if not sk or sk == "nan":
+                    continue
+                raw_nm = str(r.iloc[5]).strip() if len(r) > 5 and pd.notna(r.iloc[5]) else ""
+                cat_id = r.iloc[14] if len(r) > 14 else None
 
-                    raw_nm = str(r.get("商品名", "")).strip() if pd.notna(r.get("商品名")) else ""
-                    opt_x = str(r.get("項目選択肢別在庫用横軸選択肢", "")).strip() if pd.notna(r.get("項目選択肢別在庫用横軸選択肢")) else ""
-                    cat_id = r.get("カタログID")
+                # O列のカタログIDからJAN取得（万一空欄ならF列のカッコ内から取得）
+                jan_str = _extract_jan_13digits(cat_id, raw_nm)
+                if jan_str:
+                    res["jan_dict"][sk] = jan_str
 
-                    jan_str = _extract_jan_13digits(cat_id, opt_x, raw_nm)
-                    if jan_str:
-                        res["jan_dict"][sk] = jan_str
+                # F列の商品名：】以降を取り出し、末尾の（JAN）を除去して】〜（の間の商品名のみにする
+                if raw_nm and raw_nm != "nan":
+                    res["raw_title_dict"][sk] = raw_nm
+                    nm_clean = raw_nm.split("】", 1)[-1] if "】" in raw_nm else raw_nm
+                    nm_clean = re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]\s*$', '', nm_clean).strip()
+                    res["full_title_dict"][sk] = nm_clean
 
-                    if raw_nm and raw_nm != "nan":
-                        res["raw_title_dict"][sk] = raw_nm
-                        clean_nm = clean_product_name(raw_nm)
-                        if sh == "select" and opt_x and opt_x != "nan":
-                            clean_opt = clean_product_name(opt_x)
-                            if clean_opt and clean_opt not in clean_nm:
-                                clean_nm = f"{clean_nm} {clean_opt}".strip()
-                        res["full_title_dict"][sk] = clean_nm
+                # J列(index 9):表示価格 / I列(index 8):販売価格 / Q列(index 16):原価
+                std_p = int(clean_num(r.iloc[9])) if len(r) > 9 else 0
+                if std_p > 0: res["std_price_dict"][sk] = std_p
+                sell_p = int(clean_num(r.iloc[8])) if len(r) > 8 else 0
+                if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
+                    res["default_min_map"][sk] = sell_p
+                if sk not in res["cost_dict"] or res["cost_dict"][sk] == 0:
+                    c_val = clean_num(r.iloc[16]) if len(r) > 16 else 0.0
+                    if c_val > 0: res["cost_dict"][sk] = c_val
 
-                    std_p = int(clean_num(r.get("表示価格", 0)))
-                    if std_p > 0:
-                        res["std_price_dict"][sk] = std_p
+        # 6-B. select シート（A列:商品番号 / I列:】以降の商品名 / Q列:カタログID[JAN]）
+        if "select" in s_names:
+            sdf = pd.read_excel(xls, sheet_name="select")
+            for _, r in sdf.iterrows():
+                sk = str(r.iloc[0]).strip() if len(r) > 0 and pd.notna(r.iloc[0]) else ""
+                if not sk or sk == "nan":
+                    continue
+                raw_nm = str(r.iloc[8]).strip() if len(r) > 8 and pd.notna(r.iloc[8]) else ""
+                cat_id = r.iloc[16] if len(r) > 16 else None
+                opt_d = str(r.iloc[3]).strip() if len(r) > 3 and pd.notna(r.iloc[3]) else ""
 
-                    sell_p = int(clean_num(r.get("販売価格", 0)))
-                    if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
-                        res["default_min_map"][sk] = sell_p
+                # Q列のカタログIDからJAN取得（万一空欄ならD列のカッコ内から取得）
+                jan_str = _extract_jan_13digits(cat_id, opt_d, raw_nm)
+                if jan_str:
+                    res["jan_dict"][sk] = jan_str
 
-                    if sk not in res["cost_dict"] or res["cost_dict"][sk] == 0:
-                        c_val = clean_num(r.get("原価", 0))
-                        if c_val > 0:
-                            res["cost_dict"][sk] = c_val
+                # I列の商品名：】以降の商品名そのまま
+                if raw_nm and raw_nm != "nan":
+                    res["raw_title_dict"][sk] = raw_nm
+                    nm_clean = raw_nm.split("】", 1)[-1].strip() if "】" in raw_nm else raw_nm.strip()
+                    nm_clean = re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]\s*$', '', nm_clean).strip()
+                    res["full_title_dict"][sk] = nm_clean
+
+                # K列(index 10):表示価格 / L列(index 11):販売価格 / J列(index 9):原価
+                std_p = int(clean_num(r.iloc[10])) if len(r) > 10 else 0
+                if std_p > 0: res["std_price_dict"][sk] = std_p
+                sell_p = int(clean_num(r.iloc[11])) if len(r) > 11 else 0
+                if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
+                    res["default_min_map"][sk] = sell_p
+                if sk not in res["cost_dict"] or res["cost_dict"][sk] == 0:
+                    c_val = clean_num(r.iloc[9]) if len(r) > 9 else 0.0
+                    if c_val > 0: res["cost_dict"][sk] = c_val
 
         # 7. 注文者会社名シート
         if "注文者会社名" in s_names:
@@ -687,6 +711,245 @@ def _load_order_r_all_sheets(master_path, master_mtime):
         return res
     except Exception:
         return None
+
+def get_cost_master_file_info():
+    p, m = get_order_r_master_info()
+    if p: return p, m
+    return find_file_multidir("*原価*.xls*")
+
+@st.cache_data(show_spinner=False)
+def load_cost_master(file_path, file_mtime):
+    m_p, m_t = get_order_r_master_info()
+    if m_p:
+        m_data = _load_order_r_all_sheets(m_p, m_t)
+        if m_data and m_data["cost_dict"]:
+            return m_data["cost_dict"]
+    cost_dict = {}
+    if file_path and os.path.exists(file_path):
+        try:
+            cdf = pd.read_excel(file_path)
+            c_sku = [c for c in cdf.columns if any(k in str(c) for k in ['商品管理', 'SKU', 'コード', '品番', '商品番号'])]
+            c_cost = [c for c in cdf.columns if '原価' in str(c)]
+            sku_col = c_sku[0] if c_sku else cdf.columns[0]
+            cost_col = c_cost[0] if c_cost else (cdf.columns[1] if len(cdf.columns) > 1 else None)
+            if cost_col:
+                for _, r in cdf.iterrows():
+                    sk = str(r[sku_col]).strip()
+                    co = clean_num(r[cost_col])
+                    if sk: cost_dict[sk] = co
+        except Exception: pass
+    return cost_dict
+
+def get_member_price_file_info():
+    p, m = get_order_r_master_info()
+    if p: return p, m
+    p, m = find_file_multidir("*加盟店価格*.xls*", exclude_substr="加盟店価格データ")
+    if p: return p, m
+    return find_file_multidir("*加盟店価格*.xls*")
+
+@st.cache_data(show_spinner=False)
+def load_member_price_master_v2(file_path, file_mtime):
+    m_p, m_t = get_order_r_master_info()
+    if m_p:
+        m_data = _load_order_r_all_sheets(m_p, m_t)
+        if m_data and (m_data["cust_sku_map"] or m_data["default_min_map"]):
+            return m_data["cust_sku_map"], m_data["default_min_map"]
+    cust_sku_map = {}
+    default_min_map = {}
+    if file_path and os.path.exists(file_path):
+        try:
+            mdf = pd.read_excel(file_path)
+            if len(mdf.columns) >= 14:
+                for _, r in mdf.iterrows():
+                    sku_mgmt = str(r.iloc[3]).strip() if len(r) > 3 else ""
+                    sku_num = str(r.iloc[4]).strip() if len(r) > 4 else ""
+                    skus = [s for s in [sku_mgmt, sku_num] if s and s != "nan"]
+                    if not skus: continue
+                    j_price = int(clean_num(r.iloc[9])) if len(r) > 9 else 0
+                    n_min_price = int(clean_num(r.iloc[13])) if len(r) > 13 else 0
+                    m_comp = str(r.iloc[12]).strip() if len(r) > 12 else ""
+                    for s in skus:
+                        if 50 <= n_min_price < 90000:
+                            default_min_map[s] = n_min_price
+                        if m_comp and m_comp not in ["nan", "None", "#N/A", ""]:
+                            norm_comp = re.sub(r'[\s ]+', '', m_comp)
+                            if 50 <= j_price < 90000:
+                                cust_sku_map[(m_comp, s)] = j_price
+                                cust_sku_map[(norm_comp, s)] = j_price
+        except Exception: pass
+    return cust_sku_map, default_min_map
+
+def get_lotmember_template_file_info():
+    p, m = get_order_r_master_info()
+    if p: return p, m
+    return find_file_multidir("*加盟店価格データ*.xls*")
+
+@st.cache_data(show_spinner=False)
+def load_lotmember_sku_master(file_path, file_mtime):
+    m_p, m_t = get_order_r_master_info()
+    if m_p:
+        m_data = _load_order_r_all_sheets(m_p, m_t)
+        if m_data and m_data["sku_meta"]:
+            return m_data["sku_meta"]
+    sku_meta = {}
+    if file_path and os.path.exists(file_path):
+        try:
+            ldf = pd.read_excel(file_path)
+            for _, r in ldf.drop_duplicates(subset=['商品番号']).iterrows():
+                sk = str(r.get('商品番号', '')).strip()
+                if not sk or sk == 'nan': continue
+                sku_meta[sk] = {
+                    '商品規格ID': int(clean_num(r.get('商品規格ID', 0))) if pd.notna(r.get('商品規格ID')) else "",
+                    '商品ID': int(clean_num(r.get('商品ID', 0))) if pd.notna(r.get('商品ID')) else "",
+                    '商品管理番号': str(r.get('商品管理番号', sk)).strip() if pd.notna(r.get('商品管理番号')) else sk,
+                    '商品番号': sk
+                }
+        except Exception: pass
+    return sku_meta
+
+def get_member_group_file_info():
+    p, m = get_order_r_master_info()
+    if p: return p, m
+    return find_file_multidir("*加盟店グループ管理*.xls*")
+
+@st.cache_data(show_spinner=False)
+def load_member_group_master(file_path, file_mtime):
+    m_p, m_t = get_order_r_master_info()
+    if m_p:
+        m_data = _load_order_r_all_sheets(m_p, m_t)
+        if m_data and m_data["grp_map"]:
+            return m_data["grp_map"]
+    grp_map = {}
+    if file_path and os.path.exists(file_path):
+        try:
+            gdf = pd.read_excel(file_path)
+            for _, r in gdf.iterrows():
+                c_name = str(r.get('加盟店名', '')).strip()
+                if not c_name or c_name == 'nan': continue
+                g_no = clean_code_str(r.get('グループ番号', ''))
+                m_cd = clean_code_str(r.get('加盟店コード', ''))
+                grp_map[c_name] = {'group_no': g_no, 'member_code': m_cd}
+                norm_c = re.sub(r'[\s ]+', '', c_name)
+                if norm_c not in grp_map:
+                    grp_map[norm_c] = {'group_no': g_no, 'member_code': m_cd}
+        except Exception: pass
+    return grp_map
+
+def lookup_group_info_by_comp(comp_name, grp_master_dict):
+    if not comp_name or not grp_master_dict:
+        return {"group_no": "", "member_code": ""}
+    c_trim = str(comp_name).strip()
+    if c_trim in grp_master_dict:
+        return grp_master_dict[c_trim]
+    norm_c = re.sub(r'[\s ]+', '', c_trim)
+    if norm_c in grp_master_dict:
+        return grp_master_dict[norm_c]
+    for k, v in grp_master_dict.items():
+        norm_k = re.sub(r'[\s ]+', '', str(k))
+        if norm_c and norm_k and (norm_c in norm_k or norm_k in norm_c):
+            return v
+    return {"group_no": "", "member_code": ""}
+
+def create_lotmember_csv_bytes(items_list, group_no, member_code, sku_meta_dict, default_ctrl=None):
+    out_rows = []
+    g_str = clean_code_str(group_no)
+    m_str = clean_code_str(member_code)
+    for item in items_list:
+        sk = str(item.get("商品コード", "")).strip()
+        if not sk: continue
+        if default_ctrl in ["n", "u"]:
+            ctrl = default_ctrl
+        else:
+            reg_str = str(item.get("登録区分", "更新 (u)"))
+            ctrl = "n" if ("n" in reg_str.lower() or "新規" in reg_str) else "u"
+        raw_p = item.get("登録単価", item.get("見積単価", 0))
+        u_price = int(clean_num(raw_p))
+        meta = (sku_meta_dict or {}).get(sk, {'商品規格ID': '', '商品ID': '', '商品管理番号': sk, '商品番号': sk})
+        out_rows.append({
+            'コントロールカラム': ctrl,
+            '商品規格ID': meta['商品規格ID'],
+            '商品ID': meta['商品ID'],
+            '商品管理番号': meta['商品管理番号'],
+            '商品番号': meta['商品番号'],
+            'グループ連番': g_str,
+            '加盟店コード': "",
+            '連番': 1,
+            'ロット数': 1,
+            'ロット単価': u_price
+        })
+        out_rows.append({
+            'コントロールカラム': ctrl,
+            '商品規格ID': meta['商品規格ID'],
+            '商品ID': meta['商品ID'],
+            '商品管理番号': meta['商品管理番号'],
+            '商品番号': meta['商品番号'],
+            'グループ連番': g_str,
+            '加盟店コード': m_str,
+            '連番': "",
+            'ロット数': "",
+            'ロット単価': ""
+        })
+    out_df = pd.DataFrame(out_rows, columns=LOTMEMBER_CSV_COLUMNS)
+    return out_df.to_csv(index=False, encoding="cp932", lineterminator="\r\n", errors="replace").encode("cp932")
+
+def get_rank_price_file_info():
+    p, m = get_order_r_master_info()
+    if p: return p, m
+    for pat in ["*ランク価格*.xls*", "*ランク価格*.csv", "*ランク*.xls*", "*ランク*.csv"]:
+        p, mt = find_file_multidir(pat)
+        if p: return p, mt
+    return None, 0
+
+@st.cache_data(show_spinner=False)
+def load_rank_price_master(file_path, file_mtime):
+    m_p, m_t = get_order_r_master_info()
+    if m_p:
+        m_data = _load_order_r_all_sheets(m_p, m_t)
+        if m_data and not m_data["rank_df"].empty:
+            return m_data["rank_df"]
+    if not file_path or not os.path.exists(file_path): return pd.DataFrame()
+    try:
+        if file_path.lower().endswith(".csv"):
+            for enc in ["utf-8-sig", "cp932", "shift_jis", "utf-8"]:
+                try: return pd.read_csv(file_path, encoding=enc, low_memory=False)
+                except Exception: continue
+        else: return pd.read_excel(file_path)
+    except Exception: pass
+    return pd.DataFrame()
+
+def get_jan_file_info():
+    p, m = get_order_r_master_info()
+    if p: return p, m
+    return find_file_multidir("*JAN*.xls*")
+
+@st.cache_data(show_spinner=False)
+def load_jan_master_v2(file_path, file_mtime):
+    jan_dict, full_title_dict, std_price_dict = {}, {}, {}
+    m_p, m_t = get_order_r_master_info()
+    if m_p:
+        m_data = _load_order_r_all_sheets(m_p, m_t)
+        if m_data:
+            jan_dict.update(m_data["jan_dict"])
+            full_title_dict.update(m_data["full_title_dict"])
+            std_price_dict.update(m_data["std_price_dict"])
+    return jan_dict, full_title_dict, std_price_dict
+
+def get_customer_file_info():
+    p, m = get_order_r_master_info()
+    if p: return p, m
+    return find_file_multidir("*注文者会社名*.xls*")
+
+@st.cache_data(show_spinner=False)
+def load_customer_master(file_path, file_mtime):
+    m_p, m_t = get_order_r_master_info()
+    if m_p:
+        m_data = _load_order_r_all_sheets(m_p, m_t)
+        if m_data and not m_data["customer_df"].empty:
+            return m_data["customer_df"]
+    if file_path and os.path.exists(file_path):
+        try: return pd.read_excel(file_path)
+        except Exception: pass
+    return pd.DataFrame()
 
 def get_cost_master_file_info():
     p, m = get_order_r_master_info()
@@ -2644,7 +2907,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
     for k_t, v_t in jan_title_dict.items():
         sk_trim = str(k_t).strip()
-        if sk_trim not in code_to_name_map or not code_to_name_map[sk_trim]:
+        if v_t and str(v_t).strip() not in ["", "nan"]:
             code_to_name_map[sk_trim] = str(v_t).strip()
 
     raw_calc_codes = sorted(list(set(
