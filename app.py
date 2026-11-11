@@ -152,7 +152,6 @@ def clean_product_name(val):
     return re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]', '', val).strip()
 
 def find_file_multidir(filename_pattern, exclude_substr=None):
-    # Googleドライブ同期フォルダ（GDRIVE_SYNC_DIR）を最優先で検索し、最新の更新日時も返す
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
     best_file, best_mtime = None, 0
     for d in search_dirs:
@@ -169,11 +168,10 @@ def find_file_multidir(filename_pattern, exclude_substr=None):
     return best_file, best_mtime
 
 # ========================================================
-# ★ ☁️ Googleドライブ 双方向・高速差分同期エンジン（完全修正版）
+# ★ ☁️ Googleドライブ 双方向・高速差分同期エンジン（完全統合版）
 # ========================================================
 @st.cache_data(show_spinner=False)
 def _get_gdrive_creds_info():
-    """認証情報の辞書だけをキャッシュする（通信オブジェクト自体はキャッシュしない）"""
     try:
         folder_id = st.secrets.get("folder_id", "").strip()
         raw_json = st.secrets.get("gcp_service_account_json", "")
@@ -190,7 +188,6 @@ def _get_gdrive_creds_info():
         return None, None
 
 def get_gdrive_service_and_folder():
-    """毎回新鮮な通信セッションを作成し、SSLエラーやコネクトエラーを防ぐ"""
     info, folder_id = _get_gdrive_creds_info()
     if not info or not folder_id:
         return None, None
@@ -206,14 +203,14 @@ def get_gdrive_service_and_folder():
         return None, None
 
 def sync_all_from_gdrive(force=False):
-    """ドライブ直下の未読CSV・最新マスタ・在庫データを確実に同期し、診断ログを記録する"""
+    """メインフォルダ直下（＋未取込の『済』『その他データ』内ファイル）を確実に同期する"""
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
     if not force and (time.time() - last_sync < 20):
         return True
 
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
-        st.session_state["_gdrive_diag"] = "❌ Googleドライブ未接続（st.secrets の folder_id / 認証情報を確認してください）"
+        st.session_state["_gdrive_diag"] = "❌ Googleドライブ未接続（st.secrets の設定を確認してください）"
         return False
 
     try:
@@ -229,8 +226,8 @@ def sync_all_from_gdrive(force=False):
             except Exception:
                 local_meta = {}
 
-        def _download_single(fid, target_path, copy_to_base=False):
-            req = service.files().get_media(fileId=fid)
+        def _download_single(fid, target_path, copy_to_base=False, is_gsheet=False):
+            req = service.files().export_media(fileId=fid, mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") if is_gsheet else service.files().get_media(fileId=fid)
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, req)
             done = False
@@ -246,23 +243,26 @@ def sync_all_from_gdrive(force=False):
                 except Exception:
                     pass
 
-        # ドライブ直下のファイル一覧を取得（サブフォルダは除外）
-        q = f"'{folder_id}' in parents and trashed = false"
-        res = service.files().list(
-            q=q,
-            fields="files(id, name, mimeType, modifiedTime, size)",
-            pageSize=500
-        ).execute()
-        items = res.get("files", [])
-        drive_csv_names = sorted([it.get("name") for it in items if it.get("name", "").lower().endswith(".csv")])
+        # メインフォルダ直下を取得
+        q_main = f"'{folder_id}' in parents and trashed = false"
+        res_main = service.files().list(q=q_main, fields="files(id, name, mimeType, modifiedTime)", pageSize=500).execute()
+        items = res_main.get("files", [])
+
+        # サブフォルダ（『その他データ』や、万一キャッシュから消えた分を補完するための『済』）も1階層だけ確認
+        sub_folder_ids = [it["id"] for it in items if it.get("mimeType") == "application/vnd.google-apps.folder" and it.get("name") in ("その他データ", "済")]
+        for sf_id in sub_folder_ids:
+            try:
+                res_sub = service.files().list(q=f"'{sf_id}' in parents and trashed = false", fields="files(id, name, mimeType, modifiedTime)", pageSize=300).execute()
+                items.extend(res_sub.get("files", []))
+            except Exception:
+                pass
 
         downloaded_files = []
 
-        # ① まず sales_cache.parquet の同期（更新日時が変わっていれば取得し、後でデータ件数比較で安全にマージ）
+        # ① sales_cache.parquet の同期
         for item in items:
             if item.get("name") == "sales_cache.parquet":
-                fid = item["id"]
-                mtime = item.get("modifiedTime", "")
+                fid, mtime = item["id"], item.get("modifiedTime", "")
                 t_path = os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet")
                 if force or not os.path.exists(t_path) or local_meta.get(fid) != mtime:
                     _download_single(fid, t_path, copy_to_base=False)
@@ -270,7 +270,7 @@ def sync_all_from_gdrive(force=False):
                     downloaded_files.append("sales_cache.parquet")
                 break
 
-        # ② 現在の sales_cache.parquet にすでに入っているファイル名（_source_file）を確認
+        # ② 既に sales_cache.parquet に入っている _source_file を確認
         existing_sources = set()
         for cf in [os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet"), CACHE_FILE]:
             if os.path.exists(cf):
@@ -280,43 +280,64 @@ def sync_all_from_gdrive(force=False):
                 except Exception:
                     pass
 
-        # ③ まだ parquet に入っていない売上CSVと、更新された在庫・マスタ系ファイルを確実にダウンロード
+        # ③ 未取込CSV（11/5〜11/11等）および order_r（マスター）.xlsx 等のマスタ類を同期
         ignore_prefixes = ("app", "requirements", "run_all", "silent_start", "item_class_lotmember")
+        drive_csv_names = []
+        master_detected_name = "未検出"
+
         for item in items:
             mtype = item.get("mimeType", "")
             fname = item.get("name", "")
             fid = item["id"]
             mtime = item.get("modifiedTime", "")
 
-            if mtype.startswith("application/vnd.google-apps.") or fname == "sales_cache.parquet":
+            if mtype == "application/vnd.google-apps.folder" or fname == "sales_cache.parquet":
                 continue
-            if fname.lower().startswith(ignore_prefixes) or not fname.lower().endswith((".csv", ".xlsx", ".xls", ".json", ".png")):
+
+            # Googleスプレッドシートとして order_r が置かれている場合も .xlsx として自動変換取得
+            is_gsheet = (mtype == "application/vnd.google-apps.spreadsheet")
+            if is_gsheet:
+                if "order_r" in fname.lower() or "マスター" in fname or "在庫確保" in fname or "発注検討" in fname:
+                    if not fname.lower().endswith(".xlsx"):
+                        fname = fname + ".xlsx"
+                else:
+                    continue
+
+            if fname.lower().startswith(ignore_prefixes):
                 continue
+            # スマレジ出力用の order_2026...csv は除外するが、order_r（マスター）は絶対に通す！
+            if fname.lower().startswith("order_") and "order_r" not in fname.lower() and "マスター" not in fname:
+                continue
+            if not fname.lower().endswith((".csv", ".xlsx", ".xls", ".json", ".png")):
+                continue
+
+            if "order_r" in fname.lower() or "マスター" in fname:
+                master_detected_name = fname
 
             target_path = os.path.join(GDRIVE_SYNC_DIR, fname)
             is_inventory_or_master = ("ロジザード" in fname or "在庫" in fname or "ランク" in fname or fname.lower().endswith((".xlsx", ".xls", ".json", ".png")))
 
             if fname.lower().endswith(".csv") and not is_inventory_or_master:
-                # 売上CSV：まだparquetに未登録なら、force関係なくローカルになければ絶対DL（forceなら無条件再DL）
+                drive_csv_names.append(fname)
+                # まだparquetに存在しないCSV（消えてしまった11/5〜11/10等を含む）は無条件でDL！
                 if fname not in existing_sources:
                     if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime:
-                        _download_single(fid, target_path, copy_to_base=True)
+                        _download_single(fid, target_path, copy_to_base=True, is_gsheet=False)
                         local_meta[fid] = mtime
                         downloaded_files.append(fname)
             else:
-                # 在庫CSV・Excelマスタ・JSON：更新日時が変わったか、ローカルに無ければDL
                 if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime:
-                    _download_single(fid, target_path, copy_to_base=True)
+                    _download_single(fid, target_path, copy_to_base=True, is_gsheet=is_gsheet)
                     local_meta[fid] = mtime
                     downloaded_files.append(fname)
 
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(local_meta, f, ensure_ascii=False, indent=2)
 
-        unprocessed_csvs = [c for c in drive_csv_names if c not in existing_sources and not ("ロジザード" in c or "在庫" in c or "ランク" in c)]
+        unprocessed_csvs = [c for c in sorted(list(set(drive_csv_names))) if c not in existing_sources]
         st.session_state["_gdrive_diag"] = (
-            f"☁️ ドライブ同期OK（{datetime.now().strftime('%H:%M:%S')}）｜"
-            f"ドライブ内CSV: {len(drive_csv_names)}件 ｜ "
+            f"☁️ 同期OK（{datetime.now().strftime('%H:%M:%S')}）｜"
+            f"マスターExcel: {master_detected_name} ｜ "
             f"未取込CSV: {unprocessed_csvs if unprocessed_csvs else 'なし(全て反映済)'} ｜ "
             f"今回DL: {downloaded_files if downloaded_files else '変更なし'}"
         )
@@ -327,7 +348,6 @@ def sync_all_from_gdrive(force=False):
         return False
 
 def upload_file_to_gdrive(local_path, drive_filename=None):
-    """更新されたDB（sales_cache.parquet）や見積JSON・在庫ファイルをGoogleドライブへ自動保存"""
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id or not os.path.exists(local_path):
         return False
@@ -535,12 +555,19 @@ def load_staff_target_master(file_path, file_mtime):
         except Exception:
             pass
     return targets
-    
+
+# ========================================================
+# ★ 👑 order_r（マスター）.xlsx 一括高速読込エンジン（重複完全排除・決定版）
+# ========================================================
 def get_order_r_master_info():
-    return find_file_multidir("*order_r*マスター*.xls*")
+    for pat in ["*order_r*マスター*.xls*", "*order_r*.xls*", "*マスター*.xls*"]:
+        p, m = find_file_multidir(pat)
+        if p:
+            return p, m
+    return None, 0
 
 def _extract_jan_13digits(*texts):
-    """カタログIDや文字列内のカッコ（49... / 45...）から13桁のJANコードを確実に抽出する"""
+    """カタログIDや文字列内のカッコから13桁のJANコードを確実に抽出する"""
     for val in texts:
         if pd.isna(val):
             continue
@@ -639,7 +666,7 @@ def _load_order_r_all_sheets(master_path, master_mtime):
         if "ランク価格" in s_names:
             res["rank_df"] = pd.read_excel(xls, sheet_name="ランク価格")
 
-        # 6-A. item シート（B列:商品番号 / F列:】〜（の商品名 / O列:カタログID[JAN]）
+        # 6-A. item シート（B列[1]:商品番号 / F列[5]:】〜（の商品名 / O列[14]:カタログID[JAN]）
         if "item" in s_names:
             idf = pd.read_excel(xls, sheet_name="item")
             for _, r in idf.iterrows():
@@ -649,19 +676,16 @@ def _load_order_r_all_sheets(master_path, master_mtime):
                 raw_nm = str(r.iloc[5]).strip() if len(r) > 5 and pd.notna(r.iloc[5]) else ""
                 cat_id = r.iloc[14] if len(r) > 14 else None
 
-                # O列のカタログIDからJAN取得（万一空欄ならF列のカッコ内から取得）
                 jan_str = _extract_jan_13digits(cat_id, raw_nm)
                 if jan_str:
                     res["jan_dict"][sk] = jan_str
 
-                # F列の商品名：】以降を取り出し、末尾の（JAN）を除去して】〜（の間の商品名のみにする
                 if raw_nm and raw_nm != "nan":
                     res["raw_title_dict"][sk] = raw_nm
                     nm_clean = raw_nm.split("】", 1)[-1] if "】" in raw_nm else raw_nm
                     nm_clean = re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]\s*$', '', nm_clean).strip()
                     res["full_title_dict"][sk] = nm_clean
 
-                # J列(index 9):表示価格 / I列(index 8):販売価格 / Q列(index 16):原価
                 std_p = int(clean_num(r.iloc[9])) if len(r) > 9 else 0
                 if std_p > 0: res["std_price_dict"][sk] = std_p
                 sell_p = int(clean_num(r.iloc[8])) if len(r) > 8 else 0
@@ -671,7 +695,7 @@ def _load_order_r_all_sheets(master_path, master_mtime):
                     c_val = clean_num(r.iloc[16]) if len(r) > 16 else 0.0
                     if c_val > 0: res["cost_dict"][sk] = c_val
 
-        # 6-B. select シート（A列:商品番号 / I列:】以降の商品名 / Q列:カタログID[JAN]）
+        # 6-B. select シート（A列[0]:商品番号 / I列[8]:】以降の商品名 / Q列[16]:カタログID[JAN]）
         if "select" in s_names:
             sdf = pd.read_excel(xls, sheet_name="select")
             for _, r in sdf.iterrows():
@@ -682,19 +706,16 @@ def _load_order_r_all_sheets(master_path, master_mtime):
                 cat_id = r.iloc[16] if len(r) > 16 else None
                 opt_d = str(r.iloc[3]).strip() if len(r) > 3 and pd.notna(r.iloc[3]) else ""
 
-                # Q列のカタログIDからJAN取得（万一空欄ならD列のカッコ内から取得）
                 jan_str = _extract_jan_13digits(cat_id, opt_d, raw_nm)
                 if jan_str:
                     res["jan_dict"][sk] = jan_str
 
-                # I列の商品名：】以降の商品名そのまま
                 if raw_nm and raw_nm != "nan":
                     res["raw_title_dict"][sk] = raw_nm
                     nm_clean = raw_nm.split("】", 1)[-1].strip() if "】" in raw_nm else raw_nm.strip()
                     nm_clean = re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]\s*$', '', nm_clean).strip()
                     res["full_title_dict"][sk] = nm_clean
 
-                # K列(index 10):表示価格 / L列(index 11):販売価格 / J列(index 9):原価
                 std_p = int(clean_num(r.iloc[10])) if len(r) > 10 else 0
                 if std_p > 0: res["std_price_dict"][sk] = std_p
                 sell_p = int(clean_num(r.iloc[11])) if len(r) > 11 else 0
@@ -754,8 +775,7 @@ def load_member_price_master_v2(file_path, file_mtime):
         m_data = _load_order_r_all_sheets(m_p, m_t)
         if m_data and (m_data["cust_sku_map"] or m_data["default_min_map"]):
             return m_data["cust_sku_map"], m_data["default_min_map"]
-    cust_sku_map = {}
-    default_min_map = {}
+    cust_sku_map, default_min_map = {}, {}
     if file_path and os.path.exists(file_path):
         try:
             mdf = pd.read_excel(file_path)
@@ -932,6 +952,31 @@ def load_jan_master_v2(file_path, file_mtime):
             jan_dict.update(m_data["jan_dict"])
             full_title_dict.update(m_data["full_title_dict"])
             std_price_dict.update(m_data["std_price_dict"])
+    # 万一 order_r が無い環境のみ JAN.xlsx でフォールバック
+    if not jan_dict:
+        j_p, _ = find_file_multidir("*JAN*.xls*")
+        if j_p and os.path.exists(j_p):
+            try:
+                jdf = pd.read_excel(j_p)
+                c_sku = [c for c in jdf.columns if any(k in str(c) for k in ['商品番号', '商品コード', 'SKU', '品番'])]
+                c_jan = [c for c in jdf.columns if any(k in str(c) for k in ['カタログID', 'JAN', 'JANコード'])]
+                c_name = [c for c in jdf.columns if any(k in str(c) for k in ['商品名', '品名'])]
+                c_std = [c for c in jdf.columns if any(k in str(c) for k in ['上代', '標準', '定価', '税抜上代'])]
+                s_col = c_sku[0] if c_sku else jdf.columns[0]
+                j_col = c_jan[0] if c_jan else (jdf.columns[1] if len(jdf.columns) > 1 else None)
+                n_col = c_name[0] if c_name else None
+                p_col = c_std[0] if c_std else None
+                for _, r in jdf.iterrows():
+                    sk = str(r[s_col]).strip()
+                    if not sk or sk == "nan": continue
+                    if j_col and pd.notna(r[j_col]):
+                        jan_s = _extract_jan_13digits(r[j_col])
+                        if jan_s: jan_dict[sk] = jan_s
+                    if n_col and pd.notna(r[n_col]):
+                        full_title_dict[sk] = clean_product_name(str(r[n_col]).strip())
+                    if p_col and pd.notna(r[p_col]):
+                        std_price_dict[sk] = int(clean_num(r[p_col]))
+            except Exception: pass
     return jan_dict, full_title_dict, std_price_dict
 
 def get_customer_file_info():
@@ -3125,7 +3170,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             cur_name = str(row_l.get("商品名", "")).strip() if pd.notna(row_l.get("商品名")) else ""
             cur_min = int(clean_num(row_l.get("最低下代", 0)))
 
-            if c_code != prev_code or not cur_name or cur_name == "None" or not cur_jan or cur_price == 0:
+            if c_code != prev_code or not cur_name or cur_name in ["None", c_code] or cur_price == 0:
                 auto_name, _, auto_price, auto_cost, auto_min, applied_lbl = get_sku_details(c_code, cur_rank if cur_rank != "None" else "ロット単価", sel_lot_comp)
                 cur_name, cur_price, cur_cost, cur_min, cur_rank = auto_name, int(auto_price), int(auto_cost), int(auto_min), applied_lbl
                 lot_needs_rerun = True
@@ -3333,7 +3378,7 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             cur_jan = str(row_e.get("JANコード", "")).strip() if pd.notna(row_e.get("JANコード")) else ""
             cur_min = int(clean_num(row_e.get("最低下代", 0)))
 
-            if c_code != prev_code or not cur_name or cur_name == "None" or cur_price == 0:
+            if c_code != prev_code or not cur_name or cur_name in ["None", c_code] or not cur_jan or cur_price == 0:
                 auto_name, auto_jan, auto_price, auto_cost, auto_min, applied_lbl = get_sku_details(c_code, cur_rank if cur_rank != "None" else "ロット単価", q_cust_comp)
                 cur_name, cur_jan, cur_price, cur_cost, cur_min, cur_rank = auto_name, str(auto_jan), int(auto_price), int(auto_cost), int(auto_min), applied_lbl
                 needs_rerun = True
