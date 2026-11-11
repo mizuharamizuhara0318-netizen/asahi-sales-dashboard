@@ -204,8 +204,9 @@ def get_gdrive_service_and_folder():
 
 def sync_all_from_gdrive(force=False):
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    if not force and (time.time() - last_sync < 20):
-        return True
+    # 通常の操作時は5秒間隔で自動チェック（ドライブに入れたらすぐ自動反映させる）
+    if not force and (time.time() - last_sync < 5):
+        return False
 
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
@@ -226,7 +227,10 @@ def sync_all_from_gdrive(force=False):
                 local_meta = {}
 
         def _download_single(fid, target_path, copy_to_base=False, is_gsheet=False):
-            req = service.files().export_media(fileId=fid, mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") if is_gsheet else service.files().get_media(fileId=fid)
+            if is_gsheet:
+                req = service.files().export_media(fileId=fid, mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            else:
+                req = service.files().get_media(fileId=fid, supportsAllDrives=True)
             fh = io.BytesIO()
             downloader = MediaIoBaseDownload(fh, req)
             done = False
@@ -242,20 +246,56 @@ def sync_all_from_gdrive(force=False):
                 except Exception:
                     pass
 
-        q_main = f"'{folder_id}' in parents and trashed = false"
-        res_main = service.files().list(q=q_main, fields="files(id, name, mimeType, modifiedTime)", pageSize=500).execute()
-        items = res_main.get("files", [])
+        def _list_drive(query_str):
+            return service.files().list(
+                q=query_str,
+                fields="files(id, name, mimeType, modifiedTime, shortcutDetails)",
+                pageSize=500,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute().get("files", [])
 
-        sub_folder_ids = [it["id"] for it in items if it.get("mimeType") == "application/vnd.google-apps.folder" and it.get("name") in ("その他データ", "済")]
-        for sf_id in sub_folder_ids:
+        # ① メインフォルダ直下を取得
+        items = _list_drive(f"'{folder_id}' in parents and trashed = false")
+
+        # ② サブフォルダ（その他データ・済・月別フォルダ等）もスキャン
+        sub_folders = [it["id"] for it in items if it.get("mimeType") == "application/vnd.google-apps.folder"]
+        for sf_id in sub_folders:
             try:
-                res_sub = service.files().list(q=f"'{sf_id}' in parents and trashed = false", fields="files(id, name, mimeType, modifiedTime)", pageSize=300).execute()
-                items.extend(res_sub.get("files", []))
+                items.extend(_list_drive(f"'{sf_id}' in parents and trashed = false"))
             except Exception:
                 pass
 
-        downloaded_files = []
+        # ③ ★決定打：フォルダ階層やショートカットの違いで漏れないよう、ドライブ全体から yayoi_*.csv と order_r を直接指名検索して合流！
+        try:
+            direct_yayoi = _list_drive("(name contains 'yayoi' or name contains 'order_r' or name contains 'マスター') and trashed = false")
+            items.extend(direct_yayoi)
+        except Exception:
+            pass
 
+        # ショートカットファイルがあれば実体のIDに変換し、同名ファイルは最新(modifiedTime)を優先
+        items.sort(key=lambda x: x.get("modifiedTime", ""), reverse=True)
+        unique_items = []
+        seen_names = set()
+        for it in items:
+            mtype = it.get("mimeType", "")
+            if mtype == "application/vnd.google-apps.folder":
+                continue
+            if mtype == "application/vnd.google-apps.shortcut":
+                sc_info = it.get("shortcutDetails", {})
+                if sc_info.get("targetId"):
+                    it["id"] = sc_info["targetId"]
+                    it["mimeType"] = sc_info.get("targetMimeType", "")
+            nm = it.get("name", "")
+            if nm and nm not in seen_names:
+                seen_names.add(nm)
+                unique_items.append(it)
+        items = unique_items
+
+        downloaded_files = []
+        new_csv_downloaded = False
+
+        # ④ sales_cache.parquet の同期
         for item in items:
             if item.get("name") == "sales_cache.parquet":
                 fid, mtime = item["id"], item.get("modifiedTime", "")
@@ -266,6 +306,7 @@ def sync_all_from_gdrive(force=False):
                     downloaded_files.append("sales_cache.parquet")
                 break
 
+        # ⑤ 既に sales_cache.parquet に入っている _source_file を確認
         existing_sources = set()
         for cf in [os.path.join(GDRIVE_SYNC_DIR, "sales_cache.parquet"), CACHE_FILE]:
             if os.path.exists(cf):
@@ -275,6 +316,7 @@ def sync_all_from_gdrive(force=False):
                 except Exception:
                     pass
 
+        # ⑥ 売上CSV・マスタ類を同期
         ignore_prefixes = ("app", "requirements", "run_all", "silent_start", "item_class_lotmember")
         drive_csv_names = []
         master_detected_name = "未検出"
@@ -285,13 +327,16 @@ def sync_all_from_gdrive(force=False):
             fid = item["id"]
             mtime = item.get("modifiedTime", "")
 
-            if mtype == "application/vnd.google-apps.folder" or fname == "sales_cache.parquet":
+            if fname == "sales_cache.parquet":
                 continue
 
             is_gsheet = (mtype == "application/vnd.google-apps.spreadsheet")
             if is_gsheet:
-                if "order_r" in fname.lower() or "マスター" in fname or "在庫確保" in fname or "発注検討" in fname:
-                    if not fname.lower().endswith(".xlsx"):
+                if any(k in fname.lower() for k in ["order_r", "マスター", "在庫確保", "発注検討", "yayoi"]):
+                    if "yayoi" in fname.lower():
+                        # もし弥生データがスプレッドシート形式になっていてもCSVとしてエクスポート対応
+                        pass
+                    elif not fname.lower().endswith(".xlsx"):
                         fname = fname + ".xlsx"
                 else:
                     continue
@@ -311,11 +356,12 @@ def sync_all_from_gdrive(force=False):
 
             if fname.lower().endswith(".csv") and not is_inventory_or_master:
                 drive_csv_names.append(fname)
-                if fname not in existing_sources:
-                    if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime:
-                        _download_single(fid, target_path, copy_to_base=True, is_gsheet=False)
-                        local_meta[fid] = mtime
-                        downloaded_files.append(fname)
+                # まだparquetに未登録、またはドライブ上で更新されたCSVは自動DL！
+                if (fname not in existing_sources) or (local_meta.get(fid) != mtime) or force or (not os.path.exists(target_path)):
+                    _download_single(fid, target_path, copy_to_base=True, is_gsheet=False)
+                    local_meta[fid] = mtime
+                    downloaded_files.append(fname)
+                    new_csv_downloaded = True
             else:
                 if force or not os.path.exists(target_path) or local_meta.get(fid) != mtime:
                     _download_single(fid, target_path, copy_to_base=True, is_gsheet=is_gsheet)
@@ -329,10 +375,15 @@ def sync_all_from_gdrive(force=False):
         st.session_state["_gdrive_diag"] = (
             f"☁️ 同期OK（{datetime.now().strftime('%H:%M:%S')}）｜"
             f"マスターExcel: {master_detected_name} ｜ "
+            f"検出した売上CSV: {sorted(list(set(drive_csv_names)))} ｜ "
             f"未取込CSV: {unprocessed_csvs if unprocessed_csvs else 'なし(全て反映済)'} ｜ "
             f"今回DL: {downloaded_files if downloaded_files else '変更なし'}"
         )
         st.session_state["_last_gdrive_sync_ts"] = time.time()
+
+        # ★重要：新しいCSVやマスタが1件でも落ちてきたら、ボタンを押さなくても自動でキャッシュをクリアして最新データを反映させる！
+        if new_csv_downloaded or downloaded_files:
+            st.cache_data.clear()
         return True
     except Exception as e:
         st.session_state["_gdrive_diag"] = f"❌ ドライブ同期エラー: {str(e)}"
