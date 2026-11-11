@@ -373,7 +373,27 @@ _gdrive_ok = sync_all_from_gdrive(force=False)
 # ========================================================
 # ★ 👑 order_r（マスター）.xlsx 一括高速読込エンジン（完全版）
 # ========================================================
+    hacchu_map[sku] = {
+                    "center": str(r.get("商品センター", "")).strip() if pd.notna(r.get("商品センター")) else "",
+                    "category": str(r.get("商品区分", "")).strip() if pd.notna(r.get("商品区分")) else "",
+                    "color": str(r.get("カラー", "")).strip() if pd.notna(r.get("カラー")) else "",
+                    "discontinued": str(r.get("処分品", "")).strip() if pd.notna(r.get("処分品")) else "",
+                    "order_point": round(clean_num(r.get(c_o, 0)), 1) if c_o else 0.0,
+                    "sheet_logi_stock": int(clean_num(r.get(c_r, 0))) if c_r else 0,
+                    "sheet_incoming": int(clean_num(r.get(c_s, 0))) if c_s else 0,
+                    "incoming_date": str(r.get(c_u, "")).strip() if (c_u and pd.notna(r.get(c_u))) else "",
+                    "sheet_logi_res": int(clean_num(r.get(c_v, 0))) if c_v else 0,
+                    "sheet_yayoi_res": int(clean_num(r.get(c_w, 0))) if c_w else 0,
+                    "marufuji_res": int(clean_num(r.get(c_y, 0))) if c_y else 0,
+                    "ringbell_res": int(clean_num(r.get(c_ac, 0))) if c_ac else 0,
+                    "prev_note": str(r.get(c_ad, "")).strip() if (c_ad and pd.notna(r.get(c_ad))) else "",
+                    "decision": str(r.get(c_ae, "")).strip() if (c_ae and pd.notna(r.get(c_ae))) else "",
+                    "term77_qty": int(clean_num(r.get(c_l, 0))) if c_l else 0
+                }
+    except Exception: pass
+
     return logi_map, kakuho_sum_map, pd.DataFrame(kakuho_details_list), hacchu_map
+
 def get_target_file_info():
     return find_file_multidir("*今期目標*.xls*")
 
