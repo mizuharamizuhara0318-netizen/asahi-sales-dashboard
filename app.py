@@ -350,7 +350,6 @@ def sync_all_from_gdrive(force=False):
 
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(local_meta, f, ensure_ascii=False, indent=2)
-
 st.session_state["_gdrive_diag"] = (
             f"☁️ 同期OK（{datetime.now().strftime('%H:%M:%S')}）｜"
             f"マスターExcel: {master_detected_name} ｜ "
