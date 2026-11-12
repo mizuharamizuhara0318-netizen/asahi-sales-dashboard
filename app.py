@@ -2122,7 +2122,8 @@ VIEW_MODES = [
     '🏭 在庫・確保数＆発注検討アラート',
     '✨ 新商品売上分析（直近1年）',
     '📈 商品別 前年実績比較',
-    '📊 得意先別 前年実績比較'
+    '📊 得意先別 前年実績比較',
+    '🚀 次回値上げ・価格改定シミュレーター'
 ]
 col_top1, col_top2 = st.columns([1.6, 2])
 with col_top1:
@@ -4166,4 +4167,389 @@ elif view_type == '📊 得意先別 前年実績比較':
     show_cc = comp_c[["順位", "得意先名", "担当者", "当年売上", "前年売上", "前年比", "増減額", "当年粗利", "当年数量"]].copy()
     render_universal_table(show_cc)
     st.stop()
+# ========================================================
+# ★ 🚀 次回値上げ・価格改定シミュレーター（AAAa自動見積書原紙Ⅱ 第２弾 9 連動）
+# ========================================================
+def _round_10(val):
+    try:
+        return int(round(float(val) / 10.0) * 10)
+    except Exception:
+        return 0
 
+def _roundup_100(val):
+    import math
+    try:
+        v = float(val)
+        return int(math.ceil(v / 100.0) * 100) if v > 0 else 0
+    except Exception:
+        return 0
+
+@st.cache_data(show_spinner=False)
+def load_price_revision_master(file_path, file_mtime):
+    if not file_path or not os.path.exists(file_path):
+        return pd.DataFrame()
+    try:
+        xls = pd.ExcelFile(file_path)
+        s_name = next((s for s in xls.sheet_names if "商品一覧" in s), xls.sheet_names[0])
+        raw_df = pd.read_excel(xls, sheet_name=s_name)
+        rows = []
+        for _, r in raw_df.iterrows():
+            sku = clean_code_str(r.iloc[0]) if len(r) > 0 else ""
+            if not sku:
+                continue
+            pname = str(r.iloc[1]).strip() if len(r) > 1 and pd.notna(r.iloc[1]) else ""
+            jan = _extract_jan_13digits(r.iloc[6] if len(r) > 6 else "")
+            sales_1y = int(clean_num(r.iloc[8])) if len(r) > 8 else 0
+            cur_teika = r.iloc[12] if len(r) > 12 else ""
+            cur_teika_num = int(clean_num(cur_teika)) if str(cur_teika).strip().lower() != "open" else 0
+            cur_teika_str = "open" if str(cur_teika).strip().lower() == "open" else (str(cur_teika_num) if cur_teika_num > 0 else "-")
+
+            cur_kumika = int(clean_num(r.iloc[14])) if len(r) > 14 else 0
+            cur_jitsubai = int(clean_num(r.iloc[15])) if len(r) > 15 else 0
+            cur_tsuhan = int(clean_num(r.iloc[16])) if len(r) > 16 else 0
+            cost_r = int(round(clean_num(r.iloc[17]))) if len(r) > 17 else 0
+            cur_min_s = round(clean_num(r.iloc[18]), 1) if len(r) > 18 else 0.0
+
+            v_raw = r.iloc[21] if len(r) > 21 else ""
+            v_str = str(v_raw).strip() if pd.notna(v_raw) else ""
+            v_num = 0.0
+            v_status = "価格改定(数値あり)"
+            try:
+                v_num = round(float(v_str), 1)
+                if v_num <= 0:
+                    v_status = "未設定"
+            except Exception:
+                v_num = 0.0
+                v_status = v_str if v_str and v_str.lower() != "nan" else "未設定"
+
+            rows.append({
+                "A_機種名": sku,
+                "B_商品名": pname,
+                "G_JAN": jan,
+                "I_直近1年販売数": sales_1y,
+                "M_現定価": cur_teika_str,
+                "M_現定価数値": cur_teika_num,
+                "O_現組価": cur_kumika,
+                "P_現実売": cur_jitsubai,
+                "Q_現通販": cur_tsuhan,
+                "R_原価": cost_r,
+                "S_最低下代": cur_min_s,
+                "V_ステータス区分": v_status,
+                "V_元新下代": v_num if v_num > 0 else cur_min_s
+            })
+        return pd.DataFrame(rows)
+    except Exception:
+        return pd.DataFrame()
+
+if view_type == '🚀 次回値上げ・価格改定シミュレーター':
+    st.markdown("#### 🚀 次回値上げ・価格改定シミュレーター（『AAAa自動見積書原紙Ⅱ』連動）")
+
+    rev_path, rev_mtime = find_file_multidir("*自動見積書原紙*.xls*")
+    if not rev_path:
+        rev_path, rev_mtime = find_file_multidir("*AAAa*.xls*")
+
+    col_up_rev, col_up_client = st.columns(2)
+    with col_up_rev:
+        up_rev_excel = st.file_uploader("📂 ①『AAAa自動見積書原紙Ⅱ』Excelを登録・更新（1回入れれば自動保存されます）", type=["xlsx", "xls"], key="up_rev_master_xlsx")
+        if up_rev_excel:
+            save_rev_p = os.path.join(GDRIVE_SYNC_DIR, "AAAa自動見積書原紙Ⅱ 第２弾 9.xlsx")
+            with open(save_rev_p, "wb") as f_out:
+                f_out.write(up_rev_excel.getbuffer())
+            upload_file_to_gdrive(save_rev_p, "AAAa自動見積書原紙Ⅱ 第２弾 9.xlsx")
+            st.cache_data.clear()
+            st.success("✅ 原紙Excelを保存・同期しました！")
+            st.rerun()
+
+    rev_df = load_price_revision_master(rev_path, rev_mtime)
+    if rev_df.empty:
+        st.warning("⚠️ 『AAAa自動見積書原紙Ⅱ 第２弾 9.xlsx』がまだ検出されていません。上の①の枠にドラッグ＆ドロップするか、Googleドライブの「売上ダッシュボード」フォルダに入れてください。")
+        st.stop()
+
+    # 得意先（登録会社）選択 ＆ グループ連番・加盟店コード連動
+    grp_comp_list = ["（会社を選択しない・原紙の最低下代を表示）"] + [k for k in member_group_master_dict.keys() if not re.search(r'^\s*$', str(k))]
+    c_comp1, c_comp2, c_comp3, c_comp4 = st.columns([2.2, 0.9, 0.9, 1.2])
+    with c_comp1:
+        sel_rev_comp = st.selectbox("🏢 対象の登録会社を選択（選択すると現在の自社登録単価を呼び出します）", grp_comp_list, index=0, key="rev_comp_sel")
+    grp_info_rev = lookup_group_info_by_comp(sel_rev_comp, member_group_master_dict) if sel_rev_comp != grp_comp_list[0] else {"group_no": "", "member_code": ""}
+    with c_comp2:
+        rev_grp_no = st.text_input("F列：グループ連番", value=grp_info_rev.get("group_no", ""), key=f"rev_gno_{sel_rev_comp}")
+    with c_comp3:
+        rev_mem_cd = st.text_input("G列：加盟店コード", value=grp_info_rev.get("member_code", ""), key=f"rev_mcd_{sel_rev_comp}")
+    with c_comp4:
+        show_extra_cols = st.checkbox("📋 O・P・Q・I・M列（現組価/実売/通販/販売数/定価）もすべて表示する", value=False)
+
+    # 先方（相手会社）の単価データExcel取込（商品番号・JAN・価格・加盟店コード）
+    client_jan_price_map = {}
+    client_sku_price_map = {}
+    client_mem_cd_detected = ""
+    with col_up_client:
+        up_client_excel = st.file_uploader("📥 ② 相手会社の単価データExcelを取込（商品番号・JAN・価格・加盟店コード ➔ JANで自動照合＆価格合わせ）", type=["xlsx", "xls", "csv"], key="up_client_price_file")
+        if up_client_excel:
+            try:
+                if up_client_excel.name.lower().endswith(".csv"):
+                    c_df = pd.read_csv(up_client_excel, encoding="cp932", encoding_errors="replace")
+                else:
+                    c_df = pd.read_excel(up_client_excel)
+                col_jan_c = next((c for c in c_df.columns if any(k in str(c).upper() for k in ["JAN", "ＪＡＮ", "カタログ"])), None)
+                col_sku_c = next((c for c in c_df.columns if any(k in str(c).upper() for k in ["商品番号", "商品コード", "品番", "機種", "SKU"])), None)
+                col_prc_c = next((c for c in c_df.columns if any(k in str(c) for k in ["価格", "単価", "下代", "売価", "納入"])), None)
+                col_mcd_c = next((c for c in c_df.columns if any(k in str(c) for k in ["加盟店", "コード", "取引先"])), None)
+
+                for _, r_c in c_df.iterrows():
+                    p_val = clean_num(r_c[col_prc_c]) if col_prc_c else 0
+                    if p_val <= 0:
+                        continue
+                    if col_jan_c and pd.notna(r_c[col_jan_c]):
+                        j_s = _extract_jan_13digits(r_c[col_jan_c])
+                        if j_s:
+                            client_jan_price_map[j_s] = p_val
+                    if col_sku_c and pd.notna(r_c[col_sku_c]):
+                        s_s = clean_code_str(r_c[col_sku_c])
+                        if s_s:
+                            client_sku_price_map[s_s] = p_val
+                    if col_mcd_c and pd.notna(r_c[col_mcd_c]) and not client_mem_cd_detected:
+                        client_mem_cd_detected = clean_code_str(r_c[col_mcd_c])
+                if client_mem_cd_detected and not rev_mem_cd:
+                    rev_mem_cd = client_mem_cd_detected
+                st.success(f"✅ 先方単価データ取込完了：JAN照合 {len(client_jan_price_map)}件 / 品番照合 {len(client_sku_price_map)}件（ズレがある商品は先方価格に自動合わせしました）")
+            except Exception as e:
+                st.error(f"先方データ読込エラー: {e}")
+
+    # フィルター（商品番号・V列のステータスフィルター）
+    f_c1, f_c2, f_c3 = st.columns([1.8, 1.8, 1.4])
+    all_v_statuses = sorted(rev_df["V_ステータス区分"].unique().tolist())
+    with f_c1:
+        v_filter_mode = st.radio(
+            "🎯 V列（値上げ区分）フィルター",
+            ["💰 価格改定対象（V列に数値あり）のみ", "📌 価格以外のステータス（見送り・廃番・据置等）のみ", "📋 すべて表示"],
+            horizontal=False,
+            key="rev_v_filter_mode"
+        )
+    with f_c2:
+        if v_filter_mode.startswith("📌"):
+            non_num_statuses = [s for s in all_v_statuses if s != "価格改定(数値あり)"]
+            sel_v_sub = st.multiselect("🔍 絞り込むV列ステータス（複数選択可）", non_num_statuses, default=non_num_statuses)
+        else:
+            sel_v_sub = all_v_statuses
+        kw_rev_sku = st.text_input("🔍 商品番号（A列）・商品名（B列）・JANで検索（カンマ区切りで複数指定も可）", placeholder="例: ARO-4101, ABA-507, ABO-2907...")
+    with f_c3:
+        bulk_rate_pct = st.number_input("⚡ 表示商品の新単価(V列)を現単価(S列)から一括％変更（0で個別設定維持）", min_value=0.0, max_value=200.0, value=0.0, step=1.0, help="例: 105 と入れると現単価の1.05倍をV列に一括セットします")
+        only_client_matched = st.checkbox("📥 取込した相手会社の単価データにある商品だけ表示", value=bool(client_jan_price_map or client_sku_price_map))
+
+    # 表示対象データの組み立て（JANで把握＆自社単価 vs 先方単価の自動合わせ）
+    work_rev = rev_df.copy()
+    if v_filter_mode.startswith("💰"):
+        work_rev = work_rev[work_rev["V_ステータス区分"] == "価格改定(数値あり)"]
+    elif v_filter_mode.startswith("📌"):
+        work_rev = work_rev[work_rev["V_ステータス区分"].isin(sel_v_sub)]
+
+    if kw_rev_sku.strip():
+        kws = [k.strip().upper() for k in re.split(r'[,\s、]+', kw_rev_sku.strip()) if k.strip()]
+        if kws:
+            work_rev = work_rev[work_rev.apply(lambda r: any(k in str(r["A_機種名"]).upper() or k in str(r["B_商品名"]).upper() or k in str(r["G_JAN"]) for k in kws), axis=1)]
+
+    norm_rev_comp = re.sub(r'[\s\u3000\xa0]+', '', sel_rev_comp) if sel_rev_comp != grp_comp_list[0] else ""
+    sim_rows = []
+    for _, r in work_rev.iterrows():
+        sku = r["A_機種名"]
+        jan = str(r["G_JAN"]).strip()
+        if not jan:
+            jan = str(jan_master_dict.get(sku, "")).strip()
+
+        # 自社での現在登録単価（会社選択時は加盟店価格マスタ、未選択時は原紙S列）
+        our_reg_price = float(r["S_最低下代"])
+        if sel_rev_comp != grp_comp_list[0]:
+            if (sel_rev_comp, sku) in member_cust_sku_map:
+                our_reg_price = float(member_cust_sku_map[(sel_rev_comp, sku)])
+            elif (norm_rev_comp, sku) in member_cust_sku_map:
+                our_reg_price = float(member_cust_sku_map[(norm_rev_comp, sku)])
+
+        # 相手会社の単価データ照合（JAN最優先 ➔ 無ければ商品番号）
+        client_price = None
+        if jan and jan in client_jan_price_map:
+            client_price = float(client_jan_price_map[jan])
+        elif sku in client_sku_price_map:
+            client_price = float(client_sku_price_map[sku])
+
+        if only_client_matched and client_price is None:
+            continue
+
+        # 相手会社の価格と自社価格が合わない場合は相手会社の価格にS列を合わせる！
+        price_diff_note = "一致/自社基準"
+        effective_s_price = our_reg_price
+        if client_price is not None and client_price > 0:
+            if abs(client_price - our_reg_price) >= 0.5:
+                price_diff_note = f"⚠️先方合わせ(自社:{int(our_reg_price)}→先方:{int(client_price)})"
+            else:
+                price_diff_note = "✅先方一致"
+            effective_s_price = client_price
+
+        cost_r = int(r["R_原価"]) if int(r["R_原価"]) > 0 else int(cost_master_dict.get(sku, 0))
+        cur_profit_t = round(effective_s_price - cost_r, 1)
+        cur_margin_u = (cur_profit_t / effective_s_price * 100.0) if effective_s_price > 0 else 0.0
+
+        default_new_v = round(effective_s_price * (bulk_rate_pct / 100.0), 1) if bulk_rate_pct > 0 else float(r["V_元新下代"])
+
+        sim_rows.append({
+            "選択": True,
+            "A_機種名": sku,
+            "B_商品名": r["B_商品名"],
+            "JANコード": jan,
+            "単価照合": price_diff_note,
+            "V区分": r["V_ステータス区分"],
+            "I_販売数": int(r["I_直近1年販売数"]),
+            "M_現定価": r["M_現定価"],
+            "M_現定価数値": int(r["M_現定価数値"]),
+            "O_現組価": int(r["O_現組価"]),
+            "P_現実売": int(r["P_現実売"]),
+            "Q_現通販": int(r["Q_現通販"]),
+            "R_原価": cost_r,
+            "S_現在単価": effective_s_price,
+            "T_現利益額": cur_profit_t,
+            "U_現利益率": f"{cur_margin_u:.1f}%",
+            "V_新登録単価": default_new_v
+        })
+
+    sim_base_df = pd.DataFrame(sim_rows)
+    if sim_base_df.empty:
+        st.info("条件に一致する商品がありません。フィルター条件を変更してください。")
+        st.stop()
+
+    st.caption("💡 **『V_新登録単価』**（または『S_現在単価』）のセルをダブルクリックして新しい価格を入力すると、右側の **W（値上率）・X（値上げ後利益率）・Y（新組価）・Z（新実売）・AA（新通販）・AB（新定価）** がリアルタイムに自動計算されます！")
+
+    edit_cols = ["選択", "A_機種名", "B_商品名", "JANコード", "V区分", "単価照合"]
+    if show_extra_cols:
+        edit_cols += ["I_販売数", "M_現定価", "O_現組価", "P_現実売", "Q_現通販"]
+    edit_cols += ["R_原価", "S_現在単価", "T_現利益額", "U_現利益率", "V_新登録単価"]
+
+    edited_rev_df = st.data_editor(
+        sim_base_df[edit_cols],
+        column_config={
+            "選択": st.column_config.CheckboxColumn("出力対象", default=True, width="small"),
+            "A_機種名": st.column_config.TextColumn("A:機種名", disabled=True, width="small"),
+            "B_商品名": st.column_config.TextColumn("B:商品名", disabled=True, width="medium"),
+            "JANコード": st.column_config.TextColumn("G:JANコード", disabled=True, width="medium"),
+            "V区分": st.column_config.TextColumn("V列区分", disabled=True, width="small"),
+            "単価照合": st.column_config.TextColumn("単価照合状態", disabled=True, width="medium"),
+            "R_原価": st.column_config.NumberColumn("R:原価", format="¥%d", width="small"),
+            "S_現在単価": st.column_config.NumberColumn("S:現在単価(下代)", format="¥%.1f", width="small"),
+            "T_現利益額": st.column_config.NumberColumn("T:現利益額", disabled=True, format="¥%.1f", width="small"),
+            "U_現利益率": st.column_config.TextColumn("U:現利益率", disabled=True, width="small"),
+            "V_新登録単価": st.column_config.NumberColumn("✏️ V:新最低下代(新単価)", min_value=0.0, step=1.0, format="¥%.1f", width="medium")
+        },
+        use_container_width=True,
+        hide_index=True,
+        key=f"rev_editor_{sel_rev_comp}_{v_filter_mode}_{bulk_rate_pct}_{only_client_matched}"
+    )
+
+    # 入力された V_新登録単価 に基づいて W, X, Y, Z, AA, AB 列をリアルタイム計算
+    final_calc_rows = []
+    for idx_r, r_ed in edited_rev_df.iterrows():
+        orig_r = sim_base_df.iloc[idx_r]
+        r_cost = float(clean_num(r_ed["R_原価"]))
+        s_cur = float(clean_num(r_ed["S_現在単価"]))
+        v_new = float(clean_num(r_ed["V_新登録単価"]))
+        m_num = int(orig_r["M_現定価数値"])
+
+        t_cur = round(s_cur - r_cost, 1)
+        u_cur_pct = (t_cur / s_cur * 100.0) if s_cur > 0 else 0.0
+
+        # W列: =V/S (値上率)
+        w_rate = (v_new / s_cur) if (v_new > 0 and s_cur > 0) else 0.0
+        # 新利益額 & X列: =(V-R)/V (値上げ後利益率)
+        new_profit = round(v_new - r_cost, 1) if v_new > 0 else 0.0
+        x_margin_pct = ((v_new - r_cost) / v_new * 100.0) if v_new > 0 else 0.0
+        # Y列: =ROUND(V/0.43, -1), Z列: =ROUND(V/0.45, -1), AA列: =ROUND(V/0.4, -1), AB列: =ROUNDUP(W*M, -2)
+        y_kumika = _round_10(v_new / 0.43) if v_new > 0 else 0
+        z_jitsubai = _round_10(v_new / 0.45) if v_new > 0 else 0
+        aa_tsuhan = _round_10(v_new / 0.40) if v_new > 0 else 0
+        ab_teika = _roundup_100(w_rate * m_num) if (w_rate > 0 and m_num > 0) else 0
+
+        row_out = {
+            "選択": bool(r_ed["選択"]),
+            "A:機種名": r_ed["A_機種名"],
+            "B:商品名": r_ed["B_商品名"],
+            "JANコード": r_ed["JANコード"],
+            "V列区分": r_ed["V区分"],
+            "単価照合": r_ed["単価照合"]
+        }
+        if show_extra_cols:
+            row_out.update({
+                "I:直近1年販売数": int(orig_r["I_販売数"]),
+                "M:現定価": orig_r["M_現定価"],
+                "O:現組価": int(orig_r["O_現組価"]),
+                "P:現実売": int(orig_r["P_現実売"]),
+                "Q:現通販": int(orig_r["Q_現通販"])
+            })
+        row_out.update({
+            "R:原価": int(r_cost),
+            "S:現最低下代": s_cur,
+            "T:現利益額": t_cur,
+            "U:現利益率": f"{u_cur_pct:.1f}%",
+            "V:新最低下代": v_new,
+            "新利益額": new_profit,
+            "W:値上率": f"{w_rate*100:.1f}% ({w_rate:.2f}倍)" if w_rate > 0 else "-",
+            "X:値上後利益率": f"{x_margin_pct:.1f}%" if v_new > 0 else "-",
+            "Y:新組価(0.43)": y_kumika,
+            "Z:新実売(0.45)": z_jitsubai,
+            "AA:新通販(0.4)": aa_tsuhan,
+            "AB:新定価": ab_teika if ab_teika > 0 else orig_r["M_現定価"]
+        })
+        final_calc_rows.append(row_out)
+
+    result_rev_df = pd.DataFrame(final_calc_rows)
+    selected_rev_df = result_rev_df[result_rev_df["選択"]].copy()
+
+    st.markdown("##### 📊 リアルタイム計算結果プレビュー（A, B, R, S, T, U, V, W, X, Y, Z, AA, AB列）")
+    render_universal_table(result_rev_df.drop(columns=["選択"]), max_h=440)
+
+    # 各種ダウンロード＆保存ボタン（①価格登録CSV / ②見積＆改定表Excel / ③PDF印刷画面 / ④データ保存）
+    if not selected_rev_df.empty:
+        lot_items_for_csv = [
+            {"商品コード": r["A:機種名"], "商品名": r["B:商品名"], "登録区分": "更新 (u)", "登録単価": int(round(clean_num(r["V:新最低下代"])))}
+            for _, r in selected_rev_df.iterrows() if clean_num(r["V:新最低下代"]) > 0
+        ]
+        dl_b1, dl_b2, dl_b3 = st.columns(3)
+        with dl_b1:
+            st.download_button(
+                label=f"🏷️ ① 新価格で item_class_lotmember.csv 出力 ({len(lot_items_for_csv)}件)",
+                data=create_lotmember_csv_bytes(lot_items_for_csv, rev_grp_no, rev_mem_cd, lotmember_sku_meta_dict, default_ctrl="u"),
+                file_name="item_class_lotmember.csv",
+                mime="text/csv",
+                type="primary",
+                use_container_width=True
+            )
+        with dl_b2:
+            comp_prefix = sel_rev_comp if sel_rev_comp != grp_comp_list[0] else "価格改定一覧"
+            st.download_button(
+                label="📥 ② 価格改定・新旧比較見積書（Excel）をダウンロード",
+                data=generate_excel_bytes(selected_rev_df.drop(columns=["選択"]), "価格改定見積一覧"),
+                file_name=f"価格改定見積表_{comp_prefix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        with dl_b3:
+            if st.button("💾 ③ この新価格リストを簡易見積シミュレーターへ送る（角印付き見積書・PDF発行・保存）", use_container_width=True):
+                est_staff_cur = st.session_state.get("est_staff_selector_box_v3", "水原")
+                k_items_target = f"quotation_items_{est_staff_cur}"
+                k_ver_target = f"editor_version_{est_staff_cur}"
+                transferred_items = []
+                for _, r in selected_rev_df.iterrows():
+                    v_p = int(round(clean_num(r["V:新最低下代"])))
+                    r_c = int(clean_num(r["R:原価"]))
+                    if v_p <= 0:
+                        continue
+                    transferred_items.append({
+                        "選択": False, "商品コード": r["A:機種名"], "商品名": r["B:商品名"],
+                        "JANコード": r["JANコード"], "最低下代": int(round(clean_num(r["S:現最低下代"]))),
+                        "適用ランク": "新改定単価", "数量": 1, "見積単価": v_p, "合計金額": v_p,
+                        "単価原価": r_c, "粗利額": v_p - r_c,
+                        "粗利率": f"{((v_p - r_c) / v_p * 100):.1f}%" if v_p > 0 else "-"
+                    })
+                st.session_state[k_items_target] = transferred_items
+                st.session_state[k_ver_target] = st.session_state.get(k_ver_target, 0) + 1
+                if sel_rev_comp != grp_comp_list[0]:
+                    st.session_state[f"in_cust_comp_{est_staff_cur}"] = sel_rev_comp
+                    st.session_state[f"sel_cust_choice_{est_staff_cur}"] = sel_rev_comp
+                st.success("✅ 簡易見積＆利益シミュレーターに新価格明細をセットしました！表示モードを『🧮 簡易見積＆利益シミュレーター』に切り替えると、角印付きExcel・PDF見積書の出力と見積保存がそのまま行えます。")
+    st.stop()
