@@ -368,7 +368,7 @@ def sync_all_from_gdrive(force=False):
 def upload_file_to_gdrive(local_path, drive_filename=None):
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id or not os.path.exists(local_path):
-        return False
+       return False
     try:
         from googleapiclient.http import MediaFileUpload
         fname = drive_filename or os.path.basename(local_path)
