@@ -204,7 +204,7 @@ def get_gdrive_service_and_folder():
 
 def sync_all_from_gdrive(force=False):
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    if not force and (time.time() - last_sync < 30):
+    if not force and (time.time() - last_sync < 180):
         return True
 
     service, folder_id = get_gdrive_service_and_folder()
