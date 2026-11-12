@@ -2741,8 +2741,9 @@ def show_product_inventory_dialog(sku_code, prod_name):
 # ========================================================
 # ★ 🧮 簡易見積＆利益シミュレーター（＋ 🏷️ 加盟店価格登録CSV作成）
 # ========================================================
-if view_type == '🧮 簡易見積＆利益シミュレーター':
-    code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
+@st.cache_data(show_spinner=False)
+def _build_simulator_master_cache(_df_len, jan_title_dict, cost_master_dict, jan_master_dict, member_default_min_map, lotmember_sku_meta_dict):
+    code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict() if not df.empty else {}
     for k_t, v_t in jan_title_dict.items():
         sk_trim = str(k_t).strip()
         if v_t and str(v_t).strip() not in ["", "nan"]:
@@ -2766,6 +2767,12 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 parent_sku_candidates.add(c)
                 break
     all_calc_codes = [c for c in raw_calc_codes if c not in parent_sku_candidates]
+    return code_to_name_map, all_calc_codes
+
+if view_type == '🧮 簡易見積＆利益シミュレーター':
+    code_to_name_map, all_calc_codes = _build_simulator_master_cache(
+        len(df), jan_title_dict, cost_master_dict, jan_master_dict, member_default_min_map, lotmember_sku_meta_dict
+    )
 
     STANDARD_RANKS = ["ロット単価", "1.05倍", "1.07倍", "1.1倍", "1.15倍", "1.2倍", "1.25倍", "1.3倍", "1.35倍", "1.4倍", "1.45倍", "1.5倍", "0.9倍"]
     RANK_MULTIPLIERS = {"1.05倍": 1.05, "1.07倍": 1.07, "1.1倍": 1.10, "1.15倍": 1.15, "1.2倍": 1.20, "1.25倍": 1.25, "1.3倍": 1.30, "1.35倍": 1.35, "1.4倍": 1.40, "1.45倍": 1.45, "1.5倍": 1.50, "0.9倍": 0.90}
