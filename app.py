@@ -151,13 +151,14 @@ def clean_product_name(val):
     if "】" in val: val = val.split("】", 1)[-1]
     return re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]', '', val).strip()
 
-@st.cache_data(ttl=120, show_spinner=False)
 def find_file_multidir(filename_pattern, exclude_substr=None):
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
     best_file, best_mtime = None, 0
     for d in search_dirs:
         if os.path.exists(d):
             fl = glob.glob(os.path.join(d, filename_pattern))
+            if not fl:
+                fl = glob.glob(os.path.join(d, "**", filename_pattern), recursive=True)
             if exclude_substr and fl:
                 fl = [f for f in fl if exclude_substr not in os.path.basename(f)]
             for f in fl:
@@ -203,7 +204,7 @@ def get_gdrive_service_and_folder():
 
 def sync_all_from_gdrive(force=False):
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    if not force and (time.time() - last_sync < 180):
+    if not force and (time.time() - last_sync < 30):
         return True
 
     service, folder_id = get_gdrive_service_and_folder()
@@ -1040,7 +1041,7 @@ def load_customer_master(file_path, file_mtime):
         try: return pd.read_excel(file_path)
         except Exception: pass
     return pd.DataFrame()
-@st.cache_data(show_spinner=False)
+
 def get_hanko_bytes():
     for d in [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]:
         if os.path.exists(d):
@@ -1357,7 +1358,7 @@ def finalize_sales_df(df, cost_master, code_name_dict=None):
         df["原価合計"] = (df["数量"] * df["単価原価"]).round().astype(int)
         df["粗利額"] = df["金額"] - df["原価合計"]
     return df
-@st.cache_data(ttl=60, show_spinner=False)
+
 def _get_data_files_signature():
     sig = []
     for d in [GDRIVE_SYNC_DIR, BASE_DIR]:
@@ -2741,9 +2742,8 @@ def show_product_inventory_dialog(sku_code, prod_name):
 # ========================================================
 # ★ 🧮 簡易見積＆利益シミュレーター（＋ 🏷️ 加盟店価格登録CSV作成）
 # ========================================================
-@st.cache_data(show_spinner=False)
-def _build_simulator_master_cache(_df_len, jan_title_dict, cost_master_dict, jan_master_dict, member_default_min_map, lotmember_sku_meta_dict):
-    code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict() if not df.empty else {}
+if view_type == '🧮 簡易見積＆利益シミュレーター':
+    code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
     for k_t, v_t in jan_title_dict.items():
         sk_trim = str(k_t).strip()
         if v_t and str(v_t).strip() not in ["", "nan"]:
@@ -2759,11 +2759,6 @@ def _build_simulator_master_cache(_df_len, jan_title_dict, cost_master_dict, jan
     )))
     if "ABA-40" in raw_calc_codes: raw_calc_codes.remove("ABA-40")
     if "" in raw_calc_codes: raw_calc_codes.remove("")
-
-if view_type == '🧮 簡易見積＆利益シミュレーター':
-    code_to_name_map, all_calc_codes = _build_simulator_master_cache(
-        len(df), jan_title_dict, cost_master_dict, jan_master_dict, member_default_min_map, lotmember_sku_meta_dict
-    )
 
     parent_sku_candidates = set()
     for c in raw_calc_codes:
@@ -4161,4 +4156,6 @@ elif view_type == '📊 得意先別 前年実績比較':
     comp_c.insert(0, "順位", range(1, len(comp_c) + 1))
     if limit_val != "全件": comp_c = comp_c.head(int(limit_val))
     show_cc = comp_c[["順位", "得意先名", "担当者", "当年売上", "前年売上", "前年比", "増減額", "当年粗利", "当年数量"]].copy()
-    
+    render_universal_table(show_cc)
+    st.stop()
+
