@@ -348,7 +348,7 @@ def sync_all_from_gdrive(force=False):
                     local_meta[fid] = mtime
                     downloaded_files.append(fname)
 
-with open(meta_path, "w", encoding="utf-8") as f:
+    with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(local_meta, f, ensure_ascii=False, indent=2)
 
         st.session_state["_gdrive_diag"] = (
