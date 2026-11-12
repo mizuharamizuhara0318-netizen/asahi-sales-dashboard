@@ -1041,6 +1041,7 @@ def load_customer_master(file_path, file_mtime):
         except Exception: pass
     return pd.DataFrame()
 
+@st.cache_data(show_spinner=False)
 def get_hanko_bytes():
     for d in [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]:
         if os.path.exists(d):
@@ -1358,6 +1359,7 @@ def finalize_sales_df(df, cost_master, code_name_dict=None):
         df["粗利額"] = df["金額"] - df["原価合計"]
     return df
 
+@st.cache_data(ttl=60, show_spinner=False)  
 def _get_data_files_signature():
     sig = []
     for d in [GDRIVE_SYNC_DIR, BASE_DIR]:
