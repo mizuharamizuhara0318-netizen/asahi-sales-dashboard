@@ -2760,15 +2760,6 @@ def _build_simulator_master_cache(_df_len, jan_title_dict, cost_master_dict, jan
     if "ABA-40" in raw_calc_codes: raw_calc_codes.remove("ABA-40")
     if "" in raw_calc_codes: raw_calc_codes.remove("")
 
-    parent_sku_candidates = set()
-    for c in raw_calc_codes:
-        for other in raw_calc_codes:
-            if other != c and other.startswith(c) and len(other) > len(c):
-                parent_sku_candidates.add(c)
-                break
-    all_calc_codes = [c for c in raw_calc_codes if c not in parent_sku_candidates]
-    return code_to_name_map, all_calc_codes
-
 if view_type == '🧮 簡易見積＆利益シミュレーター':
     code_to_name_map, all_calc_codes = _build_simulator_master_cache(
         len(df), jan_title_dict, cost_master_dict, jan_master_dict, member_default_min_map, lotmember_sku_meta_dict
