@@ -4161,5 +4161,4 @@ elif view_type == '📊 得意先別 前年実績比較':
     comp_c.insert(0, "順位", range(1, len(comp_c) + 1))
     if limit_val != "全件": comp_c = comp_c.head(int(limit_val))
     show_cc = comp_c[["順位", "得意先名", "担当者", "当年売上", "前年売上", "前年比", "増減額", "当年粗利", "当年数量"]].copy()
-    render_universal_table(show_cc)
-    st.stop()
+    
