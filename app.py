@@ -151,14 +151,13 @@ def clean_product_name(val):
     if "】" in val: val = val.split("】", 1)[-1]
     return re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]', '', val).strip()
 
+@st.cache_data(ttl=120, show_spinner=False)
 def find_file_multidir(filename_pattern, exclude_substr=None):
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
     best_file, best_mtime = None, 0
     for d in search_dirs:
         if os.path.exists(d):
             fl = glob.glob(os.path.join(d, filename_pattern))
-            if not fl:
-                fl = glob.glob(os.path.join(d, "**", filename_pattern), recursive=True)
             if exclude_substr and fl:
                 fl = [f for f in fl if exclude_substr not in os.path.basename(f)]
             for f in fl:
