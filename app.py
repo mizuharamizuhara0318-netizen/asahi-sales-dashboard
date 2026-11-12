@@ -351,7 +351,7 @@ def sync_all_from_gdrive(force=False):
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(local_meta, f, ensure_ascii=False, indent=2)
 
- 　st.session_state["_gdrive_diag"] = (
+st.session_state["_gdrive_diag"] = (
             f"☁️ 同期OK（{datetime.now().strftime('%H:%M:%S')}）｜"
             f"マスターExcel: {master_detected_name} ｜ "
             f"直下の売上CSV: {sorted(drive_csv_names)} ｜ "
@@ -363,7 +363,7 @@ def sync_all_from_gdrive(force=False):
         return True
     except Exception as e:
         st.session_state["_gdrive_diag"] = f"❌ ドライブ同期エラー: {str(e)}"
-        return False
+        return False 　
 
 def upload_file_to_gdrive(local_path, drive_filename=None):
     service, folder_id = get_gdrive_service_and_folder()
