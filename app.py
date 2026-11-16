@@ -5306,7 +5306,280 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         if hdr_df_in.empty:
             st.info("該当するデータがありません。")
             return
-...（中略：ここはそのまま）...
+
+        order_details_map = {}
+        for oid_val, grp in det_df_in.groupby("受注ID"):
+            items = []
+            for _, r in grp.iterrows():
+                items.append({
+                    "sku": str(r.get("商品コード", "")),
+                    "name": str(r.get("商品名", "")),
+                    "jan": str(r.get("JANコード", "")),
+                    "qty": int(clean_num(r.get("数量", 0))),
+                    "price": int(clean_num(r.get("単価(税別)", 0))),
+                    "amt": int(clean_num(r.get("金額(税別)", 0))),
+                    "cost": int(clean_num(r.get("原価合計", 0))),
+                    "prof": int(clean_num(r.get("粗利額", 0))),
+                    "mgn": str(r.get("粗利率", "-"))
+                })
+            order_details_map[str(oid_val)] = items
+
+        comp_summary_map = {}
+        for comp_val, grp in det_df_in.groupby("得意先名"):
+            p_agg = grp.groupby(["商品コード", "商品名", "JANコード"], as_index=False).agg(
+                cnt=("受注ID", "nunique"),
+                qty=("数量", "sum"),
+                amt=("金額(税別)", "sum"),
+                cost=("原価合計", "sum"),
+                prof=("粗利額", "sum")
+            ).sort_values("amt", ascending=False)
+            c_items = []
+            for _, r in p_agg.iterrows():
+                a_v = int(r["amt"])
+                p_v = int(r["prof"])
+                m_str = f"{(p_v / a_v * 100):.1f}%" if a_v > 0 else "-"
+                c_items.append({
+                    "sku": str(r["商品コード"]),
+                    "name": str(r["商品名"]),
+                    "jan": str(r["JANコード"]),
+                    "cnt": int(r["cnt"]),
+                    "qty": int(r["qty"]),
+                    "amt": a_v,
+                    "cost": int(r["cost"]),
+                    "prof": p_v,
+                    "mgn": m_str
+                })
+            comp_summary_map[str(comp_val)] = c_items
+
+        disp_cols = [c for c in hdr_df_in.columns if c != "粗利率_数値"]
+        num_cols = {"点数合計", "商品代金(税別)", "原価合計", "粗利額", "粗利率"}
+
+        ths = "".join([
+            f"<th class='{'num' if c in num_cols else ''}'>{html.escape(str(c))}</th>"
+            for c in disp_cols
+        ])
+
+        trs_list = []
+        hdr_meta_map = {}
+        for _, r in hdr_df_in.iterrows():
+            oid_str = str(r.get("受注ID", ""))
+            comp_str = str(r.get("得意先名", ""))
+            hdr_meta_map[oid_str] = {
+                "oid": oid_str,
+                "ec_oid": str(r.get("受注番号", "")),
+                "comp": comp_str,
+                "status": str(r.get("受注ステータス", "")),
+                "badge": str(r.get("区分", "")),
+                "ord_dt": str(r.get("受注日時", "")),
+                "hasso_dt": str(r.get("出荷予定日", "")),
+                "commit_dt": str(r.get("出荷日", "")),
+                "staff": str(r.get("担当者", "")),
+                "qty": int(clean_num(r.get("点数合計", 0))),
+                "amt": int(clean_num(r.get("商品代金(税別)", 0))),
+                "cost": int(clean_num(r.get("原価合計", 0))),
+                "prof": int(clean_num(r.get("粗利額", 0))),
+                "mgn": str(r.get("粗利率", "-"))
+            }
+            tds = []
+            for c in disp_cols:
+                val = r[c]
+                if c in ["商品代金(税別)", "原価合計", "粗利額", "点数合計"]:
+                    txt = f"{int(clean_num(val)):,}"
+                    tds.append(f"<td class='num'>{txt}</td>")
+                elif c == "粗利率":
+                    tds.append(f"<td class='num'><b>{html.escape(str(val))}</b></td>")
+                elif c in ["得意先名", "注文商品内訳(抜粋)"]:
+                    safe_oid = html.escape(oid_str, quote=True)
+                    tds.append(
+                        f"<td><a href='javascript:void(0);' class='pop-link' onclick='openOrderModal(\"{safe_oid}\")'>"
+                        f"🔍 {html.escape(str(val))}</a></td>"
+                    )
+                else:
+                    tds.append(f"<td>{html.escape(str(val))}</td>")
+            trs_list.append("<tr>" + "".join(tds) + "</tr>")
+
+        payload_json = json.dumps({
+            "headers": hdr_meta_map,
+            "details": order_details_map,
+            "comp_summary": comp_summary_map
+        }, ensure_ascii=False)
+
+        html_code = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+            body {{ font-family: "Meiryo UI", "Hiragino Sans", sans-serif; margin: 0; padding: 0; color: #0f172a; }}
+            .tbl-wrap {{ max-height: {max_h}px; overflow: auto; border: 1px solid #cbd5e1; border-radius: 6px; }}
+            table.main-tbl {{ border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }}
+            table.main-tbl th {{
+                position: sticky; top: 0; z-index: 10; background: #e2e8f0; color: #0f172a;
+                font-weight: 700; padding: 8px 10px; border-bottom: 2px solid #94a3b8;
+                border-right: 1px solid #cbd5e1; text-align: left; white-space: nowrap;
+            }}
+            table.main-tbl td {{
+                padding: 7px 10px; border-bottom: 1px solid #e2e8f0; border-right: 1px solid #f1f5f9;
+                white-space: nowrap; background: #ffffff;
+            }}
+            table.main-tbl tr:nth-child(even) td {{ background: #f8fafc; }}
+            table.main-tbl tr:hover td {{ background: #eff6ff; }}
+            .num {{ text-align: right !important; font-variant-numeric: tabular-nums; }}
+            .pop-link {{
+                color: #1d4ed8; font-weight: 700; text-decoration: none; cursor: pointer;
+                display: inline-block; padding: 2px 4px; border-radius: 4px;
+            }}
+            .pop-link:hover {{ background: #dbeafe; text-decoration: underline; }}
+            .modal-backdrop {{
+                display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                background: rgba(15, 23, 42, 0.55); z-index: 9999; align-items: center; justify-content: center;
+            }}
+            .modal-card {{
+                background: #ffffff; width: 94%; max-width: 1060px; max-height: 88vh;
+                border-radius: 10px; box-shadow: 0 20px 30px rgba(0,0,0,0.25);
+                display: flex; flex-direction: column; overflow: hidden;
+            }}
+            .modal-hdr {{
+                display: flex; justify-content: space-between; align-items: center;
+                padding: 14px 20px; border-bottom: 1px solid #e2e8f0; background: #f8fafc;
+            }}
+            .modal-title {{ font-size: 17px; font-weight: 800; color: #0f172a; }}
+            .close-btn {{
+                font-size: 22px; font-weight: bold; color: #64748b; cursor: pointer;
+                border: none; background: none; line-height: 1; padding: 2px 8px;
+            }}
+            .close-btn:hover {{ color: #0f172a; }}
+            .modal-body {{ padding: 16px 20px; overflow-y: auto; }}
+            .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }}
+            .kpi-box {{ border: 1px solid #cbd5e1; border-radius: 7px; padding: 10px 12px; background: #fff; }}
+            .kpi-lbl {{ font-size: 11.5px; color: #475569; font-weight: 600; }}
+            .kpi-val {{ font-size: 19px; font-weight: 800; margin-top: 3px; }}
+            .kpi-sub {{ font-size: 11px; color: #64748b; margin-top: 3px; }}
+            .sec-title {{ font-size: 13.5px; font-weight: 800; margin: 12px 0 6px 0; color: #1e293b; }}
+            table.sub-tbl {{ width: 100%; border-collapse: collapse; font-size: 12.5px; margin-bottom: 12px; }}
+            table.sub-tbl th {{ background: #f1f5f9; padding: 7px 10px; border: 1px solid #cbd5e1; text-align: left; }}
+            table.sub-tbl td {{ padding: 6px 10px; border: 1px solid #e2e8f0; }}
+        </style>
+        </head>
+        <body>
+            <div class="tbl-wrap">
+                <table class="main-tbl">
+                    <thead><tr>{ths}</tr></thead>
+                    <tbody>{"".join(trs_list)}</tbody>
+                </table>
+            </div>
+
+            <div id="orderModal" class="modal-backdrop" onclick="if(event.target===this)closeOrderModal()">
+                <div class="modal-card">
+                    <div class="modal-hdr">
+                        <div class="modal-title" id="mTitle">🏢 注文詳細</div>
+                        <button class="close-btn" onclick="closeOrderModal()">×</button>
+                    </div>
+                    <div class="modal-body" id="mBody"></div>
+                </div>
+            </div>
+
+            <script>
+            const DATA = {payload_json};
+            function fmtNum(n) {{ return Number(n || 0).toLocaleString(); }}
+
+            function openOrderModal(oid) {{
+                const h = DATA.headers[oid];
+                if (!h) return;
+                const items = DATA.details[oid] || [];
+                const compItems = DATA.comp_summary[h.comp] || [];
+
+                document.getElementById("mTitle").innerHTML =
+                    `🏢 【${{h.comp}}】 注文商品・粗利ステータス詳細 <span style="font-size:13px; font-weight:600; color:#2563eb; margin-left:8px;">${{h.badge}}（受注ID: ${{h.oid}}）</span>`;
+
+                let rowsHtml = items.map(it => `
+                    <tr>
+                        <td><b>${{it.sku}}</b></td>
+                        <td>${{it.name}}</td>
+                        <td>${{it.jan}}</td>
+                        <td class="num"><b>${{fmtNum(it.qty)}}</b></td>
+                        <td class="num">¥${{fmtNum(it.price)}}</td>
+                        <td class="num"><b>¥${{fmtNum(it.amt)}}</b></td>
+                        <td class="num">¥${{fmtNum(it.cost)}}</td>
+                        <td class="num" style="color:#15803d; font-weight:700;">¥${{fmtNum(it.prof)}}</td>
+                        <td class="num"><b>${{it.mgn}}</b></td>
+                    </tr>
+                `).join("");
+
+                let compRowsHtml = compItems.map(it => `
+                    <tr>
+                        <td><b>${{it.sku}}</b></td>
+                        <td>${{it.name}}</td>
+                        <td>${{it.jan}}</td>
+                        <td class="num">${{fmtNum(it.cnt)}}回</td>
+                        <td class="num"><b>${{fmtNum(it.qty)}}</b></td>
+                        <td class="num"><b>¥${{fmtNum(it.amt)}}</b></td>
+                        <td class="num">¥${{fmtNum(it.cost)}}</td>
+                        <td class="num" style="color:#15803d; font-weight:700;">¥${{fmtNum(it.prof)}}</td>
+                        <td class="num"><b>${{it.mgn}}</b></td>
+                    </tr>
+                `).join("");
+
+                document.getElementById("mBody").innerHTML = `
+                    <div class="kpi-grid">
+                        <div class="kpi-box" style="border-top:4px solid #2563eb;">
+                            <div class="kpi-lbl">💰 今回伝票 商品代金(税別)</div>
+                            <div class="kpi-val" style="color:#1d4ed8;">¥${{fmtNum(h.amt)}}</div>
+                            <div class="kpi-sub">受注日時: ${{h.ord_dt || '-'}} | 担当: ${{h.staff || '-'}}</div>
+                        </div>
+                        <div class="kpi-box" style="border-top:4px solid #64748b;">
+                            <div class="kpi-lbl">📦 注文点数 / 出荷日程</div>
+                            <div class="kpi-val">${{fmtNum(h.qty)}} 個（${{items.length}} 品目）</div>
+                            <div class="kpi-sub">出荷予定: ${{h.hasso_dt || '-'}} | 出荷日: ${{h.commit_dt || '-'}}</div>
+                        </div>
+                        <div class="kpi-box" style="border-top:4px solid #dc2626;">
+                            <div class="kpi-lbl">🏭 原価合計(税別)</div>
+                            <div class="kpi-val" style="color:#b91c1c;">¥${{fmtNum(h.cost)}}</div>
+                            <div class="kpi-sub">ステータス: ${{h.status}}</div>
+                        </div>
+                        <div class="kpi-box" style="border-top:4px solid #16a34a;">
+                            <div class="kpi-lbl">✨ 粗利額 ＆ 粗利率</div>
+                            <div class="kpi-val" style="color:#15803d;">¥${{fmtNum(h.prof)}}（${{h.mgn}}）</div>
+                            <div class="kpi-sub">受注番号: ${{h.ec_oid}}</div>
+                        </div>
+                    </div>
+
+                    <div class="sec-title">🛒 ① この伝票（受注ID: ${{h.oid}}）の注文商品内訳</div>
+                    <table class="sub-tbl">
+                        <thead>
+                            <tr>
+                                <th>商品コード</th><th>商品名</th><th>JANコード</th>
+                                <th class="num">数量</th><th class="num">単価(税別)</th>
+                                <th class="num">金額(税別)</th><th class="num">原価合計</th>
+                                <th class="num">粗利額</th><th class="num">粗利率</th>
+                            </tr>
+                        </thead>
+                        <tbody>${{rowsHtml}}</tbody>
+                    </table>
+
+                    <div class="sec-title">🏆 ② 【${{h.comp}}】の期間内・全注文商品ランキング（全 ${{compItems.length}} 品目）</div>
+                    <table class="sub-tbl">
+                        <thead>
+                            <tr>
+                                <th>商品コード</th><th>商品名</th><th>JANコード</th>
+                                <th class="num">注文回数</th><th class="num">合計数量</th>
+                                <th class="num">合計金額(税別)</th><th class="num">原価合計</th>
+                                <th class="num">粗利額</th><th class="num">粗利率</th>
+                            </tr>
+                        </thead>
+                        <tbody>${{compRowsHtml}}</tbody>
+                    </table>
+                `;
+                document.getElementById("orderModal").style.display = "flex";
+            }}
+
+            function closeOrderModal() {{
+                document.getElementById("orderModal").style.display = "none";
+            }}
+            </script>
+        </body>
+        </html>
+        """
         components.html(html_code, height=max_h + 30, scrolling=False)
 
     tab_b2b_1, tab_b2b_2, tab_b2b_3 = st.tabs([
