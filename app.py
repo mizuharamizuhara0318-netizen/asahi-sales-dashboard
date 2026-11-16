@@ -4881,24 +4881,40 @@ def get_valid_b2b_access_token():
             return new_tok
     return acc_tok
 
-@st.cache_data(ttl=180, show_spinner=False)
-def fetch_b2b_orders_from_api(date_from_str, date_to_str, access_token):
-    if not access_token:
-        return [], "アクセストークンが未設定です"
-    all_orders = []
-    headers = {"Authorization": f"Bearer {access_token}"}
+B2B_ORDERS_CACHE_FILE = os.path.join(GDRIVE_SYNC_DIR, "b2b_orders_cache.json")
 
-    # 10月末受注→11月出荷分も漏れなく拾えるよう、開始日の14日前から取得してPython側で厳密フィルタリング
+def _load_b2b_orders_disk_cache():
+    if os.path.exists(B2B_ORDERS_CACHE_FILE):
+        try:
+            with open(B2B_ORDERS_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"orders_map": {}, "updated_at": ""}
+
+def _save_b2b_orders_disk_cache(orders_map):
+    now_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    payload = {"orders_map": orders_map, "updated_at": now_str}
     try:
-        dt_from_buf = (pd.to_datetime(date_from_str) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+        with open(B2B_ORDERS_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
     except Exception:
-        dt_from_buf = date_from_str
+        pass
+    return now_str
+
+def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=30):
+    if not access_token:
+        return [], "アクセストークンが未設定です", ""
+    cache_data = _load_b2b_orders_disk_cache()
+    orders_map = cache_data.get("orders_map", {})
+    headers = {"Authorization": f"Bearer {access_token}"}
 
     offset = 0
     limit = 50
-    for _ in range(50):  # 最大2,500件（50件×50ページ）
+    prog_bar = st.progress(0, text="スマレジEC・B2Bから受注データを取得しています...")
+    for page_i in range(max_pages):
         q_params = urllib.parse.urlencode({
-            "order_date_from": f"{dt_from_buf} 00:00:00",
+            "order_date_from": f"{date_from_str} 00:00:00",
             "order_date_to": f"{date_to_str} 23:59:59",
             "limit": limit,
             "offset": offset
@@ -4911,15 +4927,23 @@ def fetch_b2b_orders_from_api(date_from_str, date_to_str, access_token):
             orders_batch = data.get("orders", [])
             if not orders_batch:
                 break
-            all_orders.extend(orders_batch)
+            for od in orders_batch:
+                oid = str(od.get("serial_order_id", "")).strip()
+                if oid:
+                    orders_map[oid] = od
+            prog_bar.progress(min(1.0, (page_i + 1) / max_pages), text=f"取得中... ({len(orders_map):,} 件読込済)")
             if len(orders_batch) < limit:
                 break
             offset += limit
-            time.sleep(1.05)  # 仕様書ルール：連続アクセス時は1秒以上のスリープを厳守
+            time.sleep(1.02)
         except Exception as e:
-            return all_orders, f"API通信エラー: {str(e)}"
+            prog_bar.empty()
+            up_str = _save_b2b_orders_disk_cache(orders_map)
+            return list(orders_map.values()), f"API通信エラー: {str(e)}", up_str
 
-    return all_orders, "OK"
+    prog_bar.empty()
+    up_str = _save_b2b_orders_disk_cache(orders_map)
+    return list(orders_map.values()), "OK", up_str
 
 if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)':
     st.markdown("#### ⚡ 楽楽B2B（スマレジEC・B2B）リアルタイム受注 ＆ 見込み売上速報")
@@ -4949,7 +4973,6 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 if in_auth_code.strip():
                     ok, res_obj = exchange_b2b_code_for_token(in_auth_code.strip())
                     if ok:
-                        st.cache_data.clear()
                         st.success("✅ アクセストークンの取得・保存に成功しました！")
                         time.sleep(0.5)
                         st.rerun()
@@ -4962,7 +4985,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     # 検索期間・集計基準・ステータス指定
     now_d = datetime.now().date()
     first_d = datetime(now_d.year, now_d.month, 1).date()
-    c_ap1, c_ap2, c_ap3, c_ap4, c_ap5 = st.columns([1.1, 1.1, 1.5, 1.5, 1.1])
+    c_ap1, c_ap2, c_ap3, c_ap4, c_ap5, c_ap6 = st.columns([1.0, 1.0, 1.4, 1.3, 1.2, 1.1])
     with c_ap1:
         api_d_from = st.date_input("📅 開始日", value=first_d, key="b2b_api_d_from")
     with c_ap2:
@@ -4971,25 +4994,40 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         date_basis_mode = st.selectbox(
             "📊 期間集計の基準日",
             ["🚚 出荷日基準（＋未出荷は受注日）", "🛒 受注日基準（注文日ベース）"],
-            index=0,
-            help="『出荷日基準』にすると、10月注文→11月出荷の伝票も含まれ、B2B管理画面の売上集計と一致します。"
+            index=0
         )
     with c_ap4:
         api_status_filter = st.selectbox(
             "🎯 ステータス絞り込み",
             ["（すべて表示）", "⏳ 未出荷（見込み・出荷待ち）のみ", "✅ 出荷完了（売上確定済）のみ", "🆕 本日受注分のみ"]
         )
-    with c_ap5:
-        st.write("")
-        if st.button("🔄 今すぐB2B最新受注を取得", type="primary", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
 
     d_from_str = api_d_from.strftime("%Y-%m-%d")
     d_to_str = api_d_to.strftime("%Y-%m-%d")
 
-    with st.spinner("スマレジEC・B2Bからリアルタイム受注データを取得中..."):
-        raw_orders, api_msg = fetch_b2b_orders_from_api(d_from_str, d_to_str, current_token)
+    cache_obj = _load_b2b_orders_disk_cache()
+    cached_orders_list = list(cache_obj.get("orders_map", {}).values())
+    last_up_str = cache_obj.get("updated_at", "未取得")
+    api_msg = "OK"
+
+    with c_ap5:
+        st.write("")
+        if st.button("⚡ 直近3日分だけ高速更新(約2秒)", type="primary", use_container_width=True):
+            quick_from = (now_d - pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, d_to_str, current_token, max_pages=5)
+    with c_ap6:
+        st.write("")
+        if st.button("🔄 期間全体を再取得", use_container_width=True):
+            buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=35)
+
+    # 初回のみキャッシュが空なら自動取得（2回目以降は0.1秒でキャッシュから即時表示！）
+    if not cached_orders_list:
+        buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=35)
+
+    st.caption(f"⚡ **高速キャッシュ表示中**（最終API取得: **{last_up_str}** ／ 保存件数: **{len(cached_orders_list):,} 件**）— 画面切替や絞り込みは通信なしで0.1秒で動きます。最新の注文を反映するときだけ右上の「⚡ 直近3日分だけ高速更新」を押してください。")
+    raw_orders = cached_orders_list
 
     if api_msg != "OK" and not raw_orders:
         st.error(f"⚠️ {api_msg}")
