@@ -1209,9 +1209,16 @@ def _read_single_csv(f, explicit_name=None):
             if not has_header and len(cols) >= 20:
                 if hasattr(f, "seek"): f.seek(0)
                 d = pd.read_csv(f, encoding=enc, encoding_errors="replace", header=None, low_memory=False)
-                col_map = {3: "売上日", 5: "得意先名", 11: "担当者コード", 14: "商品コード", 15: "商品名", 19: "数量", 21: "単価", 22: "金額"}
+                # ★修正：M列（0始まりで12番目）を確実に「担当者コード」として取得する
+                col_map = {3: "売上日", 5: "得意先名", 12: "担当者コード", 14: "商品コード", 15: "商品名", 19: "数量", 21: "単価", 22: "金額"}
                 d = d.rename(columns={idx: name for idx, name in col_map.items() if idx < len(d.columns)})
                 cols = [str(c).strip() for c in d.columns]
+
+            # ★M列（iloc[:, 12]）に担当コード（1〜12）が入っている場合はそれを最優先で保持する
+            if len(d.columns) > 12:
+                m_col_series = d.iloc[:, 12].apply(convert_staff_name)
+                if m_col_series.isin(list(STAFF_MAP.values())).any():
+                    d["_m_col_staff"] = m_col_series
 
             qty_cols = [c for c in cols if "数量" in c]
             d["_auto_qty"] = d[qty_cols[0]].apply(clean_num) if qty_cols else (d.iloc[:, 19].apply(clean_num) if len(cols) >= 20 else 0.0)
@@ -1309,7 +1316,15 @@ def _parse_raw_df_to_standard(df_all):
     else:
         res["元商品名"], res["商品名"] = "", ""
     res["得意先名"] = df_all[c_cname].fillna("").astype(str).str.strip().map(clean_cust_name) if c_cname else ""
-    res["担当者"] = df_all[c_staff].map(convert_staff_name).fillna("").astype(str).replace("nan", "") if c_staff else ""
+
+    # ★修正：M列（_m_col_staff）または担当者コード列からそのまま変換し、得意先名での書き換えは一切行わない！
+    if "_m_col_staff" in df_all.columns:
+        res["担当者"] = df_all["_m_col_staff"].fillna("").astype(str).replace("nan", "")
+    elif c_staff:
+        res["担当者"] = df_all[c_staff].map(convert_staff_name).fillna("").astype(str).replace("nan", "")
+    else:
+        res["担当者"] = ""
+
     res["数量"] = df_all["_auto_qty"].fillna(0).astype(int)
     res["単価"] = df_all["_auto_price"].fillna(0).astype(int)
     res["金額"] = df_all["_auto_amt"].fillna(res["数量"] * res["単価"]).astype(int)
@@ -1329,6 +1344,33 @@ def _parse_raw_df_to_standard(df_all):
     if "商品名" in res.columns:
         res = res[~res["商品名"].str.contains("送料", na=False)].copy()
     return res
+
+def finalize_sales_df(df, cost_master, code_name_dict=None):
+    if df.empty: return df
+    df["日付_dt"] = pd.to_datetime(df["日付_dt"], errors="coerce")
+    for s_col in ["商品コード", "商品名", "元商品名", "得意先名", "担当者", "日付", "年月", "_source_file"]:
+        if s_col in df.columns:
+            df[s_col] = df[s_col].fillna("").astype(str).replace({"nan": "", "None": ""})
+        else:
+            df[s_col] = ""
+
+    if code_name_dict:
+        mask_same = (df["商品名"] == df["商品コード"]) | (df["商品名"] == "")
+        df.loc[mask_same, "商品名"] = df.loc[mask_same, "商品コード"].map(lambda c: code_name_dict.get(c, c))
+
+    # ★重要：以前の「得意先名で担当者を上書きする処理」を完全削除し、M列の担当コード（1〜12）だけを忠実に反映！
+    if "担当者" in df.columns:
+        df["担当者"] = df["担当者"].map(convert_staff_name)
+
+    for n_col in ["数量", "単価", "金額"]:
+        if n_col in df.columns:
+            df[n_col] = df[n_col].apply(clean_num).round().astype(int)
+
+    if "商品コード" in df.columns:
+        df["単価原価"] = df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
+        df["原価合計"] = (df["数量"] * df["単価原価"]).round().astype(int)
+        df["粗利額"] = df["金額"] - df["原価合計"]
+    return df
 
 def finalize_sales_df(df, cost_master, code_name_dict=None):
     if df.empty: return df
