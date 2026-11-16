@@ -2041,7 +2041,7 @@ with col_mob_toggle:
 with col_upload:
     with st.expander("📥 データ追加・在庫更新・バックアップ", expanded=False):
         if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
-            if st.button("🔄 ローカルの全弥生CSVのM列(担当コード)から担当者を再読込・修復", use_container_width=True):
+        if st.button("🔄 ローカルの全弥生CSVのM列(担当コード)から担当者を再読込・修復", use_container_width=True):
             all_y_csvs = glob.glob(os.path.join(BASE_SHARE, "**", "yayoi_*.csv"), recursive=True) + glob.glob(os.path.join(GDRIVE_SYNC_DIR, "yayoi_*.csv")) + glob.glob(os.path.join(BASE_DIR, "yayoi_*.csv"))
             raw_list = [_read_single_csv(f) for f in sorted(list(set(all_y_csvs)))]
             valid_r = [d for d in raw_list if d is not None and not d.empty]
