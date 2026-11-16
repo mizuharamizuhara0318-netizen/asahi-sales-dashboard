@@ -2222,6 +2222,7 @@ VIEW_MODES = [
     '📈 商品別 前年実績比較',
     '📊 得意先別 前年実績比較',
     '🚀 次回値上げ・価格改定シミュレーター'
+    '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)'
 ]
 col_top1, col_top2 = st.columns([1.6, 2])
 with col_top1:
@@ -4792,4 +4793,334 @@ if view_type == '🚀 次回値上げ・価格改定シミュレーター':
                     st.session_state[f"in_cust_comp_{est_staff_cur}"] = sel_rev_comp
                     st.session_state[f"sel_cust_choice_{est_staff_cur}"] = sel_rev_comp
                 st.success("✅ 簡易見積＆利益シミュレーターに選択した明細をセットしました！表示モードを『🧮 簡易見積＆利益シミュレーター』に切り替えると、角印付きExcel・PDF見積書の出力と保存が行えます。")
+    st.stop()
+# ========================================================
+# ★ ⚡ 楽楽B2B（スマレジEC・B2B）API連携 ＆ リアルタイム受注・見込み売上速報
+# ========================================================
+import urllib.request
+import urllib.parse
+
+B2B_DOMAIN = "https://smilekidsb2b.com"
+B2B_CLIENT_ID = st.secrets.get("b2b_client_id", "8d73234fec0c1e1a6e61feb41510c09d425e7ea4")
+B2B_CLIENT_SECRET = st.secrets.get("b2b_client_secret", "74b520b84e782458cf7c114188adbe87af287405")
+B2B_REDIRECT_URI = "https://localhost:8501"
+B2B_TOKEN_FILE = os.path.join(GDRIVE_SYNC_DIR, "b2b_oauth_token.json")
+LOCAL_B2B_TOKEN_FILE = os.path.join(BASE_DIR, "b2b_oauth_token.json")
+
+def load_b2b_token_info():
+    for p in [B2B_TOKEN_FILE, LOCAL_B2B_TOKEN_FILE, os.path.join(BASE_SHARE, "b2b_oauth_token.json")]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+    return {}
+
+def save_b2b_token_info(t_dict):
+    t_dict["saved_at"] = time.time()
+    for p in [B2B_TOKEN_FILE, LOCAL_B2B_TOKEN_FILE]:
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(t_dict, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    upload_file_to_gdrive(LOCAL_B2B_TOKEN_FILE, "b2b_oauth_token.json")
+
+def exchange_b2b_code_for_token(raw_code_or_url):
+    code_str = str(raw_code_or_url).strip()
+    m_c = re.search(r'[?&]code=([^&\s]+)', code_str)
+    if m_c:
+        code_str = m_c.group(1)
+    token_url = f"{B2B_DOMAIN}/api/oauth/token.php"
+    params = urllib.parse.urlencode({
+        "client_id": B2B_CLIENT_ID,
+        "client_secret": B2B_CLIENT_SECRET,
+        "code": code_str,
+        "grant_type": "client_credentials",
+        "redirect_uri": B2B_REDIRECT_URI
+    }).encode("utf-8")
+    req = urllib.request.Request(token_url, data=params, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        res_body = resp.read().decode("utf-8", errors="replace")
+        res_json = json.loads(res_body)
+        if "access_token" in res_json:
+            save_b2b_token_info(res_json)
+            return True, res_json
+        return False, res_json
+
+def refresh_b2b_access_token(refresh_tok):
+    for ep in ["/api/oauth/token.php", "/oauth/token.php"]:
+        try:
+            token_url = f"{B2B_DOMAIN}{ep}"
+            params = urllib.parse.urlencode({
+                "grant_type": "refresh_token",
+                "client_id": B2B_CLIENT_ID,
+                "client_secret": B2B_CLIENT_SECRET,
+                "refresh_token": refresh_tok
+            }).encode("utf-8")
+            req = urllib.request.Request(token_url, data=params, method="POST")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                res_json = json.loads(resp.read().decode("utf-8", errors="replace"))
+                if "access_token" in res_json:
+                    save_b2b_token_info(res_json)
+                    return res_json["access_token"]
+        except Exception:
+            continue
+    return None
+
+def get_valid_b2b_access_token():
+    t_info = load_b2b_token_info()
+    acc_tok = t_info.get("access_token", "")
+    ref_tok = t_info.get("refresh_token", "")
+    saved_at = float(t_info.get("saved_at", 0))
+    expires_in = float(t_info.get("expires_in", 8640000))  # 100日間
+    if acc_tok and (time.time() - saved_at) > (expires_in - 86400) and ref_tok:
+        new_tok = refresh_b2b_access_token(ref_tok)
+        if new_tok:
+            return new_tok
+    return acc_tok
+
+@st.cache_data(ttl=180, show_spinner=False)
+def fetch_b2b_orders_from_api(date_from_str, date_to_str, access_token):
+    if not access_token:
+        return [], "アクセストークンが未設定です"
+    all_orders = []
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    # v1 受注検索API (/api/v1/orders.php) は明細(details)まで一括取得可能 (1回最大50件・1秒間隔制限遵守)
+    offset = 0
+    limit = 50
+    for _ in range(20):  # 最大1,000件（20ページ）
+        q_params = urllib.parse.urlencode({
+            "order_date_from": f"{date_from_str} 00:00:00",
+            "order_date_to": f"{date_to_str} 23:59:59",
+            "limit": limit,
+            "offset": offset
+        })
+        url = f"{B2B_DOMAIN}/api/v1/orders.php?{q_params}"
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+            orders_batch = data.get("orders", [])
+            if not orders_batch:
+                break
+            all_orders.extend(orders_batch)
+            if len(orders_batch) < limit:
+                break
+            offset += limit
+            time.sleep(1.1)  # 仕様書ルール：連続アクセス時は1秒以上のスリープを厳守
+        except Exception as e:
+            return all_orders, f"API通信エラー: {str(e)}"
+
+    return all_orders, "OK"
+
+if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)':
+    st.markdown("#### ⚡ 楽楽B2B（スマレジEC・B2B）リアルタイム受注 ＆ 見込み売上速報")
+
+    auth_url = (
+        f"{B2B_DOMAIN}/api/oauth/authorize.php?"
+        f"client_id={B2B_CLIENT_ID}&redirect_uri={urllib.parse.quote(B2B_REDIRECT_URI)}"
+        f"&response_type=code&state=asahi2026"
+    )
+    current_token = get_valid_b2b_access_token()
+
+    with st.expander("🔑 API接続ステータス・初回トークン設定（100日間有効）", expanded=not bool(current_token)):
+        if current_token:
+            t_info = load_b2b_token_info()
+            saved_dt = datetime.fromtimestamp(t_info.get("saved_at", time.time())).strftime("%Y/%m/%d %H:%M")
+            st.success(f"✅ スマレジEC・B2B API 接続済み（トークン取得日時: {saved_dt} ／ 有効期間: 100日間）")
+        else:
+            st.warning("⚠️ 初回のみ、以下の手順①・②でアクセストークンを取得してください（1回取得すれば100日間自動で繋がります）。")
+
+        st.markdown(f"**手順①：** [👉 ここをクリックしてスマレジEC・B2Bの認可画面を開く]({auth_url}) （承認すると `https://localhost:8501/?code=...` に移動します）")
+        col_c_in, col_c_btn = st.columns([3.2, 1.2])
+        with col_c_in:
+            in_auth_code = st.text_input("手順②：移動後のアドレスバーのURL全体（または code= の後ろの文字列）をここに貼り付け", placeholder="例: https://localhost:8501/?code=abcdef123456&state=asahi2026")
+        with col_c_btn:
+            st.write("")
+            if st.button("🚀 トークンを発行して保存", type="primary", use_container_width=True):
+                if in_auth_code.strip():
+                    ok, res_obj = exchange_b2b_code_for_token(in_auth_code.strip())
+                    if ok:
+                        st.cache_data.clear()
+                        st.success("✅ アクセストークンの取得・保存に成功しました！")
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.error(f"トークン取得失敗: {res_obj}")
+
+    if not current_token:
+        st.stop()
+
+    # 検索期間指定（デフォルトは当月1日〜本日）
+    now_d = datetime.now().date()
+    first_d = datetime(now_d.year, now_d.month, 1).date()
+    c_ap1, c_ap2, c_ap3, c_ap4 = st.columns([1.2, 1.2, 1.4, 1.2])
+    with c_ap1:
+        api_d_from = st.date_input("📅 受注日（開始）", value=first_d, key="b2b_api_d_from")
+    with c_ap2:
+        api_d_to = st.date_input("📅 受注日（終了）", value=now_d, key="b2b_api_d_to")
+    with c_ap3:
+        api_status_filter = st.selectbox("🎯 ステータス絞り込み", ["（すべて表示）", "⏳ 未出荷（見込み・出荷待ち）のみ", "✅ 出荷完了（売上確定済）のみ", "🆕 本日受注分のみ"])
+    with c_ap4:
+        st.write("")
+        if st.button("🔄 今すぐB2B最新受注を取得", type="primary", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    with st.spinner("スマレジEC・B2Bからリアルタイム受注データを取得中..."):
+        raw_orders, api_msg = fetch_b2b_orders_from_api(
+            api_d_from.strftime("%Y-%m-%d"),
+            api_d_to.strftime("%Y-%m-%d"),
+            current_token
+        )
+
+    if api_msg != "OK" and not raw_orders:
+        st.error(f"⚠️ {api_msg}")
+        st.stop()
+
+    # 受注ヘッダ＆商品明細の展開
+    order_header_rows = []
+    detail_rows = []
+    for od in raw_orders:
+        oid = str(od.get("serial_order_id", "")).strip()
+        ec_oid = str(od.get("ec_order_id", "")).strip()
+        comp = clean_cust_name(str(od.get("order_company_name", "")).strip()) or str(od.get("order_name01", "")).strip()
+        status_nm = str(od.get("order_status_name", "")).strip()
+        if "キャンセル" in status_nm or "取消" in status_nm:
+            continue
+
+        ord_dt_raw = str(od.get("plg_raku2_order_date", "")).strip()
+        hasso_dt = str(od.get("hasso_date", "") or "").strip()
+        commit_dt = str(od.get("commit_date", "") or "").strip()
+        staff_raw = str(od.get("customer_charge", "") or "").strip()
+        staff_nm = normalize_target_staff_name(staff_raw) if staff_raw else ""
+
+        is_shipped = bool(commit_dt and commit_dt not in ["0000-00-00", "None", "null"]) or ("発送" in status_nm or "出荷済" in status_nm or "完了" in status_nm)
+        ship_badge = "✅ 出荷済" if is_shipped else "⏳ 未出荷(見込み)"
+
+        details = od.get("details", [])
+        ord_notax_sum = 0
+        ord_cost_sum = 0
+        ord_qty_sum = 0
+        for dt_item in (details if isinstance(details, list) else []):
+            sku = clean_code_str(dt_item.get("product_code") or dt_item.get("order_product_code") or "")
+            pname = clean_product_name(str(dt_item.get("product_name", "")).strip())
+            jan = str(dt_item.get("product_jan_cd", "") or "").strip()
+            qty = int(clean_num(dt_item.get("product_quantity", 0)))
+            u_price = int(clean_num(dt_item.get("product_price_notax", dt_item.get("product_price", 0))))
+            line_amt = u_price * qty
+            u_cost = int(clean_num(dt_item.get("plg_raku2_stock_price", cost_master_dict.get(sku, 0))))
+            line_cost = u_cost * qty
+            line_prof = line_amt - line_cost
+
+            ord_notax_sum += line_amt
+            ord_cost_sum += line_cost
+            ord_qty_sum += qty
+
+            detail_rows.append({
+                "区分": ship_badge,
+                "受注日時": ord_dt_raw[:16],
+                "出荷予定日": hasso_dt,
+                "出荷日": commit_dt,
+                "受注ID": oid,
+                "受注ステータス": status_nm,
+                "得意先名": comp,
+                "担当者": staff_nm,
+                "商品コード": sku,
+                "商品名": pname,
+                "JANコード": jan,
+                "数量": qty,
+                "単価(税別)": u_price,
+                "金額(税別)": line_amt,
+                "原価合計": line_cost,
+                "粗利額": line_prof,
+                "粗利率": f"{(line_prof / line_amt * 100):.1f}%" if line_amt > 0 else "-"
+            })
+
+        if ord_notax_sum == 0:
+            sub_tax_in = int(clean_num(od.get("subtotal", 0)))
+            tax_v = int(clean_num(od.get("tax", 0)))
+            ord_notax_sum = (sub_tax_in - tax_v) if tax_v > 0 else int(round(sub_tax_in / 1.10))
+
+        order_header_rows.append({
+            "区分": ship_badge,
+            "受注日時": ord_dt_raw[:16],
+            "出荷予定日": hasso_dt,
+            "出荷日": commit_dt,
+            "受注ID": oid,
+            "受注番号": ec_oid,
+            "受注ステータス": status_nm,
+            "得意先名": comp,
+            "担当者": staff_nm,
+            "点数合計": ord_qty_sum,
+            "商品代金(税別)": ord_notax_sum,
+            "原価合計": ord_cost_sum,
+            "粗利額": ord_notax_sum - ord_cost_sum
+        })
+
+    hdr_df = pd.DataFrame(order_header_rows)
+    det_df = pd.DataFrame(detail_rows)
+
+    if hdr_df.empty:
+        st.info("指定期間の受注データはありませんでした。")
+        st.stop()
+
+    today_str = now_d.strftime("%Y-%m-%d")
+    if api_status_filter.startswith("⏳"):
+        hdr_df = hdr_df[hdr_df["区分"].str.contains("未出荷")]
+        det_df = det_df[det_df["区分"].str.contains("未出荷")]
+    elif api_status_filter.startswith("✅"):
+        hdr_df = hdr_df[hdr_df["区分"].str.contains("出荷済")]
+        det_df = det_df[det_df["区分"].str.contains("出荷済")]
+    elif api_status_filter.startswith("🆕"):
+        hdr_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str)]
+        det_df = det_df[det_df["受注日時"].str.startswith(today_str)]
+
+    # 確定売上（弥生当月）＋ B2B未出荷（見込み）のサマリーカード表示
+    all_hdr_df = pd.DataFrame(order_header_rows)
+    unshipped_amt = int(all_hdr_df[all_hdr_df["区分"].str.contains("未出荷")]["商品代金(税別)"].sum())
+    shipped_amt = int(all_hdr_df[all_hdr_df["区分"].str.contains("出荷済")]["商品代金(税別)"].sum())
+    today_amt = int(all_hdr_df[all_hdr_df["受注日時"].str.startswith(today_str)]["商品代金(税別)"].sum())
+    today_cnt = len(all_hdr_df[all_hdr_df["受注日時"].str.startswith(today_str)])
+
+    cur_ym_str = f"{now_d.year}年{now_d.month:02d}月"
+    yayoi_cur_month_amt = int(df[df["年月"] == cur_ym_str]["金額"].sum()) if not df.empty else 0
+    forecast_total = yayoi_cur_month_amt + unshipped_amt
+
+    st.markdown(f"""
+    <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:12px;">
+        <div style="border:1px solid #cbd5e1; border-top:4px solid #dc2626; border-radius:6px; padding:10px; background:#fef2f2;">
+            <div style="font-size:12px; color:#991b1b;">🆕 本日受注速報（{now_d.strftime('%m/%d')}）</div>
+            <div style="font-size:20px; font-weight:bold; color:#dc2626; margin-top:2px;">¥{today_amt:,}</div>
+            <div style="font-size:11px; color:#7f1d1d; margin-top:2px;">本日の注文伝票数: <b>{today_cnt:,} 件</b></div>
+        </div>
+        <div style="border:1px solid #cbd5e1; border-top:4px solid #ea580c; border-radius:6px; padding:10px; background:#fff7ed;">
+            <div style="font-size:12px; color:#9a3412;">⏳ B2B 未出荷受注残（見込み売上）</div>
+            <div style="font-size:20px; font-weight:bold; color:#ea580c; margin-top:2px;">¥{unshipped_amt:,}</div>
+            <div style="font-size:11px; color:#7c2d12; margin-top:2px;">未出荷伝票: <b>{len(all_hdr_df[all_hdr_df['区分'].str.contains('未出荷')]):,} 件</b></div>
+        </div>
+        <div style="border:1px solid #cbd5e1; border-top:4px solid #2563eb; border-radius:6px; padding:10px; background:#eff6ff;">
+            <div style="font-size:12px; color:#1e40af;">✅ B2B 期間内出荷済（税別）</div>
+            <div style="font-size:20px; font-weight:bold; color:#1d4ed8; margin-top:2px;">¥{shipped_amt:,}</div>
+            <div style="font-size:11px; color:#1e3a8a; margin-top:2px;">期間受注総額: <b>¥{unshipped_amt + shipped_amt:,}</b></div>
+        </div>
+        <div style="border:1px solid #cbd5e1; border-top:4px solid #16a34a; border-radius:6px; padding:10px; background:#f0fdf4;">
+            <div style="font-size:12px; color:#166534;">🚀 当月着地見込み（弥生確定＋B2B未出荷）</div>
+            <div style="font-size:20px; font-weight:bold; color:#15803d; margin-top:2px;">¥{forecast_total:,}</div>
+            <div style="font-size:11px; color:#14532d; margin-top:2px;">弥生確定済: <b>¥{yayoi_cur_month_amt:,}</b> ＋ 見込み: <b>¥{unshipped_amt:,}</b></div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tab_b2b_1, tab_b2b_2 = st.tabs([
+        f"📋 受注伝票一覧（{len(hdr_df):,} 件）",
+        f"📦 商品明細・リアルタイム注文数一覧（{len(det_df):,} 行）"
+    ])
+    with tab_b2b_1:
+        render_universal_table(hdr_df, max_h=520)
+    with tab_b2b_2:
+        render_universal_table(det_df, max_h=520)
     st.stop()
