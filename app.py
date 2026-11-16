@@ -2041,9 +2041,19 @@ with col_mob_toggle:
 with col_upload:
     with st.expander("📥 データ追加・在庫更新・バックアップ", expanded=False):
         if st.button("☁️ Googleドライブの最新ファイルを今すぐ同期", use_container_width=True):
-            sync_all_from_gdrive(force=True)
-            st.cache_data.clear()
-            st.rerun()
+            if st.button("🔄 ローカルの全弥生CSVのM列(担当コード)から担当者を再読込・修復", use_container_width=True):
+            all_y_csvs = glob.glob(os.path.join(BASE_SHARE, "**", "yayoi_*.csv"), recursive=True) + glob.glob(os.path.join(GDRIVE_SYNC_DIR, "yayoi_*.csv")) + glob.glob(os.path.join(BASE_DIR, "yayoi_*.csv"))
+            raw_list = [_read_single_csv(f) for f in sorted(list(set(all_y_csvs)))]
+            valid_r = [d for d in raw_list if d is not None and not d.empty]
+            if valid_r:
+                re_df = _parse_raw_df_to_standard(pd.concat(valid_r, ignore_index=True))
+                re_dates = set(re_df["日付"].dropna().unique())
+                kept_df = df[~df["日付"].isin(re_dates) | (df["得意先名"] == "アマゾンセラー")].copy()
+                fixed_df = finalize_sales_df(pd.concat([kept_df, re_df], ignore_index=True), cost_master_dict, jan_title_dict)
+                save_parquet_and_sync(fixed_df, CACHE_FILE, "sales_cache.parquet")
+                st.cache_data.clear()
+                st.success("✅ 全弥生CSVのM列（担当コード）から担当者を正確に復元しました！")
+                st.rerun()
 
         up_tab1, up_tab2, up_tab3 = st.tabs([
             "📄 売上CSV追加",
