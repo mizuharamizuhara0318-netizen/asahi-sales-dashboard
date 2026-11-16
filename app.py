@@ -4888,12 +4888,17 @@ def fetch_b2b_orders_from_api(date_from_str, date_to_str, access_token):
     all_orders = []
     headers = {"Authorization": f"Bearer {access_token}"}
 
-    # v1 受注検索API (/api/v1/orders.php) は明細(details)まで一括取得可能 (1回最大50件・1秒間隔制限遵守)
+    # 10月末受注→11月出荷分も漏れなく拾えるよう、開始日の14日前から取得してPython側で厳密フィルタリング
+    try:
+        dt_from_buf = (pd.to_datetime(date_from_str) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+    except Exception:
+        dt_from_buf = date_from_str
+
     offset = 0
     limit = 50
-    for _ in range(40):  # 最大1,000件（20ページ）
+    for _ in range(50):  # 最大2,500件（50件×50ページ）
         q_params = urllib.parse.urlencode({
-            "order_date_from": f"{date_from_str} 00:00:00",
+            "order_date_from": f"{dt_from_buf} 00:00:00",
             "order_date_to": f"{date_to_str} 23:59:59",
             "limit": limit,
             "offset": offset
@@ -4910,7 +4915,7 @@ def fetch_b2b_orders_from_api(date_from_str, date_to_str, access_token):
             if len(orders_batch) < limit:
                 break
             offset += limit
-            time.sleep(1.1)  # 仕様書ルール：連続アクセス時は1秒以上のスリープを厳守
+            time.sleep(1.05)  # 仕様書ルール：連続アクセス時は1秒以上のスリープを厳守
         except Exception as e:
             return all_orders, f"API通信エラー: {str(e)}"
 
@@ -4954,28 +4959,37 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     if not current_token:
         st.stop()
 
-    # 検索期間指定（デフォルトは当月1日〜本日）
+    # 検索期間・集計基準・ステータス指定
     now_d = datetime.now().date()
     first_d = datetime(now_d.year, now_d.month, 1).date()
-    c_ap1, c_ap2, c_ap3, c_ap4 = st.columns([1.2, 1.2, 1.4, 1.2])
+    c_ap1, c_ap2, c_ap3, c_ap4, c_ap5 = st.columns([1.1, 1.1, 1.5, 1.5, 1.1])
     with c_ap1:
-        api_d_from = st.date_input("📅 受注日（開始）", value=first_d, key="b2b_api_d_from")
+        api_d_from = st.date_input("📅 開始日", value=first_d, key="b2b_api_d_from")
     with c_ap2:
-        api_d_to = st.date_input("📅 受注日（終了）", value=now_d, key="b2b_api_d_to")
+        api_d_to = st.date_input("📅 終了日", value=now_d, key="b2b_api_d_to")
     with c_ap3:
-        api_status_filter = st.selectbox("🎯 ステータス絞り込み", ["（すべて表示）", "⏳ 未出荷（見込み・出荷待ち）のみ", "✅ 出荷完了（売上確定済）のみ", "🆕 本日受注分のみ"])
+        date_basis_mode = st.selectbox(
+            "📊 期間集計の基準日",
+            ["🚚 出荷日基準（＋未出荷は受注日）", "🛒 受注日基準（注文日ベース）"],
+            index=0,
+            help="『出荷日基準』にすると、10月注文→11月出荷の伝票も含まれ、B2B管理画面の売上集計と一致します。"
+        )
     with c_ap4:
+        api_status_filter = st.selectbox(
+            "🎯 ステータス絞り込み",
+            ["（すべて表示）", "⏳ 未出荷（見込み・出荷待ち）のみ", "✅ 出荷完了（売上確定済）のみ", "🆕 本日受注分のみ"]
+        )
+    with c_ap5:
         st.write("")
         if st.button("🔄 今すぐB2B最新受注を取得", type="primary", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
+    d_from_str = api_d_from.strftime("%Y-%m-%d")
+    d_to_str = api_d_to.strftime("%Y-%m-%d")
+
     with st.spinner("スマレジEC・B2Bからリアルタイム受注データを取得中..."):
-        raw_orders, api_msg = fetch_b2b_orders_from_api(
-            api_d_from.strftime("%Y-%m-%d"),
-            api_d_to.strftime("%Y-%m-%d"),
-            current_token
-        )
+        raw_orders, api_msg = fetch_b2b_orders_from_api(d_from_str, d_to_str, current_token)
 
     if api_msg != "OK" and not raw_orders:
         st.error(f"⚠️ {api_msg}")
@@ -4997,6 +5011,26 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         ord_dt_raw = str(
             od.get("plg_raku2_order_date") or od.get("order_date") or od.get("create_date") or hasso_dt or commit_dt or ""
         ).strip()
+
+        ord_date_10 = ord_dt_raw[:10] if len(ord_dt_raw) >= 10 else ""
+        commit_date_10 = commit_dt[:10] if (commit_dt and len(commit_dt) >= 10 and not commit_dt.startswith("0000")) else ""
+
+        is_shipped = bool(commit_date_10) or ("発送" in status_nm or "出荷済" in status_nm or "完了" in status_nm)
+        ship_badge = "✅ 出荷済" if is_shipped else "⏳ 未出荷(見込み)"
+
+        # 期間フィルタリング（出荷日基準 or 受注日基準）
+        if date_basis_mode.startswith("🚚"):
+            if is_shipped:
+                target_d = commit_date_10 or ord_date_10
+                if not (d_from_str <= target_d <= d_to_str):
+                    continue
+            else:
+                if ord_date_10 and not (d_from_str <= ord_date_10 <= d_to_str):
+                    continue
+        else:
+            if ord_date_10 and not (d_from_str <= ord_date_10 <= d_to_str):
+                continue
+
         staff_raw = str(od.get("customer_charge", "") or "").strip()
         staff_nm = normalize_target_staff_name(staff_raw) if staff_raw else ""
         if not staff_nm and not df.empty and comp:
@@ -5004,13 +5038,12 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             if not matched_st.empty:
                 staff_nm = matched_st.iloc[-1]
 
-        is_shipped = bool(commit_dt and commit_dt not in ["0000-00-00", "None", "null"]) or ("発送" in status_nm or "出荷済" in status_nm or "完了" in status_nm)
-        ship_badge = "✅ 出荷済" if is_shipped else "⏳ 未出荷(見込み)"
-
         details = od.get("details", [])
         ord_notax_sum = 0
         ord_cost_sum = 0
         ord_qty_sum = 0
+        item_summary_list = []
+
         for dt_item in (details if isinstance(details, list) else []):
             sku = clean_code_str(dt_item.get("product_code") or dt_item.get("order_product_code") or "")
             pname = clean_product_name(str(dt_item.get("product_name", "")).strip())
@@ -5021,17 +5054,20 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             u_cost = int(clean_num(dt_item.get("plg_raku2_stock_price", cost_master_dict.get(sku, 0))))
             line_cost = u_cost * qty
             line_prof = line_amt - line_cost
+            line_margin = round(line_prof / line_amt * 100.0, 1) if line_amt > 0 else 0.0
 
             ord_notax_sum += line_amt
             ord_cost_sum += line_cost
             ord_qty_sum += qty
+            if sku or pname:
+                item_summary_list.append(f"{sku}({qty})")
 
             detail_rows.append({
                 "区分": ship_badge,
                 "受注日時": ord_dt_raw[:16],
-                "出荷予定日": hasso_dt,
-                "出荷日": commit_dt,
-                "受注ID": oid,
+                "出荷予定日": hasso_dt[:10] if hasso_dt else "",
+                "出荷日": commit_date_10,
+                "受注ID": int(oid) if oid.isdigit() else oid,
                 "受注ステータス": status_nm,
                 "得意先名": comp,
                 "担当者": staff_nm,
@@ -5043,7 +5079,8 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 "金額(税別)": line_amt,
                 "原価合計": line_cost,
                 "粗利額": line_prof,
-                "粗利率": f"{(line_prof / line_amt * 100):.1f}%" if line_amt > 0 else "-"
+                "粗利率_数値": line_margin,
+                "粗利率": f"{line_margin:.1f}%" if line_amt > 0 else "-"
             })
 
         if ord_notax_sum == 0:
@@ -5051,20 +5088,26 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             tax_v = int(clean_num(od.get("tax", 0)))
             ord_notax_sum = (sub_tax_in - tax_v) if tax_v > 0 else int(round(sub_tax_in / 1.10))
 
+        ord_prof_sum = ord_notax_sum - ord_cost_sum
+        ord_margin_pct = round(ord_prof_sum / ord_notax_sum * 100.0, 1) if ord_notax_sum > 0 else 0.0
+
         order_header_rows.append({
             "区分": ship_badge,
             "受注日時": ord_dt_raw[:16],
-            "出荷予定日": hasso_dt,
-            "出荷日": commit_dt,
-            "受注ID": oid,
+            "出荷予定日": hasso_dt[:10] if hasso_dt else "",
+            "出荷日": commit_date_10,
+            "受注ID": int(oid) if oid.isdigit() else oid,
             "受注番号": ec_oid,
             "受注ステータス": status_nm,
             "得意先名": comp,
             "担当者": staff_nm,
+            "注文商品内訳(抜粋)": " / ".join(item_summary_list[:4]) + (" 他" if len(item_summary_list) > 4 else ""),
             "点数合計": ord_qty_sum,
             "商品代金(税別)": ord_notax_sum,
             "原価合計": ord_cost_sum,
-            "粗利額": ord_notax_sum - ord_cost_sum
+            "粗利額": ord_prof_sum,
+            "粗利率_数値": ord_margin_pct,
+            "粗利率": f"{ord_margin_pct:.1f}%" if ord_notax_sum > 0 else "-"
         })
 
     hdr_df = pd.DataFrame(order_header_rows)
@@ -5074,23 +5117,18 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         st.info("指定期間の受注データはありませんでした。")
         st.stop()
 
+    # サマリーカード計算（フィルタ前の期間全体集計）
     today_str = now_d.strftime("%Y-%m-%d")
-    if api_status_filter.startswith("⏳"):
-        hdr_df = hdr_df[hdr_df["区分"].str.contains("未出荷")]
-        det_df = det_df[det_df["区分"].str.contains("未出荷")]
-    elif api_status_filter.startswith("✅"):
-        hdr_df = hdr_df[hdr_df["区分"].str.contains("出荷済")]
-        det_df = det_df[det_df["区分"].str.contains("出荷済")]
-    elif api_status_filter.startswith("🆕"):
-        hdr_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str)]
-        det_df = det_df[det_df["受注日時"].str.startswith(today_str)]
+    unshipped_df = hdr_df[hdr_df["区分"].str.contains("未出荷")]
+    shipped_df = hdr_df[hdr_df["区分"].str.contains("出荷済")]
+    today_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str) | hdr_df["出荷予定日"].str.startswith(today_str)]
 
-    # 確定売上（弥生当月）＋ B2B未出荷（見込み）のサマリーカード表示
-    all_hdr_df = pd.DataFrame(order_header_rows)
-    unshipped_amt = int(all_hdr_df[all_hdr_df["区分"].str.contains("未出荷")]["商品代金(税別)"].sum())
-    shipped_amt = int(all_hdr_df[all_hdr_df["区分"].str.contains("出荷済")]["商品代金(税別)"].sum())
-    today_amt = int(all_hdr_df[all_hdr_df["受注日時"].str.startswith(today_str)]["商品代金(税別)"].sum())
-    today_cnt = len(all_hdr_df[all_hdr_df["受注日時"].str.startswith(today_str)])
+    unshipped_amt = int(unshipped_df["商品代金(税別)"].sum())
+    shipped_amt = int(shipped_df["商品代金(税別)"].sum())
+    shipped_prof = int(shipped_df["粗利額"].sum())
+    shipped_margin = (shipped_prof / shipped_amt * 100.0) if shipped_amt > 0 else 0.0
+    today_amt = int(today_df["商品代金(税別)"].sum())
+    today_cnt = len(today_df)
 
     cur_ym_str = f"{now_d.year}年{now_d.month:02d}月"
     yayoi_cur_month_amt = int(df[df["年月"] == cur_ym_str]["金額"].sum()) if not df.empty else 0
@@ -5106,12 +5144,12 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         <div style="border:1px solid #cbd5e1; border-top:4px solid #ea580c; border-radius:6px; padding:10px; background:#fff7ed;">
             <div style="font-size:12px; color:#9a3412;">⏳ B2B 未出荷受注残（見込み売上）</div>
             <div style="font-size:20px; font-weight:bold; color:#ea580c; margin-top:2px;">¥{unshipped_amt:,}</div>
-            <div style="font-size:11px; color:#7c2d12; margin-top:2px;">未出荷伝票: <b>{len(all_hdr_df[all_hdr_df['区分'].str.contains('未出荷')]):,} 件</b></div>
+            <div style="font-size:11px; color:#7c2d12; margin-top:2px;">未出荷伝票: <b>{len(unshipped_df):,} 件</b></div>
         </div>
         <div style="border:1px solid #cbd5e1; border-top:4px solid #2563eb; border-radius:6px; padding:10px; background:#eff6ff;">
             <div style="font-size:12px; color:#1e40af;">✅ B2B 期間内出荷済（税別）</div>
             <div style="font-size:20px; font-weight:bold; color:#1d4ed8; margin-top:2px;">¥{shipped_amt:,}</div>
-            <div style="font-size:11px; color:#1e3a8a; margin-top:2px;">期間受注総額: <b>¥{unshipped_amt + shipped_amt:,}</b></div>
+            <div style="font-size:11px; color:#1e3a8a; margin-top:2px;">粗利額: <b>¥{shipped_prof:,}</b>（粗利率: <b>{shipped_margin:.1f}%</b>）</div>
         </div>
         <div style="border:1px solid #cbd5e1; border-top:4px solid #16a34a; border-radius:6px; padding:10px; background:#f0fdf4;">
             <div style="font-size:12px; color:#166534;">🚀 当月着地見込み（弥生確定＋B2B未出荷）</div>
@@ -5121,12 +5159,117 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     </div>
     """, unsafe_allow_html=True)
 
-    tab_b2b_1, tab_b2b_2 = st.tabs([
-        f"📋 受注伝票一覧（{len(hdr_df):,} 件）",
-        f"📦 商品明細・リアルタイム注文数一覧（{len(det_df):,} 行）"
+    # ステータス絞り込み反映
+    if api_status_filter.startswith("⏳"):
+        hdr_df = hdr_df[hdr_df["区分"].str.contains("未出荷")].copy()
+        det_df = det_df[det_df["区分"].str.contains("未出荷")].copy()
+    elif api_status_filter.startswith("✅"):
+        hdr_df = hdr_df[hdr_df["区分"].str.contains("出荷済")].copy()
+        det_df = det_df[det_df["区分"].str.contains("出荷済")].copy()
+    elif api_status_filter.startswith("🆕"):
+        hdr_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str) | hdr_df["出荷予定日"].str.startswith(today_str)].copy()
+        det_df = det_df[det_df["受注日時"].str.startswith(today_str) | det_df["出荷予定日"].str.startswith(today_str)].copy()
+
+    # ★ ご要望機能：得意先選択（ドリルダウン）＆ 昇順・降順ソートバー
+    s_bar1, s_bar2, s_bar3, s_bar4 = st.columns([2.2, 1.2, 1.1, 1.3])
+    cust_summary_df = hdr_df.groupby("得意先名", as_index=False)["商品代金(税別)"].sum().sort_values("商品代金(税別)", ascending=False)
+    cust_options = ["（すべての得意先を表示）"] + [f"{r['得意先名']} （¥{int(r['商品代金(税別)']):,}）" for _, r in cust_summary_df.iterrows()]
+    with s_bar1:
+        sel_cust_label = st.selectbox("🏢 得意先を選択して『売れた商品』を確認（売上順）", cust_options, index=0, key="b2b_drill_cust")
+    with s_bar2:
+        b2b_staff_opts = ["（すべて）"] + sorted([s for s in hdr_df["担当者"].unique().tolist() if s])
+        sel_b2b_staff = st.selectbox("👤 担当者で絞り込み", b2b_staff_opts, index=0, key="b2b_drill_staff")
+    with s_bar3:
+        sort_col_choice = st.selectbox("🔃 並び替え項目", ["受注日時", "出荷日", "受注ID", "商品代金(税別)", "粗利額", "粗利率", "点数合計"], index=0, key="b2b_sort_col")
+    with s_bar4:
+        sort_order_choice = st.radio("順序", ["⬇️ 降順(最新・高い順)", "⬆️ 昇順(古い・低い順)"], horizontal=True, index=0, key="b2b_sort_dir")
+
+    if sel_b2b_staff != "（すべて）":
+        hdr_df = hdr_df[hdr_df["担当者"] == sel_b2b_staff].copy()
+        det_df = det_df[det_df["担当者"] == sel_b2b_staff].copy()
+
+    selected_comp_name = ""
+    if sel_cust_label != "（すべての得意先を表示）":
+        selected_comp_name = sel_cust_label.split(" （¥")[0]
+        hdr_df = hdr_df[hdr_df["得意先名"] == selected_comp_name].copy()
+        det_df = det_df[det_df["得意先名"] == selected_comp_name].copy()
+
+    # 昇順・降順の並び替え適用（デフォルトは受注日時の最新順＋受注ID降順）
+    is_asc = sort_order_choice.startswith("⬆️")
+    sort_target_hdr = "粗利率_数値" if sort_col_choice == "粗利率" else sort_col_choice
+    if sort_target_hdr in hdr_df.columns:
+        hdr_df = hdr_df.sort_values(by=[sort_target_hdr, "受注ID"], ascending=[is_asc, is_asc]).reset_index(drop=True)
+
+    sort_map_det = {"商品代金(税別)": "金額(税別)", "点数合計": "数量", "粗利率": "粗利率_数値"}
+    sort_target_det = sort_map_det.get(sort_col_choice, sort_col_choice)
+    if sort_target_det in det_df.columns:
+        det_df = det_df.sort_values(by=[sort_target_det, "受注ID"], ascending=[is_asc, is_asc]).reset_index(drop=True)
+
+    # ★ 売れた商品ランキング集計（商品コード×商品名 ごとの数量・金額・粗利額・粗利率）
+    if not det_df.empty:
+        prod_agg_df = det_df.groupby(["商品コード", "商品名", "JANコード"], as_index=False).agg(
+            注文回数=("受注ID", "nunique"),
+            売上数量=("数量", "sum"),
+            売上金額_税別=("金額(税別)", "sum"),
+            原価合計=("原価合計", "sum"),
+            粗利額=("粗利額", "sum")
+        )
+        prod_agg_df["平均単価"] = (prod_agg_df["売上金額_税別"] / prod_agg_df["売上数量"].replace(0, 1)).round().astype(int)
+        prod_agg_df["粗利率_数値"] = (prod_agg_df["粗利額"] / prod_agg_df["売上金額_税別"].replace(0, 1) * 100.0).round(1)
+        prod_agg_df["粗利率"] = prod_agg_df.apply(lambda r: f"{r['粗利率_数値']:.1f}%" if r["売上金額_税別"] > 0 else "-", axis=1)
+        prod_agg_df = prod_agg_df.sort_values(by="売上金額_税別", ascending=is_asc).reset_index(drop=True)
+        prod_agg_df = prod_agg_df[["商品コード", "商品名", "JANコード", "注文回数", "売上数量", "平均単価", "売上金額_税別", "原価合計", "粗利額", "粗利率"]]
+        prod_agg_df.columns = ["商品コード", "商品名", "JANコード", "注文伝票数", "売上数量", "平均単価", "金額(税別)", "原価合計", "粗利額", "粗利率"]
+    else:
+        prod_agg_df = pd.DataFrame()
+
+    # 得意先が選択されている場合は、上部にその得意先の「売れた商品内訳」を大きく表示！
+    if selected_comp_name and not prod_agg_df.empty:
+        c_tot_amt = int(prod_agg_df["金額(税別)"].sum())
+        c_tot_prof = int(prod_agg_df["粗利額"].sum())
+        c_tot_mgn = (c_tot_prof / c_tot_amt * 100.0) if c_tot_amt > 0 else 0.0
+        st.markdown(f"""
+        <div style="background:#f8fafc; border-left:5px solid #2563eb; padding:10px 14px; border-radius:4px; margin:8px 0;">
+            <b>🏢 【{selected_comp_name}】の注文商品内訳（全 {len(prod_agg_df)} 品目）</b> &nbsp;|&nbsp;
+            合計金額(税別): <b>¥{c_tot_amt:,}</b> &nbsp;|&nbsp;
+            合計粗利額: <b>¥{c_tot_prof:,}</b>（粗利率: <b>{c_tot_mgn:.1f}%</b>）
+        </div>
+        """, unsafe_allow_html=True)
+        render_universal_table(prod_agg_df, max_h=340)
+
+    tab_b2b_1, tab_b2b_2, tab_b2b_3 = st.tabs([
+        f"📋 ① 受注伝票一覧（{len(hdr_df):,} 件｜行クリックで注文商品を表示）",
+        f"🏆 ② 売れた商品ランキング（{len(prod_agg_df):,} 品目）",
+        f"📦 ③ 商品明細・リアルタイム注文一覧（{len(det_df):,} 行）"
     ])
+
     with tab_b2b_1:
-        render_universal_table(hdr_df, max_h=520)
+        st.caption("💡 表の左端のチェックボックスをクリックして伝票（得意先）を選ぶと、すぐ下に**その伝票・得意先で売れた商品リスト**が即座に表示されます！")
+        hdr_disp = hdr_df.drop(columns=["粗利率_数値"], errors="ignore").copy()
+        sel_event = st.dataframe(
+            hdr_disp,
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+            on_select="rerun",
+            selection_mode="multi-row",
+            key="b2b_hdr_interactive_table"
+        )
+        sel_rows_idx = sel_event.selection.rows if (sel_event and hasattr(sel_event, "selection")) else []
+        if sel_rows_idx:
+            picked_hdr = hdr_disp.iloc[sel_rows_idx]
+            picked_oids = picked_hdr["受注ID"].tolist()
+            picked_comps = "・".join(picked_hdr["得意先名"].unique().tolist()[:3])
+            sub_det = det_df[det_df["受注ID"].isin(picked_oids)].drop(columns=["粗利率_数値"], errors="ignore").copy()
+            sub_amt = int(sub_det["金額(税別)"].sum())
+            sub_prof = int(sub_det["粗利額"].sum())
+            sub_mgn = (sub_prof / sub_amt * 100.0) if sub_amt > 0 else 0.0
+            st.markdown(f"##### 📦 選択した伝票（{picked_comps}｜{len(picked_oids)}件）の注文商品リスト（金額: ¥{sub_amt:,} ／ 粗利: ¥{sub_prof:,} ／ 粗利率: {sub_mgn:.1f}%）")
+            render_universal_table(sub_det, max_h=320)
+
     with tab_b2b_2:
-        render_universal_table(det_df, max_h=520)
+        render_universal_table(prod_agg_df, max_h=520)
+
+    with tab_b2b_3:
+        render_universal_table(det_df.drop(columns=["粗利率_数値"], errors="ignore"), max_h=520)
     st.stop()
