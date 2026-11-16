@@ -5243,6 +5243,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         f"📦 ③ 商品明細・リアルタイム注文一覧（{len(det_df):,} 行）"
     ])
 
+    import html
     import streamlit.components.v1 as components
 
     def render_b2b_Interactive_orders_table(hdr_df_in, det_df_in, max_h=540):
