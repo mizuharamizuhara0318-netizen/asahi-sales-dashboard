@@ -2121,7 +2121,7 @@ VIEW_MODES = [
     '📑 営業会議用：上位客先別売上実績',
     '🛒 アマゾン日別注文数＆利益計算出力',
     '🏷️ ランク価格マスタ一覧',
-    '👤 担当者別 売上＆目標達成分析',
+    '👤 render_universal_table(show_st_df),
     '🏭 在庫・確保数＆発注検討アラート',
     '✨ 新商品売上分析（直近1年）',
     '📈 商品別 前年実績比較',
@@ -3906,6 +3906,30 @@ elif view_type == '👤 担当者別 売上＆目標達成分析':
             st.download_button(label="📥 Excelで保存", data=generate_excel_bytes(show_st_df, "担当者別分析"), file_name=f"担当者別売上分析_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         st.write("")
         render_universal_table(show_st_df)
+        # ★ 担当者ズレ確認＆ワンクリック修復パネル（松平⇔原の2,520,735円ズレ解消用）
+        with st.expander("🔧 担当者の内訳確認 ＆ 得意先別・担当者の一括修正（sales_cache.parquet 即時反映）", expanded=False):
+            st.caption("※過去のキャッシュで別の担当者（例：原 ➔ 松平）に紐付いてしまった得意先を確認し、正しい担当者へ一発で修正・保存できます。")
+            chk_staff = st.selectbox("確認したい現在の担当者を選択", ["原", "松平"] + [s for s in staff_agg["担当者"].tolist() if s not in ["原", "松平"]], key="chk_staff_fix_sel")
+            sub_st_cust = filtered[filtered["担当者"] == chk_staff].groupby("得意先名").agg(
+                当月売上=("金額", "sum"), 当月数量=("数量", "sum"), 伝票行数=("金額", "count")
+            ).reset_index().sort_values("当月売上", ascending=False)
+            st.dataframe(sub_st_cust, use_container_width=True, hide_index=True)
+
+            fix_c1, fix_c2, fix_c3 = st.columns([2.2, 1.2, 1.4])
+            with fix_c1:
+                target_fix_custs = st.multiselect("担当者を変更したい得意先を選択（複数選択可）", sub_st_cust["得意先名"].tolist(), key="fix_cust_multi")
+            with fix_c2:
+                new_assign_staff = st.selectbox("正しい担当者", list(STAFF_MAP.values()), index=11, key="new_assign_staff_sel")
+            with fix_c3:
+                st.write("")
+                if st.button("✅ 選択した得意先の担当者を更新して保存", type="primary", use_container_width=True):
+                    if target_fix_custs:
+                        df.loc[df["得意先名"].isin(target_fix_custs), "担当者"] = new_assign_staff
+                        save_parquet_and_sync(df, CACHE_FILE, "sales_cache.parquet")
+                        st.cache_data.clear()
+                        st.success(f"✅ {len(target_fix_custs)} 社の担当者を『{new_assign_staff}』に更新し、データベースへ保存しました！")
+                        time.sleep(0.5)
+                        st.rerun()
     else:
         st.info("該当期間のデータがありません。")
     st.stop()
