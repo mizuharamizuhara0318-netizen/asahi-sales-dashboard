@@ -202,8 +202,12 @@ def get_gdrive_service_and_folder():
         return None, None
 
 def sync_all_from_gdrive(force=False):
+    if "_last_gdrive_sync_ts" not in st.session_state and os.path.exists(CACHE_FILE) and not force:
+        st.session_state["_last_gdrive_sync_ts"] = time.time()
+        st.session_state["_gdrive_diag"] = "⚡ 高速起動モード（最新ファイルを読み込む時は右上の同期ボタンを押してください）"
+        return True
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    if not force and (time.time() - last_sync < 1800):
+    if not force and (time.time() - last_sync < 600):
         return True
 
     service, folder_id = get_gdrive_service_and_folder()
