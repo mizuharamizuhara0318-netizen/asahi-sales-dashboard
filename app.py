@@ -4891,7 +4891,7 @@ def fetch_b2b_orders_from_api(date_from_str, date_to_str, access_token):
     # v1 受注検索API (/api/v1/orders.php) は明細(details)まで一括取得可能 (1回最大50件・1秒間隔制限遵守)
     offset = 0
     limit = 50
-    for _ in range(20):  # 最大1,000件（20ページ）
+    for _ in range(40):  # 最大1,000件（20ページ）
         q_params = urllib.parse.urlencode({
             "order_date_from": f"{date_from_str} 00:00:00",
             "order_date_to": f"{date_to_str} 23:59:59",
@@ -4992,11 +4992,17 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         if "キャンセル" in status_nm or "取消" in status_nm:
             continue
 
-        ord_dt_raw = str(od.get("plg_raku2_order_date", "")).strip()
         hasso_dt = str(od.get("hasso_date", "") or "").strip()
         commit_dt = str(od.get("commit_date", "") or "").strip()
+        ord_dt_raw = str(
+            od.get("plg_raku2_order_date") or od.get("order_date") or od.get("create_date") or hasso_dt or commit_dt or ""
+        ).strip()
         staff_raw = str(od.get("customer_charge", "") or "").strip()
         staff_nm = normalize_target_staff_name(staff_raw) if staff_raw else ""
+        if not staff_nm and not df.empty and comp:
+            matched_st = df[df["得意先名"] == comp]["担当者"]
+            if not matched_st.empty:
+                staff_nm = matched_st.iloc[-1]
 
         is_shipped = bool(commit_dt and commit_dt not in ["0000-00-00", "None", "null"]) or ("発送" in status_nm or "出荷済" in status_nm or "完了" in status_nm)
         ship_badge = "✅ 出荷済" if is_shipped else "⏳ 未出荷(見込み)"
