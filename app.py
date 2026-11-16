@@ -1343,11 +1343,14 @@ def finalize_sales_df(df, cost_master, code_name_dict=None):
         mask_same = (df["商品名"] == df["商品コード"]) | (df["商品名"] == "")
         df.loc[mask_same, "商品名"] = df.loc[mask_same, "商品コード"].map(lambda c: code_name_dict.get(c, c))
 
+    # ★修正：すでに伝票に「担当者」が入っている行は絶対に上書きせず、担当者が空欄の行だけ得意先の最新担当者で補完する！
     if "担当者" in df.columns and "得意先名" in df.columns:
+        df["担当者"] = df["担当者"].map(convert_staff_name)
         valid_staff_df = df[df["担当者"].str.strip().ne("")].sort_values("日付_dt")
         if not valid_staff_df.empty:
             cust_current_staff_map = valid_staff_df.groupby("得意先名")["担当者"].last().to_dict()
-            df["担当者"] = df["得意先名"].map(lambda c: cust_current_staff_map.get(c, ""))
+            empty_mask = df["担当者"].str.strip().eq("")
+            df.loc[empty_mask, "担当者"] = df.loc[empty_mask, "得意先名"].map(lambda c: cust_current_staff_map.get(c, ""))
 
     for n_col in ["数量", "単価", "金額"]:
         if n_col in df.columns:
