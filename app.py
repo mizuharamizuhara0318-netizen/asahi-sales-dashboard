@@ -2220,8 +2220,6 @@ VIEW_MODES = [
     '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)'
 ]
 col_top1, col_top2 = st.columns([1.6, 2])
-with col_top1:
-    view_type = st.selectbox("表示モード", VIEW_MODES)
 with col_top2:
     if view_type == '🧮 簡易見積＆利益シミュレーター':
         st.write("")
@@ -5074,13 +5072,21 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     with col_cap_r:
         enable_auto_timer = st.toggle("⏱️ 画面放置時も3分自動更新", value=True, key="b2b_auto_timer_toggle")
 
-    # 画面を開きっぱなしにしている時も、3分（180秒）ごとに自動で再読み込みをトリガーするタイマー
+    # 画面を開きっぱなしにしている時も、ページを移動させずに3分（180秒）ごとに「⚡ 今すぐ最新を取得」ボタンを自動クリックする
     if enable_auto_timer:
         components.html(
             """
             <script>
             setTimeout(function() {
-                window.parent.location.reload();
+                try {
+                    const btns = window.parent.document.querySelectorAll('button');
+                    for (const b of btns) {
+                        if (b.innerText && b.innerText.includes('今すぐ最新を取得')) {
+                            b.click();
+                            return;
+                        }
+                    }
+                } catch (e) {}
             }, 180000);
             </script>
             """,
@@ -5099,7 +5105,6 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     detail_rows = []
     for od in raw_orders:
         oid = str(od.get("serial_order_id", "")).strip()
-        ec_oid = str(od.get("ec_order_id", "")).strip()
         comp = clean_cust_name(str(od.get("order_company_name", "")).strip()) or str(od.get("order_name01", "")).strip()
         status_nm = str(od.get("order_status_name", "")).strip()
         if "キャンセル" in status_nm or "取消" in status_nm:
@@ -5165,11 +5170,9 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 "区分": ship_badge,
                 "受注日時": ord_dt_raw[:16],
                 "出荷予定日": hasso_dt[:10] if hasso_dt else "",
-                "出荷日": commit_date_10,
                 "受注ID": int(oid) if oid.isdigit() else oid,
                 "受注ステータス": status_nm,
                 "得意先名": comp,
-                "担当者": staff_nm,
                 "商品コード": sku,
                 "商品名": pname,
                 "JANコード": jan,
@@ -5179,7 +5182,9 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 "原価合計": line_cost,
                 "粗利額": line_prof,
                 "粗利率_数値": line_margin,
-                "粗利率": f"{line_margin:.1f}%" if line_amt > 0 else "-"
+                "粗利率": f"{line_margin:.1f}%" if line_amt > 0 else "-",
+                "出荷日": commit_date_10,
+                "担当者": staff_nm
             })
 
         if ord_notax_sum == 0:
@@ -5190,25 +5195,24 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         ord_prof_sum = ord_notax_sum - ord_cost_sum
         ord_margin_pct = round(ord_prof_sum / ord_notax_sum * 100.0, 1) if ord_notax_sum > 0 else 0.0
 
+        # ★ご要望通り：「受注番号」を削除し、「出荷日」と「担当者」を一番右側に配置！
         order_header_rows.append({
             "区分": ship_badge,
             "受注日時": ord_dt_raw[:16],
             "出荷予定日": hasso_dt[:10] if hasso_dt else "",
-            "出荷日": commit_date_10,
             "受注ID": int(oid) if oid.isdigit() else oid,
-            "受注番号": ec_oid,
             "受注ステータス": status_nm,
             "得意先名": comp,
-            "担当者": staff_nm,
             "注文商品内訳(抜粋)": " / ".join(item_summary_list[:4]) + (" 他" if len(item_summary_list) > 4 else ""),
             "点数合計": ord_qty_sum,
             "商品代金(税別)": ord_notax_sum,
             "原価合計": ord_cost_sum,
             "粗利額": ord_prof_sum,
             "粗利率_数値": ord_margin_pct,
-            "粗利率": f"{ord_margin_pct:.1f}%" if ord_notax_sum > 0 else "-"
+            "粗利率": f"{ord_margin_pct:.1f}%" if ord_notax_sum > 0 else "-",
+            "出荷日": commit_date_10,
+            "担当者": staff_nm
         })
-
     hdr_df = pd.DataFrame(order_header_rows)
     det_df = pd.DataFrame(detail_rows)
 
