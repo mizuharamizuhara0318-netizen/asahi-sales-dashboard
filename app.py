@@ -211,6 +211,15 @@ def sync_all_from_gdrive(force=False):
     if not force and os.path.exists(sync_meta_file) and (time.time() - last_sync < 600):
         return True
 
+    service, folder_id = get_gdrive_service_and_folder()
+    if not service or not folder_id:
+        st.session_state["_gdrive_diag"] = "❌ Googleドライブ未接続（st.secrets の設定を確認してください）"
+        return False
+
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+        os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
+
     try:
         from googleapiclient.http import MediaIoBaseDownload
         os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
@@ -5091,12 +5100,32 @@ def _slim_b2b_order(od):
     }
 
 def _load_b2b_orders_disk_cache():
+    if not os.path.exists(B2B_ORDERS_CACHE_FILE):
+        service, folder_id = get_gdrive_service_and_folder()
+        if service and folder_id:
+            try:
+                from googleapiclient.http import MediaIoBaseDownload
+                q = f"'{folder_id}' in parents and name = 'b2b_orders_cache.json' and trashed = false"
+                res = service.files().list(
+                    q=q, fields="files(id, name)",
+                    supportsAllDrives=True, includeItemsFromAllDrives=True
+                ).execute().get("files", [])
+                if res:
+                    req = service.files().get_media(fileId=res[0]["id"], supportsAllDrives=True)
+                    fh = io.BytesIO()
+                    dl = MediaIoBaseDownload(fh, req)
+                    done = False
+                    while not done:
+                        _, done = dl.next_chunk()
+                    with open(B2B_ORDERS_CACHE_FILE, "wb") as f_out:
+                        f_out.write(fh.getvalue())
+            except Exception:
+                pass
     if os.path.exists(B2B_ORDERS_CACHE_FILE):
         try:
             with open(B2B_ORDERS_CACHE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             raw_map = data.get("orders_map", {})
-            # 既存の巨大キャッシュファイルも読込時に自動でスリム化
             slim_map = {k: _slim_b2b_order(v) for k, v in raw_map.items()}
             return {"orders_map": slim_map, "updated_at": data.get("updated_at", "")}
         except Exception:
@@ -5122,21 +5151,21 @@ def _save_b2b_orders_disk_cache(orders_map, sync_to_drive=False):
     return now_str
 
 def _fetch_v2_commit_date_order_ids(commit_from_str, commit_to_str, access_token):
+    """v2 受注検索API（GET: commit_date_from / commit_date_to）で出荷日が期間内の全受注IDを取得"""
     found_ids = set()
     headers = {"Authorization": f"Bearer {access_token}"}
-    for offset in [0, 500, 1000, 1500]:
-        q_dict = {
-            "search_options[commit_date_from]": commit_from_str,
-            "search_options[commit_date_to]": commit_to_str,
-            "search_options[limit]": 500,
-            "search_options[offset]": offset,
-            "search_fields": "order_id"
-        }
-        q_params = urllib.parse.urlencode(q_dict)
+    for offset in [0, 500, 1000, 1500, 2000]:
+        q_params = urllib.parse.urlencode({
+            "commit_date_from": f"{commit_from_str} 00:00:00",
+            "commit_date_to": f"{commit_to_str} 23:59:59",
+            "limit": 500,
+            "offset": offset,
+            "sort": "order_id"
+        })
         url = f"{B2B_DOMAIN}/api/v2/orders/search?{q_params}"
-        req = urllib.request.Request(url, data=q_params.encode("utf-8"), headers=headers, method="POST")
+        req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 data = json.loads(resp.read().decode("utf-8", errors="replace"))
             rows = data.get("orders", data.get("data", data if isinstance(data, list) else []))
             if isinstance(rows, dict):
@@ -5155,7 +5184,7 @@ def _fetch_v2_commit_date_order_ids(commit_from_str, commit_to_str, access_token
             break
     return found_ids
 
-def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=30, silent=False, commit_from_str=None):
+def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=50, silent=False, commit_from_str=None):
     if not access_token:
         return [], "アクセストークンが未設定です", ""
     cache_data = _load_b2b_orders_disk_cache()
@@ -5164,6 +5193,7 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
 
     prog_bar = None if silent else st.progress(0, text="スマレジEC・B2Bから受注データを取得しています...")
 
+    # ステップ1：指定期間（例：11/01〜11/17）の注文を最後まで全件取得
     offset = 0
     limit = 50
     for page_i in range(max_pages):
@@ -5197,11 +5227,12 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
             up_str = _save_b2b_orders_disk_cache(orders_map, sync_to_drive=False)
             return list(orders_map.values()), f"API通信エラー: {str(e)}", up_str
 
+    # ステップ2：全件再取得時は、前月（開始日の31日前〜前日）に注文されて当月に出荷された伝票を網羅取得
     if commit_from_str and not silent:
-        prev_from = (pd.to_datetime(date_from_str) - pd.Timedelta(days=15)).strftime("%Y-%m-%d")
+        prev_from = (pd.to_datetime(date_from_str) - pd.Timedelta(days=31)).strftime("%Y-%m-%d")
         prev_to = (pd.to_datetime(date_from_str) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         offset_p = 0
-        for page_p in range(25):
+        for page_p in range(40):
             time.sleep(1.02)
             q_p = urllib.parse.urlencode({
                 "order_date_from": f"{prev_from} 00:00:00",
@@ -5223,19 +5254,20 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
                     if oid_p and ((c_dt_p and c_dt_p >= commit_from_str) or not c_dt_p or c_dt_p.startswith("0000")):
                         orders_map[oid_p] = slim_p
                 if prog_bar is not None:
-                    prog_bar.progress(min(1.0, (page_p + 1) / 25), text=f"前月注文→当月出荷分を照合中... ({len(orders_map):,} 件)")
+                    prog_bar.progress(min(1.0, (page_p + 1) / 40), text=f"前月受注→当月出荷分を照合中... ({len(orders_map):,} 件)")
                 if len(batch_p) < limit:
                     break
                 offset_p += limit
             except Exception:
                 break
 
+        # ステップ3：さらにv2 APIの出荷日検索（commit_date_from/to）で2ヶ月以上前の先行予約出荷分も100%補完
         time.sleep(1.02)
         v2_ids = _fetch_v2_commit_date_order_ids(commit_from_str, date_to_str, access_token)
         missing_ids = [oid for oid in sorted(v2_ids) if oid not in orders_map]
         for m_i, m_oid in enumerate(missing_ids):
             if prog_bar is not None:
-                prog_bar.progress(min(1.0, (m_i + 1) / max(1, len(missing_ids))), text=f"過去受注の当月出荷分を補完中... ({m_i+1}/{len(missing_ids)}件)")
+                prog_bar.progress(min(1.0, (m_i + 1) / max(1, len(missing_ids))), text=f"先行予約の当月出荷分を補完中... ({m_i+1}/{len(missing_ids)}件)")
             q_m = urllib.parse.urlencode({"serial_order_id": m_oid})
             req_m = urllib.request.Request(f"{B2B_DOMAIN}/api/v1/orders.php?{q_m}", headers=headers, method="GET")
             try:
@@ -5326,16 +5358,16 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         st.write("")
         if st.button("⚡ 今すぐ最新を取得", type="primary", use_container_width=True):
             quick_from = (now_d - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=8, silent=False)
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=10, silent=False)
     with c_ap6:
         st.write("")
         if st.button("🔄 月初から全件再取得", use_container_width=True):
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(d_from_str, d_to_str, current_token, max_pages=35, silent=False, commit_from_str=d_from_str)
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(d_from_str, d_to_str, current_token, max_pages=50, silent=False, commit_from_str=d_from_str)
 
     if not cached_orders_list:
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(d_from_str, d_to_str, current_token, max_pages=35, silent=False, commit_from_str=d_from_str)
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(d_from_str, d_to_str, current_token, max_pages=50, silent=False, commit_from_str=d_from_str)
     elif (time.time() - last_sync_ts) >= 120:
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=5, silent=True)
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=6, silent=True)
 
     col_cap_l, col_cap_r = st.columns([3.8, 1.2])
     with col_cap_l:
@@ -5451,14 +5483,11 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 "担当者": staff_nm
             })
 
-        # ★調整額（discount：値引・端数調整）を反映してスマレジ側の税別合計と一致させる
-        disc_val = int(clean_num(od.get("discount", 0)))
+        # スマレジの「商品代金合計(税別)」と同じく、調整額を引く前の純粋な商品税別合計を使用する
         if ord_notax_sum == 0:
             sub_tax_in = int(clean_num(od.get("subtotal", 0)))
             tax_v = int(clean_num(od.get("tax", 0)))
             ord_notax_sum = (sub_tax_in - tax_v) if tax_v > 0 else int(round(sub_tax_in / 1.10))
-        else:
-            ord_notax_sum = ord_notax_sum - disc_val
 
         ord_prof_sum = ord_notax_sum - ord_cost_sum
         ord_margin_pct = round(ord_prof_sum / ord_notax_sum * 100.0, 1) if ord_notax_sum > 0 else 0.0
@@ -5518,7 +5547,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             <div style="font-size:11px; color:#7c2d12; margin-top:2px;">未出荷伝票: <b>{len(unshipped_df):,} 件</b></div>
         </div>
         <div style="border:1px solid #cbd5e1; border-top:4px solid #2563eb; border-radius:6px; padding:10px; background:#eff6ff;">
-            <div style="font-size:12px; color:#1e40af;">✅ B2B 期間内出荷済（税別）</div>
+            <div style="font-size:12px; color:#1e40af;">✅ B2B 期間内出荷済（税別）｜<b>{len(shipped_df):,} 件</b></div>
             <div style="font-size:20px; font-weight:bold; color:#1d4ed8; margin-top:2px;">¥{shipped_amt:,}</div>
             <div style="font-size:11px; color:#1e3a8a; margin-top:2px;">粗利額: <b>¥{shipped_prof:,}</b>（粗利率: <b>{shipped_margin:.1f}%</b>）</div>
         </div>
