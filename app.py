@@ -5078,7 +5078,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         ord_date_10 = ord_dt_raw[:10] if len(ord_dt_raw) >= 10 else ""
         commit_date_10 = commit_dt[:10] if (commit_dt and len(commit_dt) >= 10 and not commit_dt.startswith("0000")) else ""
 
-        is_shipped = bool(commit_date_10) or ("発送" in status_nm or "出荷済" in status_nm or "完了" in status_nm)
+        is_shipped = bool(commit_date_10) or any(k in status_nm for k in ["発送済", "出荷済", "完了", "実売上"])
         ship_badge = "✅ 出荷済" if is_shipped else "⏳ 未出荷(見込み)"
 
         # 期間フィルタリング（出荷日基準 or 受注日基準）
@@ -5184,7 +5184,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     today_str = now_d.strftime("%Y-%m-%d")
     unshipped_df = hdr_df[hdr_df["区分"].str.contains("未出荷")]
     shipped_df = hdr_df[hdr_df["区分"].str.contains("出荷済")]
-    today_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str) | hdr_df["出荷予定日"].str.startswith(today_str)]
+    today_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str)]
 
     unshipped_amt = int(unshipped_df["商品代金(税別)"].sum())
     shipped_amt = int(shipped_df["商品代金(税別)"].sum())
@@ -5230,8 +5230,8 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         hdr_df = hdr_df[hdr_df["区分"].str.contains("出荷済")].copy()
         det_df = det_df[det_df["区分"].str.contains("出荷済")].copy()
     elif api_status_filter.startswith("🆕"):
-        hdr_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str) | hdr_df["出荷予定日"].str.startswith(today_str)].copy()
-        det_df = det_df[det_df["受注日時"].str.startswith(today_str) | det_df["出荷予定日"].str.startswith(today_str)].copy()
+        hdr_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str)].copy()
+        det_df = det_df[det_df["受注日時"].str.startswith(today_str)].copy()
 
     # ★ ご要望機能：得意先選択（ドリルダウン）＆ 昇順・降順ソートバー
     s_bar1, s_bar2, s_bar3, s_bar4 = st.columns([2.2, 1.2, 1.1, 1.3])
