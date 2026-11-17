@@ -5950,14 +5950,27 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 document.getElementById("orderModal").style.display = "flex";
             }}
 
-            function openOrderModal(oid) {{
-                const h = DATA.headers[oid];
+            let LAST_CARD_TYPE = "";
+            const origOpenCardModal = openCardModal;
+            openCardModal = function(cardType) {{
+                LAST_CARD_TYPE = cardType;
+                origOpenCardModal(cardType);
+            }};
+
+            function openOrderModal(oid, fromCard) {{
+                const h = DATA.headers[String(oid)];
                 if (!h) return;
-                const items = DATA.details[oid] || [];
+                const items = DATA.details[String(oid)] || [];
                 const compItems = DATA.comp_summary[h.comp] || [];
+                const backTarget = (fromCard !== undefined) ? fromCard : LAST_CARD_TYPE;
+
+                let backBtnHtml = "";
+                if (backTarget) {{
+                    backBtnHtml = `<button onclick="openCardModal('${{backTarget}}')" style="margin-right:10px; padding:4px 10px; background:#e2e8f0; border:1px solid #94a3b8; border-radius:5px; font-size:12.5px; font-weight:700; cursor:pointer; color:#0f172a;">⬅️ 一覧POPへ戻る</button>`;
+                }}
 
                 document.getElementById("mTitle").innerHTML =
-                    `🏢 【${{h.comp}}】 注文商品・粗利ステータス詳細 <span style="font-size:13px; font-weight:600; color:#2563eb; margin-left:8px;">${{h.badge}}（受注ID: ${{h.oid}}）</span>`;
+                    `${{backBtnHtml}}🏢 【${{h.comp}}】 注文商品・粗利ステータス詳細 <span style="font-size:13px; font-weight:600; color:#2563eb; margin-left:8px;">${{h.badge}}（受注ID: ${{h.oid}}）</span>`;
 
                 let rowsHtml = items.map(it => `
                     <tr>
@@ -6041,6 +6054,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             }}
 
             function closeOrderModal() {{
+                LAST_CARD_TYPE = "";
                 document.getElementById("orderModal").style.display = "none";
             }}
             </script>
@@ -6061,9 +6075,8 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             st.caption("💡 上の **4つのサマリーカード（本日受注／未出荷受注残／期間内出荷済／要確認アラート）** や表の **「🔍 得意先名」** をクリックすると、待ち時間ゼロで詳細POPが開きます！")
         with c_lim2:
             b2b_disp_lim = st.selectbox("表の表示件数（省メモリ）", [200, 500, "全件"], index=0, key="b2b_tbl_lim_sel", label_visibility="collapsed")
-        hdr_show = hdr_df.head(int(b2b_disp_lim)) if b2b_disp_lim != "全件" else hdr_df
-        det_show = det_df[det_df["受注ID"].isin(hdr_show["受注ID"])] if b2b_disp_lim != "全件" else det_df
-        render_b2b_dashboard_and_table(hdr_show, det_show, max_h=520)
+        # ★全件（hdr_df, det_df）を渡すことで、未出荷POPやアラートPOP内のどの伝票をクリックしても100%詳細が開きます！
+        render_b2b_dashboard_and_table(hdr_df, det_df, max_h=520, table_limit=b2b_disp_lim)
 
     with tab_b2b_2:
         render_universal_table(prod_agg_df.head(300), max_h=520)
