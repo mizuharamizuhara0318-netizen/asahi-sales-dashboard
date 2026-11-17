@@ -5223,12 +5223,12 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
             up_str = _save_b2b_orders_disk_cache(orders_map, sync_to_drive=False)
             return list(orders_map.values()), f"API通信エラー: {str(e)}", up_str
 
-    # ステップ2：全件再取得時は、前月（開始日の31日前〜前日）に注文されて当月に出荷された伝票を網羅取得
+    # ステップ2：全件再取得時は、開始日の90日前（3ヶ月前）〜前日に注文されて当月に出荷された伝票も漏れなく取得する
     if commit_from_str and not silent:
-        prev_from = (pd.to_datetime(date_from_str) - pd.Timedelta(days=31)).strftime("%Y-%m-%d")
+        prev_from = (pd.to_datetime(date_from_str) - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
         prev_to = (pd.to_datetime(date_from_str) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         offset_p = 0
-        for page_p in range(40):
+        for page_p in range(80):
             time.sleep(1.02)
             q_p = urllib.parse.urlencode({
                 "order_date_from": f"{prev_from} 00:00:00",
@@ -5247,10 +5247,44 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
                     slim_p = _slim_b2b_order(od_p)
                     oid_p = slim_p.get("serial_order_id", "")
                     c_dt_p = slim_p.get("commit_date", "")[:10]
+                    # 過去注文のうち「出荷日が当月以降」または「未出荷」の伝票だけを保存（過去出荷済は破棄して省メモリ）
                     if oid_p and ((c_dt_p and c_dt_p >= commit_from_str) or not c_dt_p or c_dt_p.startswith("0000")):
                         orders_map[oid_p] = slim_p
                 if prog_bar is not None:
-                    prog_bar.progress(min(1.0, (page_p + 1) / 40), text=f"前月受注→当月出荷分を照合中... ({len(orders_map):,} 件)")
+                    prog_bar.progress(min(1.0, (page_p + 1) / 80), text=f"過去3ヶ月分の予約注文→当月出荷分を照合中... ({len(orders_map):,} 件)")
+                if len(batch_p) < limit:
+                    break
+                offset_p += limit
+            except Exception:
+                break# ステップ2：全件再取得時は、開始日の90日前（3ヶ月前）〜前日に注文されて当月に出荷された伝票も漏れなく取得する
+    if commit_from_str and not silent:
+        prev_from = (pd.to_datetime(date_from_str) - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
+        prev_to = (pd.to_datetime(date_from_str) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        offset_p = 0
+        for page_p in range(80):
+            time.sleep(1.02)
+            q_p = urllib.parse.urlencode({
+                "order_date_from": f"{prev_from} 00:00:00",
+                "order_date_to": f"{prev_to} 23:59:59",
+                "limit": limit,
+                "offset": offset_p
+            })
+            req_p = urllib.request.Request(f"{B2B_DOMAIN}/api/v1/orders.php?{q_p}", headers=headers, method="GET")
+            try:
+                with urllib.request.urlopen(req_p, timeout=20) as resp_p:
+                    d_p = json.loads(resp_p.read().decode("utf-8", errors="replace"))
+                batch_p = d_p.get("orders", [])
+                if not batch_p:
+                    break
+                for od_p in batch_p:
+                    slim_p = _slim_b2b_order(od_p)
+                    oid_p = slim_p.get("serial_order_id", "")
+                    c_dt_p = slim_p.get("commit_date", "")[:10]
+                    # 過去注文のうち「出荷日が当月以降」または「未出荷」の伝票だけを保存（過去出荷済は破棄して省メモリ）
+                    if oid_p and ((c_dt_p and c_dt_p >= commit_from_str) or not c_dt_p or c_dt_p.startswith("0000")):
+                        orders_map[oid_p] = slim_p
+                if prog_bar is not None:
+                    prog_bar.progress(min(1.0, (page_p + 1) / 80), text=f"過去3ヶ月分の予約注文→当月出荷分を照合中... ({len(orders_map):,} 件)")
                 if len(batch_p) < limit:
                     break
                 offset_p += limit
@@ -5387,9 +5421,6 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         st.error(f"⚠️ {api_msg}")
         st.stop()
 
-    # ★ご指定の4ステータス（「確定済み」「弥生販売」「実売上請求待ち」「処理済み」）
-    SHIPPED_VALID_STATUS_KEYWORDS = ["確定済", "弥生販売", "実売上請求待ち", "実売上", "処理済"]
-
     # 受注ヘッダ＆商品明細の展開
     order_header_rows = []
     detail_rows = []
@@ -5397,7 +5428,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         oid = str(od.get("serial_order_id", "")).strip()
         comp = clean_cust_name(str(od.get("order_company_name", "")).strip()) or str(od.get("order_name01", "")).strip()
         status_nm = str(od.get("order_status_name", "")).strip()
-        if "キャンセル" in status_nm or "取消" in status_nm or "テスト" in status_nm or "テスト" in comp:
+        if "キャンセル" in status_nm or "取消" in status_nm:
             continue
 
         hasso_dt = str(od.get("hasso_date", "") or "").strip()
@@ -5409,9 +5440,8 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         ord_date_10 = ord_dt_raw[:10] if len(ord_dt_raw) >= 10 else ""
         commit_date_10 = commit_dt[:10] if (commit_dt and len(commit_dt) >= 10 and not commit_dt.startswith("0000")) else ""
 
-        # 出荷日(commit_date_10)があり、かつ「確定済み・弥生販売・実売上請求待ち・処理済み」のいずれかに入っている伝票を出荷済とする
-        has_valid_ship_status = any(k in status_nm for k in SHIPPED_VALID_STATUS_KEYWORDS) if status_nm else True
-        is_shipped = bool(commit_date_10) and has_valid_ship_status
+        # 出荷日(commit_date_10)が入っている全伝票（キャンセル除く）を出荷済とする
+        is_shipped = bool(commit_date_10)
         ship_badge = "✅ 出荷済" if is_shipped else "⏳ 未出荷(見込み)"
 
         # 期間フィルタリング（出荷日基準 or 受注日基準）
