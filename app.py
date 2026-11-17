@@ -1114,60 +1114,217 @@ def save_meeting_sheet_data(data_dict):
             upload_file_to_gdrive(LOCAL_MEETING_FILE, "meeting_sheet_saved.json")
         except Exception:
             pass
+def _split_pref_and_addr(full_addr_str, fallback_pref=""):
+    s = str(full_addr_str or "").strip()
+    if not s or s.lower() == "nan":
+        return fallback_pref, ""
+    # 先頭に都道府県（大阪府・東京都・北海道・京都府・〇〇県）があれば自動分離
+    m = re.match(r'^(東京都|北海道|(?:京都|大阪)府|.{2,3}県)[\s\u3000]*(.*)$', s)
+    if m:
+        return m.group(1), m.group(2).strip()
+    if fallback_pref and s.startswith(fallback_pref):
+        return fallback_pref, s[len(fallback_pref):].strip()
+    return fallback_pref, s
+
+def _fmt_zip_hyphen(z_val):
+    s = str(z_val or "").replace(".0", "").strip()
+    if not s or s.lower() == "nan":
+        return ""
+    digits = re.sub(r'\D', '', s)
+    if len(digits) == 7:
+        return f"{digits[:3]}-{digits[3:]}"
+    return s
 
 def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
     rows = []
     pay_map = {"銀行振込": 3, "代金引換": 2, "現行通り": 3, "掛け払い（月末締め翌月末払い）": 3}
     pay_id = pay_map.get(est_data.get("payment", ""), 3)
-    now_dt_str = datetime.now().strftime("%Y/%m/%d %H:%M")
-    ship_dt_str = datetime.now().strftime("%Y/%m/%d")
-    deliv_dt_str = (datetime.now() + timedelta(days=1)).strftime("%Y/%m/%d")
+    now_dt_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y/%m/%d %H:%M")
+    ship_dt_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y/%m/%d")
+    deliv_dt_str = (datetime.utcnow() + timedelta(hours=9, days=1)).strftime("%Y/%m/%d")
 
-    for item in est_data.get("items", []):
-        sku = str(item.get("商品コード", "")).strip()
+    # 会社名から customer_master_df（注文者会社名シート）を検索（㈱や（株）やスペースの違いも吸収して照合）
+    comp_raw = str(est_data.get("cust_comp", "") or "").strip()
+    def _norm_c(txt):
+        t = re.sub(r'[\s\u3000\xa0]+', '', str(txt or ""))
+        return t.replace("株式会社", "㈱").replace("（株）", "㈱").replace("(株)", "㈱").replace("有限会社", "㈲").replace("（有）", "㈲")
+
+    norm_comp = _norm_c(comp_raw)
+    matched_m_row = None
+    if norm_comp and "customer_master_df" in globals() and not customer_master_df.empty:
+        c_col = "加盟店名" if "加盟店名" in customer_master_df.columns else customer_master_df.columns[0]
+        for _, mr in customer_master_df.iterrows():
+            mc_name = str(mr.get(c_col, "")).strip()
+            norm_mc = _norm_c(mc_name)
+            if norm_mc and (norm_mc == norm_comp or norm_comp in norm_mc or norm_mc in norm_comp):
+                matched_m_row = mr
+                break
+
+    def _m_val(col_candidates, fallback=""):
+        if matched_m_row is not None:
+            for cc in col_candidates:
+                if cc in matched_m_row and pd.notna(matched_m_row[cc]):
+                    v = str(matched_m_row[cc]).replace("_x000D_", "").strip()
+                    if v and v.lower() != "nan":
+                        return v
+        return fallback
+
+    # 1. 注文者お名前・フリガナ・メールアドレス・電話・FAX・職種
+    cust_sei = str(est_data.get("cust_sei", "") or "").strip()
+    if not cust_sei or cust_sei in ["ご担当者", "nan"]:
+        cust_sei = _m_val(["責任者姓", "注文者お名前(姓)"], "ご担当者")
+    cust_mei = str(est_data.get("cust_mei", "") or "").strip()
+    if not cust_mei or cust_mei in ["様", "nan"]:
+        cust_mei = _m_val(["責任者名", "注文者お名前(名)"], "様")
+
+    cust_k_sei = str(est_data.get("cust_kana_sei", "") or "").strip() or _m_val(["責任者姓カナ", "注文者お名前(フリガナ・姓)"], "ゴタントウシャ")
+    cust_k_mei = str(est_data.get("cust_kana_mei", "") or "").strip() or _m_val(["責任者名カナ", "注文者お名前(フリガナ名)"], "サマ")
+
+    # ★必須エラー対策①：注文者メールアドレス（マスタにあればマスタ値、無ければ社内アドレスをセット）
+    cust_email = str(est_data.get("cust_email", "") or "").strip()
+    if not cust_email or cust_email.lower() == "nan":
+        cust_email = _m_val(["メールアドレス", "注文者メールアドレス"], "smilekids-company@smile-asahi.co.jp")
+
+    cust_tel = str(est_data.get("cust_tel", "") or "").strip() or _m_val(["電話番号", "注文者電話番号"], "")
+    cust_fax = str(est_data.get("cust_fax", "") or "").strip() or _m_val(["FAX番号", "注文者FAX"], "")
+    cust_post = _fmt_zip_hyphen(est_data.get("cust_post", "") or _m_val(["郵便番号", "注文者郵便番号"], ""))
+
+    # ★必須エラー対策②：注文者都道府県 と 注文者住所1・住所2 の分離（6〜7行目と同じ形式）
+    m_pref = _m_val(["都道府県", "注文者都道府県"], "")
+    m_addr1 = _m_val(["住所１", "注文者住所1"], "")
+    m_addr2 = _m_val(["住所２", "注文者住所2"], "")
+    raw_c_addr = str(est_data.get("cust_addr", "") or est_data.get("cust_addr1", "") or "").strip()
+    c_pref_in = str(est_data.get("cust_pref", "") or "").strip() or m_pref
+    cust_pref, split_c_addr1 = _split_pref_and_addr(raw_c_addr, fallback_pref=c_pref_in)
+    if not cust_pref:
+        cust_pref = "大阪府"
+    if m_addr1 and (not raw_c_addr or m_addr1 in raw_c_addr):
+        cust_addr1 = m_addr1
+        cust_addr2 = str(est_data.get("cust_addr2", "") or "").strip() or m_addr2
+    else:
+        cust_addr1 = split_c_addr1
+        cust_addr2 = str(est_data.get("cust_addr2", "") or "").strip()
+
+    # ★必須エラー対策③：送付先都道府県 と 送付先住所1・住所2 の分離（直送先変更時も住所から都道府県を自動抽出！）
+    ship_comp = str(est_data.get("ship_comp", "") or comp_raw).strip()
+    ship_post = _fmt_zip_hyphen(est_data.get("ship_post", "") or cust_post)
+    ship_tel = str(est_data.get("ship_tel", "") or cust_tel).strip()
+    raw_s_addr = str(est_data.get("ship_addr", "") or est_data.get("ship_addr1", "") or "").strip()
+    ship_pref, split_s_addr1 = _split_pref_and_addr(raw_s_addr, fallback_pref="")
+    if not ship_pref:
+        ship_pref = cust_pref
+    if raw_s_addr and raw_s_addr != raw_c_addr:
+        ship_addr1 = split_s_addr1
+        ship_addr2 = str(est_data.get("ship_addr2", "") or "").strip()
+    else:
+        ship_addr1 = cust_addr1
+        ship_addr2 = cust_addr2
+
+    # 職種コード・クーポン名（ランク名）を6〜7行目と同じルールで取得
+    job_code = clean_code_str(est_data.get("cust_job_id", "") or _m_val(["職種", "職種ID", "注文者職種", "加盟店コード"], ""))
+    if not job_code and "member_group_master_dict" in globals():
+        g_info = lookup_group_info_by_comp(comp_raw, member_group_master_dict)
+        job_code = clean_code_str(g_info.get("member_code", ""))
+
+    raw_rank = _m_val(["加盟店ランク", "クーポン名"], "") or str(est_data.get("rank_name", "") or "").strip()
+    coupon_nm = str(raw_rank).split(":")[-1].strip() if ":" in str(raw_rank) else str(raw_rank).strip()
+
+    ship_fee = int(clean_num(est_data.get("shipping_fee", 0)))
+    cod_fee = int(clean_num(est_data.get("cod_fee", 0)))
+
+    # ★5行目エラー（BEOC01C000044）対策：商品コードが空欄の行は絶対に出力しない
+    valid_items = [
+        it for it in est_data.get("items", [])
+        if clean_code_str(it.get("商品コード", "")) and int(clean_num(it.get("数量", 0))) > 0
+    ]
+
+    for item in valid_items:
+        sku = clean_code_str(item.get("商品コード", ""))
         qty = int(clean_num(item.get("数量", 1)))
         unit_p = int(clean_num(item.get("見積単価", 0)))
         line_amt = unit_p * qty
         unit_tax = int(round(unit_p * 0.10))
         unit_tax_in = unit_p + unit_tax
-        jan = str(item.get("JANコード", "")).strip()
-        clean_name = str(item.get("商品名", "")).strip()
-        full_prod_name = (raw_title_map or {}).get(sku, f"【{sku}】{clean_name}（{jan}）" if jan else f"【{sku}】{clean_name}")
-        std_p = (std_price_map or {}).get(sku, "")
+        row_total = line_amt + ship_fee + cod_fee
+
+        jan = str(item.get("JANコード", "") or "").strip() or str(jan_master_dict.get(sku, "")).strip()
+        clean_name = str(item.get("商品名", "") or "").strip()
+        full_prod_name = (raw_title_map or {}).get(sku, "")
+        if not full_prod_name:
+            full_prod_name = f"【{sku}】{clean_name}（{jan}）" if jan else f"【{sku}】{clean_name}"
+        elif jan and jan not in full_prod_name:
+            full_prod_name = f"{full_prod_name}（{jan}）"
+
+        # 6〜7行目と同じく標準販売価格が空欄なら 0 をセット
+        std_p_raw = (std_price_map or {}).get(sku, 0)
+        std_p = int(clean_num(std_p_raw)) if std_p_raw not in ["", None] else 0
 
         r_dict = {col: "" for col in ORDER_CSV_COLUMNS}
         r_dict.update({
-            '顧客ID': est_data.get("cust_id", -1), '要望等': est_data.get("memo", ""),
-            '注文者お名前(姓)': est_data.get("cust_sei", "ご担当者"), '注文者お名前(名)': est_data.get("cust_mei", "様"),
-            '注文者お名前(フリガナ・姓)': est_data.get("cust_kana_sei", ""), '注文者お名前(フリガナ名)': est_data.get("cust_kana_mei", ""),
-            '注文者会社名': est_data.get("cust_comp", ""), '注文者メールアドレス': est_data.get("cust_email", ""),
-            '注文者メールアドレスタイプ': 1, '注文者電話番号': est_data.get("cust_tel", ""), '注文者FAX': est_data.get("cust_fax", ""),
-            '注文者郵便番号': est_data.get("cust_post", ""), '注文者都道府県': est_data.get("cust_pref", ""),
-            '注文者住所1': est_data.get("cust_addr1", ""), '注文者住所2': est_data.get("cust_addr2", ""),
-            '注文者性別ID': 1, '注文者性別': "男性", '注文者職種': est_data.get("cust_job_id", ""),
-            '商品合計': line_amt, '調整額': 0, 'うち割引額１': 0, 'うち割引額２': 0, 'うち割引額３': 0, 'うちその他調整額': 0,
-            '合計額': line_amt, '送料（税別）': est_data.get("shipping_fee", 0), '手数料（税別）': est_data.get("cod_fee", 0),
-            'クーポン名': str(est_data.get("rank_name", "")).split(":")[0].strip(), 'クーポン利用': 0, 'ポイント利用': 0,
-            '請求額': line_amt, '消費税額': unit_tax, '入金額': 0, 'EC種類': 16,
-            'EC注文番号': est_data.get("q_no", "").replace("-", ""), 'EC店舗ID': 1000, 'EC店舗名': "旭電機化成",
+            '顧客ID': -1,
+            '要望等': est_data.get("memo", ""),
+            '注文者お名前(姓)': cust_sei,
+            '注文者お名前(名)': cust_mei,
+            '注文者お名前(フリガナ・姓)': cust_k_sei,
+            '注文者お名前(フリガナ名)': cust_k_mei,
+            '注文者会社名': comp_raw,
+            '注文者メールアドレス': cust_email,
+            '注文者メールアドレスタイプ': 1,
+            '注文者電話番号': cust_tel,
+            '注文者FAX': cust_fax,
+            '注文者郵便番号': cust_post,
+            '注文者都道府県': cust_pref,
+            '注文者住所1': cust_addr1,
+            '注文者住所2': cust_addr2,
+            '注文者性別ID': 1,
+            '注文者性別': "男性",
+            '注文者職種': job_code,
+            '商品合計': line_amt,
+            '調整額': 0, 'うち割引額１': 0, 'うち割引額２': 0, 'うち割引額３': 0, 'うちその他調整額': 0,
+            '合計額': row_total,
+            '送料（税別）': ship_fee,
+            '手数料（税別）': cod_fee,
+            'クーポン名': coupon_nm,
+            'クーポン利用': 0, 'ポイント利用': 0,
+            '請求額': row_total,
+            '消費税額': unit_tax,
+            '入金額': 0,
+            'EC種類': 16,
+            'EC注文番号': est_data.get("q_no", "").replace("-", ""),
+            'EC店舗ID': 1000, 'EC店舗名': "旭電機化成",
             '販売ルートID': 1, '受注ステータス': 1, '支払方法ID': pay_id, '決済ステータス': 0, '配送方法ID': 1,
-            '配送区分': 0, '申込番号種類': 0, '注文日時': est_data.get("created_at", now_dt_str),
-            '出荷予定日': ship_dt_str, 'ひとことメモ': est_data.get("hitokoto", ""), '伝達事項': est_data.get("memo", ""),
-            '再計算フラグ': 1, '送付先お名前(姓)': est_data.get("ship_sei", est_data.get("cust_sei", "ご担当者")),
-            '送付先お名前(名)': est_data.get("ship_mei", est_data.get("cust_mei", "様")),
-            '送付先会社名': est_data.get("ship_comp", est_data.get("cust_comp", "")),
-            '送付先電話番号': est_data.get("ship_tel", est_data.get("cust_tel", "")),
-            '送付先郵便番号': est_data.get("ship_post", est_data.get("cust_post", "")),
-            '送付先都道府県': est_data.get("ship_pref", est_data.get("cust_pref", "")),
-            '送付先住所1': est_data.get("ship_addr1", est_data.get("cust_addr1", "")),
-            '送付先住所2': est_data.get("ship_addr2", est_data.get("cust_addr2", "")),
-            'お届け日': deliv_dt_str, '出力フラグ(受注伝票)': 0, '出力フラグ(お手紙)': 0, '出力フラグ(納品書)': 1,
+            '配送区分': 0, '申込番号種類': 0,
+            '注文日時': est_data.get("created_at", now_dt_str),
+            '出荷予定日': ship_dt_str,
+            'ひとことメモ': est_data.get("hitokoto", ""),
+            '伝達事項': est_data.get("memo", ""),
+            '再計算フラグ': 1,
+            '送付先お名前(姓)': "ご",
+            '送付先お名前(名)': "担当者",
+            '送付先会社名': ship_comp,
+            '送付先電話番号': ship_tel,
+            '送付先郵便番号': ship_post,
+            '送付先都道府県': ship_pref,
+            '送付先住所1': ship_addr1,
+            '送付先住所2': ship_addr2,
+            'お届け日': deliv_dt_str,
+            '出力フラグ(受注伝票)': 0, '出力フラグ(お手紙)': 0, '出力フラグ(納品書)': 1,
             '出力フラグ(領収書)': 0, '出力フラグ(請求書)': 0, '出力フラグ(EMS)': 0, '出力フラグ(送り状)': 0,
-            'ご購入明細商品コード': sku, 'ご購入明細商品名': full_prod_name, 'ご購入明細消費税区分': "別",
-            'ご購入明細消費税課税規則': 3, 'ご購入明細送料区分': "別", 'ご購入明細手数料区分': "別",
-            'ご購入明細税抜単価': unit_p, 'ご購入明細税込単価': unit_tax_in, 'ご購入明細消費税': unit_tax,
-            'ご購入明細消費税率': 10, 'ご購入明細数量': qty, 'ご購入明細金額': line_amt,
-            'ご購入明細定期区分': "商品", 'ご購入明細標準販売価格': std_p, '消費税計算区分': "伝票単位(B)"
+            'ご購入明細商品コード': sku,
+            'ご購入明細商品名': full_prod_name,
+            'ご購入明細消費税区分': "別",
+            'ご購入明細消費税課税規則': 3,
+            'ご購入明細送料区分': "別",
+            'ご購入明細手数料区分': "別",
+            'ご購入明細税抜単価': unit_p,
+            'ご購入明細税込単価': unit_tax_in,
+            'ご購入明細消費税': unit_tax,
+            'ご購入明細消費税率': 10,
+            'ご購入明細数量': qty,
+            'ご購入明細金額': line_amt,
+            'ご購入明細定期区分': "商品",
+            'ご購入明細標準販売価格': std_p,
+            '消費税計算区分': "伝票単位(B)"
         })
         for flag_col in [
             '出力済(受注伝票)', '出力済(お手紙)', '出力済(納品書)', '出力済(領収書)', '出力済(請求書)',
@@ -1180,8 +1337,7 @@ def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
         rows.append(r_dict)
 
     out_df = pd.DataFrame(rows, columns=ORDER_CSV_COLUMNS)
-    return out_df.to_csv(index=False, encoding="cp932", errors="replace").encode("cp932")
-
+    return out_df.to_csv(index=False, encoding="cp932", lineterminator="\r\n", errors="replace").encode("cp932")
 def _read_single_csv(f, explicit_name=None):
     fname = explicit_name if explicit_name else str(f)
     bname = os.path.basename(fname)
