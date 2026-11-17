@@ -2862,16 +2862,66 @@ def _build_simulator_master_cache(_df_len, jan_title_dict, cost_master_dict, jan
         if v_t and str(v_t).strip() not in ["", "nan"]:
             code_to_name_map[sk_trim] = str(v_t).strip()
 
+    # ロジザード在庫や発注検討表にある品番・商品名も補完
+    for sk_inv, inv_info in (logi_inv_map or {}).items():
+        sk_t = str(sk_inv).strip()
+        if sk_t and sk_t not in code_to_name_map and inv_info.get("name"):
+            code_to_name_map[sk_t] = clean_product_name(inv_info["name"])
+
+    # 価格改定原紙（AAAa自動見積書原紙Ⅱ）にある商品・JAN・原価・下代も自動統合
+    rev_p_sim, rev_m_sim = find_file_multidir("*自動見積書原紙*.xls*")
+    if not rev_p_sim:
+        rev_p_sim, rev_m_sim = find_file_multidir("*AAAa*.xls*")
+    if rev_p_sim and os.path.exists(rev_p_sim):
+        try:
+            xls_r = pd.ExcelFile(rev_p_sim)
+            s_nm = next((s for s in xls_r.sheet_names if "商品一覧" in s), xls_r.sheet_names[0])
+            r_df_sim = pd.read_excel(xls_r, sheet_name=s_nm)
+            for _, rr in r_df_sim.iterrows():
+                sk_r = clean_code_str(rr.iloc[0]) if len(rr) > 0 else ""
+                if not sk_r:
+                    continue
+                nm_r = str(rr.iloc[1]).strip() if len(rr) > 1 and pd.notna(rr.iloc[1]) else ""
+                jan_r = _extract_jan_13digits(rr.iloc[6] if len(rr) > 6 else "")
+                cost_r = clean_num(rr.iloc[17]) if len(rr) > 17 else 0.0
+                min_s = int(round(clean_num(rr.iloc[18]))) if len(rr) > 18 else 0
+                if nm_r and sk_r not in code_to_name_map:
+                    code_to_name_map[sk_r] = nm_r
+                    jan_title_dict[sk_r] = nm_r
+                if jan_r and sk_r not in jan_master_dict:
+                    jan_master_dict[sk_r] = jan_r
+                if cost_r > 0 and sk_r not in cost_master_dict:
+                    cost_master_dict[sk_r] = cost_r
+                if min_s >= 50 and sk_r not in member_default_min_map:
+                    member_default_min_map[sk_r] = min_s
+        except Exception:
+            pass
+
     raw_calc_codes = sorted(list(set(
         [str(c).strip() for c in code_to_name_map.keys()] +
         [str(c).strip() for c in cost_master_dict.keys()] +
         [str(c).strip() for c in jan_master_dict.keys()] +
         [str(c).strip() for c in jan_title_dict.keys()] +
         [str(c).strip() for c in member_default_min_map.keys()] +
-        [str(c).strip() for c in lotmember_sku_meta_dict.keys()]
+        [str(c).strip() for c in lotmember_sku_meta_dict.keys()] +
+        [str(c).strip() for c in (logi_inv_map or {}).keys()] +
+        [str(c).strip() for c in (hacchu_master_map or {}).keys()]
     )))
     if "ABA-40" in raw_calc_codes: raw_calc_codes.remove("ABA-40")
     if "" in raw_calc_codes: raw_calc_codes.remove("")
+
+    # ★重要：JANコード・原価・下代のいずれかが登録されている実在商品（ABO-2750N等）は絶対に除外しない！
+    valid_real_skus = set(jan_master_dict.keys()) | set(cost_master_dict.keys()) | set(member_default_min_map.keys()) | set(lotmember_sku_meta_dict.keys())
+    parent_sku_candidates = set()
+    for c in raw_calc_codes:
+        if c in valid_real_skus:
+            continue
+        for other in raw_calc_codes:
+            if other != c and other.startswith(c) and len(other) > len(c):
+                parent_sku_candidates.add(c)
+                break
+    all_calc_codes = [c for c in raw_calc_codes if c not in parent_sku_candidates]
+    return code_to_name_map, all_calc_codes
 
     parent_sku_candidates = set()
     for c in raw_calc_codes:
