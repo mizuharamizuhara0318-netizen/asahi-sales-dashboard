@@ -219,13 +219,6 @@ def sync_all_from_gdrive(force=False):
     try:
         from googleapiclient.http import MediaIoBaseDownload
         os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
-    try:
-        from googleapiclient.http import MediaIoBaseDownload
-        os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
-
-    try:
-        from googleapiclient.http import MediaIoBaseDownload
-        os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
 
         meta_path = os.path.join(GDRIVE_SYNC_DIR, "_sync_meta.json")
         local_meta = {}
