@@ -4927,7 +4927,7 @@ def _save_b2b_orders_disk_cache(orders_map):
         pass
     return now_str
 
-def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=30):
+def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=30, silent=False):
     if not access_token:
         return [], "アクセストークンが未設定です", ""
     cache_data = _load_b2b_orders_disk_cache()
@@ -4936,7 +4936,7 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
 
     offset = 0
     limit = 50
-    prog_bar = st.progress(0, text="スマレジEC・B2Bから受注データを取得しています...")
+    prog_bar = None if silent else st.progress(0, text="スマレジEC・B2Bから受注データを取得しています...")
     for page_i in range(max_pages):
         q_params = urllib.parse.urlencode({
             "order_date_from": f"{date_from_str} 00:00:00",
@@ -4956,18 +4956,22 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
                 oid = str(od.get("serial_order_id", "")).strip()
                 if oid:
                     orders_map[oid] = od
-            prog_bar.progress(min(1.0, (page_i + 1) / max_pages), text=f"取得中... ({len(orders_map):,} 件読込済)")
+            if prog_bar is not None:
+                prog_bar.progress(min(1.0, (page_i + 1) / max_pages), text=f"取得中... ({len(orders_map):,} 件読込済)")
             if len(orders_batch) < limit:
                 break
             offset += limit
             time.sleep(1.02)
         except Exception as e:
-            prog_bar.empty()
+            if prog_bar is not None:
+                prog_bar.empty()
             up_str = _save_b2b_orders_disk_cache(orders_map)
             return list(orders_map.values()), f"API通信エラー: {str(e)}", up_str
 
-    prog_bar.empty()
+    if prog_bar is not None:
+        prog_bar.empty()
     up_str = _save_b2b_orders_disk_cache(orders_map)
+    st.session_state["_last_b2b_auto_sync_ts"] = time.time()
     return list(orders_map.values()), "OK", up_str
 
 if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)':
@@ -5035,23 +5039,55 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     last_up_str = cache_obj.get("updated_at", "未取得")
     api_msg = "OK"
 
+    # 前回取得時刻の判定（ファイル上の最終取得時刻またはセッション時刻）
+    last_sync_ts = st.session_state.get("_last_b2b_auto_sync_ts", 0.0)
+    if last_sync_ts == 0.0 and last_up_str not in ["", "未取得"]:
+        try:
+            last_sync_ts = datetime.strptime(last_up_str, "%Y/%m/%d %H:%M:%S").timestamp()
+            st.session_state["_last_b2b_auto_sync_ts"] = last_sync_ts
+        except Exception:
+            pass
+
     with c_ap5:
         st.write("")
-        if st.button("⚡ 直近3日分だけ高速更新(約2秒)", type="primary", use_container_width=True):
+        if st.button("⚡ 今すぐ最新を取得", type="primary", use_container_width=True):
             quick_from = (now_d - pd.Timedelta(days=3)).strftime("%Y-%m-%d")
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, d_to_str, current_token, max_pages=5)
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, d_to_str, current_token, max_pages=4, silent=False)
     with c_ap6:
         st.write("")
-        if st.button("🔄 期間全体を再取得", use_container_width=True):
+        if st.button("🔄 月初から全件再取得", use_container_width=True):
             buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=35)
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=35, silent=False)
 
-    # 初回のみキャッシュが空なら自動取得（2回目以降は0.1秒でキャッシュから即時表示！）
+    # ① 初回（キャッシュが空のとき）は全件自動取得
     if not cached_orders_list:
         buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=35)
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=35, silent=False)
+    # ② キャッシュがある場合でも、前回のAPI取得から180秒（3分）以上経過していれば、裏で直近2日分（約1.5秒）を自動で差分取得！
+    elif (time.time() - last_sync_ts) >= 180:
+        quick_from = (now_d - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, d_to_str, current_token, max_pages=2, silent=True)
 
-    st.caption(f"⚡ **高速キャッシュ表示中**（最終API取得: **{last_up_str}** ／ 保存件数: **{len(cached_orders_list):,} 件**）— 画面切替や絞り込みは通信なしで0.1秒で動きます。最新の注文を反映するときだけ右上の「⚡ 直近3日分だけ高速更新」を押してください。")
+    col_cap_l, col_cap_r = st.columns([3.8, 1.2])
+    with col_cap_l:
+        st.caption(f"🔄 **自動同期ON（3分間隔）** ｜ 最終API取得: **{last_up_str}** ／ キャッシュ件数: **{len(cached_orders_list):,} 件**（フィルター操作や並び替えは0.1秒で動きます）")
+    with col_cap_r:
+        enable_auto_timer = st.toggle("⏱️ 画面放置時も3分自動更新", value=True, key="b2b_auto_timer_toggle")
+
+    # 画面を開きっぱなしにしている時も、3分（180秒）ごとに自動で再読み込みをトリガーするタイマー
+    if enable_auto_timer:
+        components.html(
+            """
+            <script>
+            setTimeout(function() {
+                window.parent.location.reload();
+            }, 180000);
+            </script>
+            """,
+            height=0,
+            scrolling=False
+        )
+
     raw_orders = cached_orders_list
 
     if api_msg != "OK" and not raw_orders:
