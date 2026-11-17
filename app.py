@@ -611,138 +611,140 @@ def _load_order_r_all_sheets(master_path, master_mtime):
     if not master_path or not os.path.exists(master_path):
         return None
     try:
-        xls = pd.ExcelFile(master_path)
-        s_names = xls.sheet_names
+        import gc
         res = {
             "cost_dict": {}, "cust_sku_map": {}, "default_min_map": {},
             "sku_meta": {}, "grp_map": {}, "rank_df": pd.DataFrame(),
             "jan_dict": {}, "full_title_dict": {}, "raw_title_dict": {}, "std_price_dict": {},
             "customer_df": pd.DataFrame()
         }
+        with pd.ExcelFile(master_path) as xls:
+            s_names = xls.sheet_names
 
-        if "新原価" in s_names:
-            cdf = pd.read_excel(xls, sheet_name="新原価")
-            for _, r in cdf.iterrows():
-                sk = clean_code_str(r.iloc[0]) if len(r) > 0 else ""
-                if not sk: continue
-                co = clean_num(r.iloc[1]) if len(r) > 1 else 0.0
-                if co > 0: res["cost_dict"][sk] = co
-                if len(r) > 3:
-                    min_p = int(clean_num(r.iloc[3]))
-                    if 50 <= min_p < 90000:
-                        res["default_min_map"][sk] = min_p
+            if "新原価" in s_names:
+                cdf = pd.read_excel(xls, sheet_name="新原価")
+                for _, r in cdf.iterrows():
+                    sk = clean_code_str(r.iloc[0]) if len(r) > 0 else ""
+                    if not sk: continue
+                    co = clean_num(r.iloc[1]) if len(r) > 1 else 0.0
+                    if co > 0: res["cost_dict"][sk] = co
+                    if len(r) > 3:
+                        min_p = int(clean_num(r.iloc[3]))
+                        if 50 <= min_p < 90000:
+                            res["default_min_map"][sk] = min_p
 
-        if "加盟店価格" in s_names:
-            mdf = pd.read_excel(xls, sheet_name="加盟店価格")
-            if len(mdf.columns) >= 14:
-                for _, r in mdf.iterrows():
-                    sku_mgmt = clean_code_str(r.iloc[3]) if len(r) > 3 else ""
-                    sku_num = clean_code_str(r.iloc[4]) if len(r) > 4 else ""
-                    skus = [s for s in [sku_mgmt, sku_num] if s]
-                    if not skus: continue
-                    j_price = int(clean_num(r.iloc[9])) if len(r) > 9 else 0
-                    n_min_price = int(clean_num(r.iloc[13])) if len(r) > 13 else 0
-                    m_comp = str(r.iloc[12]).strip() if len(r) > 12 and pd.notna(r.iloc[12]) else ""
-                    for s in skus:
-                        if 50 <= n_min_price < 90000:
-                            res["default_min_map"][s] = n_min_price
-                        if m_comp and m_comp not in ["nan", "None", "#N/A", ""]:
-                            norm_comp = re.sub(r'[\s\u3000\xa0]+', '', m_comp)
-                            if 50 <= j_price < 90000:
-                                res["cust_sku_map"][(m_comp, s)] = j_price
-                                res["cust_sku_map"][(norm_comp, s)] = j_price
+            if "加盟店価格" in s_names:
+                mdf = pd.read_excel(xls, sheet_name="加盟店価格")
+                if len(mdf.columns) >= 14:
+                    for _, r in mdf.iterrows():
+                        sku_mgmt = clean_code_str(r.iloc[3]) if len(r) > 3 else ""
+                        sku_num = clean_code_str(r.iloc[4]) if len(r) > 4 else ""
+                        skus = [s for s in [sku_mgmt, sku_num] if s]
+                        if not skus: continue
+                        j_price = int(clean_num(r.iloc[9])) if len(r) > 9 else 0
+                        n_min_price = int(clean_num(r.iloc[13])) if len(r) > 13 else 0
+                        m_comp = str(r.iloc[12]).strip() if len(r) > 12 and pd.notna(r.iloc[12]) else ""
+                        for s in skus:
+                            if 50 <= n_min_price < 90000:
+                                res["default_min_map"][s] = n_min_price
+                            if m_comp and m_comp not in ["nan", "None", "#N/A", ""]:
+                                norm_comp = re.sub(r'[\s\u3000\xa0]+', '', m_comp)
+                                if 50 <= j_price < 90000:
+                                    res["cust_sku_map"][(m_comp, s)] = j_price
+                                    res["cust_sku_map"][(norm_comp, s)] = j_price
 
-        if "加盟店価格データ" in s_names:
-            ldf = pd.read_excel(xls, sheet_name="加盟店価格データ")
-            for _, r in ldf.drop_duplicates(subset=['商品番号']).iterrows():
-                sk = clean_code_str(r.get('商品番号', ''))
-                if not sk: continue
-                res["sku_meta"][sk] = {
-                    '商品規格ID': int(clean_num(r.get('商品規格ID', 0))) if pd.notna(r.get('商品規格ID')) else "",
-                    '商品ID': int(clean_num(r.get('商品ID', 0))) if pd.notna(r.get('商品ID')) else "",
-                    '商品管理番号': clean_code_str(r.get('商品管理番号', sk)) or sk,
-                    '商品番号': sk
-                }
+            if "加盟店価格データ" in s_names:
+                ldf = pd.read_excel(xls, sheet_name="加盟店価格データ")
+                for _, r in ldf.drop_duplicates(subset=['商品番号']).iterrows():
+                    sk = clean_code_str(r.get('商品番号', ''))
+                    if not sk: continue
+                    res["sku_meta"][sk] = {
+                        '商品規格ID': int(clean_num(r.get('商品規格ID', 0))) if pd.notna(r.get('商品規格ID')) else "",
+                        '商品ID': int(clean_num(r.get('商品ID', 0))) if pd.notna(r.get('商品ID')) else "",
+                        '商品管理番号': clean_code_str(r.get('商品管理番号', sk)) or sk,
+                        '商品番号': sk
+                    }
 
-        if "加盟店グループ管理" in s_names:
-            gdf = pd.read_excel(xls, sheet_name="加盟店グループ管理")
-            for _, r in gdf.iterrows():
-                c_name = str(r.get('加盟店名', '')).strip()
-                if not c_name or c_name == 'nan': continue
-                g_no = clean_code_str(r.get('グループ番号', ''))
-                m_cd = clean_code_str(r.get('加盟店コード', ''))
-                res["grp_map"][c_name] = {'group_no': g_no, 'member_code': m_cd}
-                norm_c = re.sub(r'[\s\u3000\xa0]+', '', c_name)
-                if norm_c not in res["grp_map"]:
-                    res["grp_map"][norm_c] = {'group_no': g_no, 'member_code': m_cd}
+            if "加盟店グループ管理" in s_names:
+                gdf = pd.read_excel(xls, sheet_name="加盟店グループ管理")
+                for _, r in gdf.iterrows():
+                    c_name = str(r.get('加盟店名', '')).strip()
+                    if not c_name or c_name == 'nan': continue
+                    g_no = clean_code_str(r.get('グループ番号', ''))
+                    m_cd = clean_code_str(r.get('加盟店コード', ''))
+                    res["grp_map"][c_name] = {'group_no': g_no, 'member_code': m_cd}
+                    norm_c = re.sub(r'[\s\u3000\xa0]+', '', c_name)
+                    if norm_c not in res["grp_map"]:
+                        res["grp_map"][norm_c] = {'group_no': g_no, 'member_code': m_cd}
 
-        if "ランク価格" in s_names:
-            res["rank_df"] = pd.read_excel(xls, sheet_name="ランク価格")
+            if "ランク価格" in s_names:
+                res["rank_df"] = pd.read_excel(xls, sheet_name="ランク価格")
 
-        if "item" in s_names:
-            idf = pd.read_excel(xls, sheet_name="item")
-            for _, r in idf.iterrows():
-                sk = clean_code_str(r.iloc[1]) if len(r) > 1 else ""
-                if not sk:
-                    sk = clean_code_str(r.iloc[4]) if len(r) > 4 else ""
-                if not sk:
-                    continue
-                raw_nm = str(r.iloc[5]).strip() if len(r) > 5 and pd.notna(r.iloc[5]) else ""
-                cat_id = r.iloc[14] if len(r) > 14 else None
+            if "item" in s_names:
+                idf = pd.read_excel(xls, sheet_name="item")
+                for _, r in idf.iterrows():
+                    sk = clean_code_str(r.iloc[1]) if len(r) > 1 else ""
+                    if not sk:
+                        sk = clean_code_str(r.iloc[4]) if len(r) > 4 else ""
+                    if not sk:
+                        continue
+                    raw_nm = str(r.iloc[5]).strip() if len(r) > 5 and pd.notna(r.iloc[5]) else ""
+                    cat_id = r.iloc[14] if len(r) > 14 else None
 
-                jan_str = _extract_jan_13digits(cat_id, raw_nm)
-                if jan_str:
-                    res["jan_dict"][sk] = jan_str
+                    jan_str = _extract_jan_13digits(cat_id, raw_nm)
+                    if jan_str:
+                        res["jan_dict"][sk] = jan_str
 
-                if raw_nm and raw_nm != "nan":
-                    res["raw_title_dict"][sk] = raw_nm
-                    nm_clean = raw_nm.split("】", 1)[-1] if "】" in raw_nm else raw_nm
-                    nm_clean = re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]\s*$', '', nm_clean).strip()
-                    res["full_title_dict"][sk] = nm_clean
+                    if raw_nm and raw_nm != "nan":
+                        res["raw_title_dict"][sk] = raw_nm
+                        nm_clean = raw_nm.split("】", 1)[-1] if "】" in raw_nm else raw_nm
+                        nm_clean = re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]\s*$', '', nm_clean).strip()
+                        res["full_title_dict"][sk] = nm_clean
 
-                std_p = int(clean_num(r.iloc[9])) if len(r) > 9 else 0
-                if std_p > 0: res["std_price_dict"][sk] = std_p
-                sell_p = int(clean_num(r.iloc[8])) if len(r) > 8 else 0
-                if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
-                    res["default_min_map"][sk] = sell_p
-                c_val = clean_num(r.iloc[16]) if len(r) > 16 else 0.0
-                if c_val > 0:
-                    res["cost_dict"][sk] = c_val
+                    std_p = int(clean_num(r.iloc[9])) if len(r) > 9 else 0
+                    if std_p > 0: res["std_price_dict"][sk] = std_p
+                    sell_p = int(clean_num(r.iloc[8])) if len(r) > 8 else 0
+                    if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
+                        res["default_min_map"][sk] = sell_p
+                    c_val = clean_num(r.iloc[16]) if len(r) > 16 else 0.0
+                    if c_val > 0:
+                        res["cost_dict"][sk] = c_val
 
-        if "select" in s_names:
-            sdf = pd.read_excel(xls, sheet_name="select")
-            for _, r in sdf.iterrows():
-                sk = clean_code_str(r.iloc[0]) if len(r) > 0 else ""
-                if not sk:
-                    sk = clean_code_str(r.iloc[7]) if len(r) > 7 else ""
-                if not sk:
-                    continue
-                raw_nm = str(r.iloc[8]).strip() if len(r) > 8 and pd.notna(r.iloc[8]) else ""
-                cat_id = r.iloc[16] if len(r) > 16 else None
-                opt_d = str(r.iloc[3]).strip() if len(r) > 3 and pd.notna(r.iloc[3]) else ""
+            if "select" in s_names:
+                sdf = pd.read_excel(xls, sheet_name="select")
+                for _, r in sdf.iterrows():
+                    sk = clean_code_str(r.iloc[0]) if len(r) > 0 else ""
+                    if not sk:
+                        sk = clean_code_str(r.iloc[7]) if len(r) > 7 else ""
+                    if not sk:
+                        continue
+                    raw_nm = str(r.iloc[8]).strip() if len(r) > 8 and pd.notna(r.iloc[8]) else ""
+                    cat_id = r.iloc[16] if len(r) > 16 else None
+                    opt_d = str(r.iloc[3]).strip() if len(r) > 3 and pd.notna(r.iloc[3]) else ""
 
-                jan_str = _extract_jan_13digits(cat_id, opt_d, raw_nm)
-                if jan_str:
-                    res["jan_dict"][sk] = jan_str
+                    jan_str = _extract_jan_13digits(cat_id, opt_d, raw_nm)
+                    if jan_str:
+                        res["jan_dict"][sk] = jan_str
 
-                if raw_nm and raw_nm != "nan":
-                    res["raw_title_dict"][sk] = raw_nm
-                    nm_clean = raw_nm.split("】", 1)[-1].strip() if "】" in raw_nm else raw_nm.strip()
-                    nm_clean = re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]\s*$', '', nm_clean).strip()
-                    res["full_title_dict"][sk] = nm_clean
+                    if raw_nm and raw_nm != "nan":
+                        res["raw_title_dict"][sk] = raw_nm
+                        nm_clean = raw_nm.split("】", 1)[-1].strip() if "】" in raw_nm else raw_nm.strip()
+                        nm_clean = re.sub(r'[\(（]\s*[\d０-９]{7,16}\s*[\)）]\s*$', '', nm_clean).strip()
+                        res["full_title_dict"][sk] = nm_clean
 
-                std_p = int(clean_num(r.iloc[10])) if len(r) > 10 else 0
-                if std_p > 0: res["std_price_dict"][sk] = std_p
-                sell_p = int(clean_num(r.iloc[11])) if len(r) > 11 else 0
-                if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
-                    res["default_min_map"][sk] = sell_p
-                c_val = clean_num(r.iloc[9]) if len(r) > 9 else 0.0
-                if c_val > 0:
-                    res["cost_dict"][sk] = c_val
+                    std_p = int(clean_num(r.iloc[10])) if len(r) > 10 else 0
+                    if std_p > 0: res["std_price_dict"][sk] = std_p
+                    sell_p = int(clean_num(r.iloc[11])) if len(r) > 11 else 0
+                    if sk not in res["default_min_map"] and 50 <= sell_p < 90000:
+                        res["default_min_map"][sk] = sell_p
+                    c_val = clean_num(r.iloc[9]) if len(r) > 9 else 0.0
+                    if c_val > 0:
+                        res["cost_dict"][sk] = c_val
 
-        if "注文者会社名" in s_names:
-            res["customer_df"] = pd.read_excel(xls, sheet_name="注文者会社名")
+            if "注文者会社名" in s_names:
+                res["customer_df"] = pd.read_excel(xls, sheet_name="注文者会社名")
 
+        gc.collect()
         return res
     except Exception:
         return None
@@ -2959,29 +2961,27 @@ def show_product_inventory_dialog(sku_code, prod_name):
 # ========================================================
 # ★ 🧮 簡易見積＆利益シミュレーター（＋ 🏷️ 加盟店価格登録CSV作成）
 # ========================================================
-@st.cache_data(show_spinner=False)
-def _build_simulator_master_cache(_df_len, jan_title_dict, cost_master_dict, jan_master_dict, member_default_min_map, lotmember_sku_meta_dict):
+@st.cache_data(show_spinner=False, max_entries=1)
+def _build_simulator_master_cache(_df_len, _jan_title_dict, _cost_master_dict, _jan_master_dict, _member_default_min_map, _lotmember_sku_meta_dict):
     code_to_name_map = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict() if not df.empty else {}
-    for k_t, v_t in jan_title_dict.items():
+    for k_t, v_t in _jan_title_dict.items():
         sk_trim = str(k_t).strip()
         if v_t and str(v_t).strip() not in ["", "nan"]:
             code_to_name_map[sk_trim] = str(v_t).strip()
 
-    # ロジザード在庫や発注検討表にある品番・商品名も補完
     for sk_inv, inv_info in (logi_inv_map or {}).items():
         sk_t = str(sk_inv).strip()
         if sk_t and sk_t not in code_to_name_map and inv_info.get("name"):
             code_to_name_map[sk_t] = clean_product_name(inv_info["name"])
 
-    # 価格改定原紙（AAAa自動見積書原紙Ⅱ）にある商品・JAN・原価・下代も自動統合
-    rev_p_sim, rev_m_sim = find_file_multidir("*自動見積書原紙*.xls*")
+    rev_p_sim, _ = find_file_multidir("*自動見積書原紙*.xls*")
     if not rev_p_sim:
-        rev_p_sim, rev_m_sim = find_file_multidir("*AAAa*.xls*")
+        rev_p_sim, _ = find_file_multidir("*AAAa*.xls*")
     if rev_p_sim and os.path.exists(rev_p_sim):
         try:
-            xls_r = pd.ExcelFile(rev_p_sim)
-            s_nm = next((s for s in xls_r.sheet_names if "商品一覧" in s), xls_r.sheet_names[0])
-            r_df_sim = pd.read_excel(xls_r, sheet_name=s_nm)
+            with pd.ExcelFile(rev_p_sim) as xls_r:
+                s_nm = next((s for s in xls_r.sheet_names if "商品一覧" in s), xls_r.sheet_names[0])
+                r_df_sim = pd.read_excel(xls_r, sheet_name=s_nm)
             for _, rr in r_df_sim.iterrows():
                 sk_r = clean_code_str(rr.iloc[0]) if len(rr) > 0 else ""
                 if not sk_r:
@@ -2992,44 +2992,34 @@ def _build_simulator_master_cache(_df_len, jan_title_dict, cost_master_dict, jan
                 min_s = int(round(clean_num(rr.iloc[18]))) if len(rr) > 18 else 0
                 if nm_r and sk_r not in code_to_name_map:
                     code_to_name_map[sk_r] = nm_r
-                    jan_title_dict[sk_r] = nm_r
-                if jan_r and sk_r not in jan_master_dict:
-                    jan_master_dict[sk_r] = jan_r
-                if cost_r > 0 and sk_r not in cost_master_dict:
-                    cost_master_dict[sk_r] = cost_r
-                if min_s >= 50 and sk_r not in member_default_min_map:
-                    member_default_min_map[sk_r] = min_s
+                    _jan_title_dict[sk_r] = nm_r
+                if jan_r and sk_r not in _jan_master_dict:
+                    _jan_master_dict[sk_r] = jan_r
+                if cost_r > 0 and sk_r not in _cost_master_dict:
+                    _cost_master_dict[sk_r] = cost_r
+                if min_s >= 50 and sk_r not in _member_default_min_map:
+                    _member_default_min_map[sk_r] = min_s
         except Exception:
             pass
 
     raw_calc_codes = sorted(list(set(
         [str(c).strip() for c in code_to_name_map.keys()] +
-        [str(c).strip() for c in cost_master_dict.keys()] +
-        [str(c).strip() for c in jan_master_dict.keys()] +
-        [str(c).strip() for c in jan_title_dict.keys()] +
-        [str(c).strip() for c in member_default_min_map.keys()] +
-        [str(c).strip() for c in lotmember_sku_meta_dict.keys()] +
+        [str(c).strip() for c in _cost_master_dict.keys()] +
+        [str(c).strip() for c in _jan_master_dict.keys()] +
+        [str(c).strip() for c in _jan_title_dict.keys()] +
+        [str(c).strip() for c in _member_default_min_map.keys()] +
+        [str(c).strip() for c in _lotmember_sku_meta_dict.keys()] +
         [str(c).strip() for c in (logi_inv_map or {}).keys()] +
         [str(c).strip() for c in (hacchu_master_map or {}).keys()]
     )))
     if "ABA-40" in raw_calc_codes: raw_calc_codes.remove("ABA-40")
     if "" in raw_calc_codes: raw_calc_codes.remove("")
 
-    # ★重要：JANコード・原価・下代のいずれかが登録されている実在商品（ABO-2750N等）は絶対に除外しない！
-    valid_real_skus = set(jan_master_dict.keys()) | set(cost_master_dict.keys()) | set(member_default_min_map.keys()) | set(lotmember_sku_meta_dict.keys())
+    valid_real_skus = set(_jan_master_dict.keys()) | set(_cost_master_dict.keys()) | set(_member_default_min_map.keys()) | set(_lotmember_sku_meta_dict.keys())
     parent_sku_candidates = set()
     for c in raw_calc_codes:
         if c in valid_real_skus:
             continue
-        for other in raw_calc_codes:
-            if other != c and other.startswith(c) and len(other) > len(c):
-                parent_sku_candidates.add(c)
-                break
-    all_calc_codes = [c for c in raw_calc_codes if c not in parent_sku_candidates]
-    return code_to_name_map, all_calc_codes
-
-    parent_sku_candidates = set()
-    for c in raw_calc_codes:
         for other in raw_calc_codes:
             if other != c and other.startswith(c) and len(other) > len(c):
                 parent_sku_candidates.add(c)
@@ -5444,17 +5434,18 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
 
     col_cap_l, col_cap_r = st.columns([3.8, 1.2])
     with col_cap_l:
-        st.caption(f"🔄 **自動同期ON（2分間隔）** ｜ 最終API取得(日本時間): **{last_up_str}** ／ キャッシュ件数: **{len(cached_orders_list):,} 件**")
+        st.caption(f"⚡ **省メモリ高速モード** ｜ 最終API取得(日本時間): **{last_up_str}** ／ キャッシュ件数: **{len(cached_orders_list):,} 件**（画面操作時に前回から2分以上経っていれば自動で最新注文を取得します）")
     with col_cap_r:
-        enable_auto_timer = st.toggle("⏱️ 画面放置時も2分自動更新", value=True, key="b2b_auto_timer_toggle")
+        enable_auto_timer = st.toggle("⏱️ 放置時も5分自動更新", value=False, key="b2b_auto_timer_toggle")
 
-    # Streamlit公式の st.fragment(run_every=120) による確実なバックグラウンド自動更新
     if enable_auto_timer and hasattr(st, "fragment"):
-        @st.fragment(run_every=120)
+        @st.fragment(run_every=300)
         def _b2b_background_poller():
+            import gc
             prev_ts = st.session_state.get("_last_b2b_auto_sync_ts", 0.0)
-            if (time.time() - prev_ts) >= 115:
-                fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=6, silent=True)
+            if (time.time() - prev_ts) >= 290:
+                fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=4, silent=True)
+                gc.collect()
                 st.rerun()
         _b2b_background_poller()
 
@@ -5998,12 +5989,18 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     ])
 
     with tab_b2b_1:
-        st.caption("💡 表の **「🔍 得意先名」** または **「🔍 注文商品内訳」** をクリックすると、待ち時間ゼロで注文商品の詳細ポップアップが開きます！")
-        render_b2b_Interactive_orders_table(hdr_df, det_df, max_h=540)
+        c_lim1, c_lim2 = st.columns([3.8, 1.2])
+        with c_lim1:
+            st.caption("💡 表の **「🔍 得意先名」** または **「🔍 注文商品内訳」** をクリックすると、待ち時間ゼロで注文商品の詳細ポップアップが開きます！")
+        with c_lim2:
+            b2b_disp_lim = st.selectbox("表の表示件数（省メモリ）", [200, 500, "全件"], index=0, key="b2b_tbl_lim_sel", label_visibility="collapsed")
+        hdr_show = hdr_df.head(int(b2b_disp_lim)) if b2b_disp_lim != "全件" else hdr_df
+        det_show = det_df[det_df["受注ID"].isin(hdr_show["受注ID"])] if b2b_disp_lim != "全件" else det_df
+        render_b2b_Interactive_orders_table(hdr_show, det_show, max_h=540)
 
     with tab_b2b_2:
-        render_universal_table(prod_agg_df, max_h=520)
+        render_universal_table(prod_agg_df.head(300), max_h=520)
 
     with tab_b2b_3:
-        render_universal_table(det_df.drop(columns=["粗利率_数値"], errors="ignore"), max_h=520)
+        render_universal_table(det_df.drop(columns=["粗利率_数値"], errors="ignore").head(500), max_h=520)
     st.stop()
