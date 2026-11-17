@@ -4933,8 +4933,11 @@ def _load_b2b_orders_disk_cache():
             pass
     return {"orders_map": {}, "updated_at": ""}
 
+def _now_jst():
+    return datetime.utcnow() + timedelta(hours=9)
+
 def _save_b2b_orders_disk_cache(orders_map):
-    now_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    now_str = _now_jst().strftime("%Y/%m/%d %H:%M:%S")
     payload = {"orders_map": orders_map, "updated_at": now_str}
     try:
         with open(B2B_ORDERS_CACHE_FILE, "w", encoding="utf-8") as f:
@@ -5003,7 +5006,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     with st.expander("🔑 API接続ステータス・初回トークン設定（100日間有効）", expanded=not bool(current_token)):
         if current_token:
             t_info = load_b2b_token_info()
-            saved_dt = datetime.fromtimestamp(t_info.get("saved_at", time.time())).strftime("%Y/%m/%d %H:%M")
+            saved_dt = (datetime.utcfromtimestamp(t_info.get("saved_at", time.time())) + timedelta(hours=9)).strftime("%Y/%m/%d %H:%M")
             st.success(f"✅ スマレジEC・B2B API 接続済み（トークン取得日時: {saved_dt} ／ 有効期間: 100日間）")
         else:
             st.warning("⚠️ 初回のみ、以下の手順①・②でアクセストークンを取得してください（1回取得すれば100日間自動で繋がります）。")
@@ -5027,8 +5030,8 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     if not current_token:
         st.stop()
 
-    # 検索期間・集計基準・ステータス指定
-    now_d = datetime.now().date()
+    # 検索期間・集計基準・ステータス指定（日本時間基準）
+    now_d = _now_jst().date()
     first_d = datetime(now_d.year, now_d.month, 1).date()
     c_ap1, c_ap2, c_ap3, c_ap4, c_ap5, c_ap6 = st.columns([1.0, 1.0, 1.4, 1.3, 1.2, 1.1])
     with c_ap1:
@@ -5049,26 +5052,21 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
 
     d_from_str = api_d_from.strftime("%Y-%m-%d")
     d_to_str = api_d_to.strftime("%Y-%m-%d")
+    today_jst_str = now_d.strftime("%Y-%m-%d")
 
     cache_obj = _load_b2b_orders_disk_cache()
     cached_orders_list = list(cache_obj.get("orders_map", {}).values())
     last_up_str = cache_obj.get("updated_at", "未取得")
     api_msg = "OK"
 
-    # 前回取得時刻の判定（ファイル上の最終取得時刻またはセッション時刻）
     last_sync_ts = st.session_state.get("_last_b2b_auto_sync_ts", 0.0)
-    if last_sync_ts == 0.0 and last_up_str not in ["", "未取得"]:
-        try:
-            last_sync_ts = datetime.strptime(last_up_str, "%Y/%m/%d %H:%M:%S").timestamp()
-            st.session_state["_last_b2b_auto_sync_ts"] = last_sync_ts
-        except Exception:
-            pass
 
     with c_ap5:
         st.write("")
         if st.button("⚡ 今すぐ最新を取得", type="primary", use_container_width=True):
-            quick_from = (now_d - pd.Timedelta(days=3)).strftime("%Y-%m-%d")
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, d_to_str, current_token, max_pages=4, silent=False)
+            # 昨日〜今日の全注文を確実に取得（最大8ページ＝400件）
+            quick_from = (now_d - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=8, silent=False)
     with c_ap6:
         st.write("")
         if st.button("🔄 月初から全件再取得", use_container_width=True):
@@ -5079,38 +5077,26 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     if not cached_orders_list:
         buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
         cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=35, silent=False)
-    # ② キャッシュがある場合でも、前回のAPI取得から180秒（3分）以上経過していれば、裏で直近2日分（約1.5秒）を自動で差分取得！
-    elif (time.time() - last_sync_ts) >= 180:
-        quick_from = (now_d - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, d_to_str, current_token, max_pages=2, silent=True)
+    # ② 前回のAPI取得から120秒（2分）以上経過していれば、本日（または昨日〜今日）の最新注文を自動取得！
+    elif (time.time() - last_sync_ts) >= 120:
+        # 本日分の注文（00:00〜23:59）をピンポイント取得するため、昨日の100件に邪魔されず今日の最新注文まで1秒で到達する
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=6, silent=True)
 
     col_cap_l, col_cap_r = st.columns([3.8, 1.2])
     with col_cap_l:
-        st.caption(f"🔄 **自動同期ON（3分間隔）** ｜ 最終API取得: **{last_up_str}** ／ キャッシュ件数: **{len(cached_orders_list):,} 件**（フィルター操作や並び替えは0.1秒で動きます）")
+        st.caption(f"🔄 **自動同期ON（2分間隔）** ｜ 最終API取得(日本時間): **{last_up_str}** ／ キャッシュ件数: **{len(cached_orders_list):,} 件**")
     with col_cap_r:
-        enable_auto_timer = st.toggle("⏱️ 画面放置時も3分自動更新", value=True, key="b2b_auto_timer_toggle")
+        enable_auto_timer = st.toggle("⏱️ 画面放置時も2分自動更新", value=True, key="b2b_auto_timer_toggle")
 
-    # 画面を開きっぱなしにしている時も、ページを移動させずに3分（180秒）ごとに「⚡ 今すぐ最新を取得」ボタンを自動クリックする
-    if enable_auto_timer:
-        components.html(
-            """
-            <script>
-            setTimeout(function() {
-                try {
-                    const btns = window.parent.document.querySelectorAll('button');
-                    for (const b of btns) {
-                        if (b.innerText && b.innerText.includes('今すぐ最新を取得')) {
-                            b.click();
-                            return;
-                        }
-                    }
-                } catch (e) {}
-            }, 180000);
-            </script>
-            """,
-            height=0,
-            scrolling=False
-        )
+    # Streamlit公式の st.fragment(run_every=120) による確実なバックグラウンド自動更新
+    if enable_auto_timer and hasattr(st, "fragment"):
+        @st.fragment(run_every=120)
+        def _b2b_background_poller():
+            prev_ts = st.session_state.get("_last_b2b_auto_sync_ts", 0.0)
+            if (time.time() - prev_ts) >= 115:
+                fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=6, silent=True)
+                st.rerun()
+        _b2b_background_poller()
 
     raw_orders = cached_orders_list
 
