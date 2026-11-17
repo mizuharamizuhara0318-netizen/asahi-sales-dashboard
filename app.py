@@ -5063,7 +5063,7 @@ def get_valid_b2b_access_token():
 B2B_ORDERS_CACHE_FILE = os.path.join(GDRIVE_SYNC_DIR, "b2b_orders_cache.json")
 
 def _slim_b2b_order(od):
-    """1伝票あたり約150個ある不要項目（メール文面や決済ログ等）を削ぎ落とし、メモリ使用量を93%削減する"""
+    """1伝票あたり約150個ある不要項目を削ぎ落とし、メモリ使用量を93%削減する"""
     if not isinstance(od, dict):
         return {}
     slim_details = []
@@ -5082,7 +5082,9 @@ def _slim_b2b_order(od):
         "ec_order_id": str(od.get("ec_order_id", "")).strip(),
         "order_company_name": str(od.get("order_company_name", "")).strip(),
         "order_name01": str(od.get("order_name01", "")).strip(),
+        "order_status": str(od.get("order_status", "")).strip(),
         "order_status_name": str(od.get("order_status_name", "")).strip(),
+        "group_order_type": str(od.get("group_order_type", "0")).strip(),
         "hasso_date": str(od.get("hasso_date", "") or "").strip(),
         "commit_date": str(od.get("commit_date", "") or "").strip(),
         "plg_raku2_order_date": str(
@@ -5146,41 +5148,7 @@ def _save_b2b_orders_disk_cache(orders_map, sync_to_drive=False):
     gc.collect()
     return now_str
 
-def _fetch_v2_commit_date_order_ids(commit_from_str, commit_to_str, access_token):
-    """v2 受注検索API（GET: commit_date_from / commit_date_to）で出荷日が期間内の全受注IDを取得"""
-    found_ids = set()
-    headers = {"Authorization": f"Bearer {access_token}"}
-    for offset in [0, 500, 1000, 1500, 2000]:
-        q_params = urllib.parse.urlencode({
-            "commit_date_from": f"{commit_from_str} 00:00:00",
-            "commit_date_to": f"{commit_to_str} 23:59:59",
-            "limit": 500,
-            "offset": offset,
-            "sort": "order_id"
-        })
-        url = f"{B2B_DOMAIN}/api/v2/orders/search?{q_params}"
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            rows = data.get("orders", data.get("data", data if isinstance(data, list) else []))
-            if isinstance(rows, dict):
-                rows = list(rows.values())
-            if not rows:
-                break
-            for r in rows:
-                if isinstance(r, dict):
-                    oid = str(r.get("order_id") or r.get("serial_order_id") or "").strip()
-                    if oid.isdigit():
-                        found_ids.add(oid)
-            if len(rows) < 500:
-                break
-            time.sleep(1.02)
-        except Exception:
-            break
-    return found_ids
-
-def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=50, silent=False, commit_from_str=None):
+def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=45, silent=False, commit_from_str=None):
     if not access_token:
         return [], "アクセストークンが未設定です", ""
     cache_data = _load_b2b_orders_disk_cache()
@@ -5223,93 +5191,44 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
             up_str = _save_b2b_orders_disk_cache(orders_map, sync_to_drive=False)
             return list(orders_map.values()), f"API通信エラー: {str(e)}", up_str
 
-    # ステップ2：全件再取得時は、開始日の90日前（3ヶ月前）〜前日に注文されて当月に出荷された伝票も漏れなく取得する
+    # ステップ2：過去受注→当月出荷分の6件の取りこぼしを防ぐため、直近の期間から逆順（①15日前〜前日 ➔ ②35日前〜16日前 ➔ ③75日前〜36日前）で細かく区切って確実に全件スキャン！
     if commit_from_str and not silent:
-        prev_from = (pd.to_datetime(date_from_str) - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
-        prev_to = (pd.to_datetime(date_from_str) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-        offset_p = 0
-        for page_p in range(80):
-            time.sleep(1.02)
-            q_p = urllib.parse.urlencode({
-                "order_date_from": f"{prev_from} 00:00:00",
-                "order_date_to": f"{prev_to} 23:59:59",
-                "limit": limit,
-                "offset": offset_p
-            })
-            req_p = urllib.request.Request(f"{B2B_DOMAIN}/api/v1/orders.php?{q_p}", headers=headers, method="GET")
-            try:
-                with urllib.request.urlopen(req_p, timeout=20) as resp_p:
-                    d_p = json.loads(resp_p.read().decode("utf-8", errors="replace"))
-                batch_p = d_p.get("orders", [])
-                if not batch_p:
-                    break
-                for od_p in batch_p:
-                    slim_p = _slim_b2b_order(od_p)
-                    oid_p = slim_p.get("serial_order_id", "")
-                    c_dt_p = slim_p.get("commit_date", "")[:10]
-                    # 過去注文のうち「出荷日が当月以降」または「未出荷」の伝票だけを保存（過去出荷済は破棄して省メモリ）
-                    if oid_p and ((c_dt_p and c_dt_p >= commit_from_str) or not c_dt_p or c_dt_p.startswith("0000")):
-                        orders_map[oid_p] = slim_p
-                if prog_bar is not None:
-                    prog_bar.progress(min(1.0, (page_p + 1) / 80), text=f"過去3ヶ月分の予約注文→当月出荷分を照合中... ({len(orders_map):,} 件)")
-                if len(batch_p) < limit:
-                    break
-                offset_p += limit
-            except Exception:
-                break# ステップ2：全件再取得時は、開始日の90日前（3ヶ月前）〜前日に注文されて当月に出荷された伝票も漏れなく取得する
-    if commit_from_str and not silent:
-        prev_from = (pd.to_datetime(date_from_str) - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
-        prev_to = (pd.to_datetime(date_from_str) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-        offset_p = 0
-        for page_p in range(80):
-            time.sleep(1.02)
-            q_p = urllib.parse.urlencode({
-                "order_date_from": f"{prev_from} 00:00:00",
-                "order_date_to": f"{prev_to} 23:59:59",
-                "limit": limit,
-                "offset": offset_p
-            })
-            req_p = urllib.request.Request(f"{B2B_DOMAIN}/api/v1/orders.php?{q_p}", headers=headers, method="GET")
-            try:
-                with urllib.request.urlopen(req_p, timeout=20) as resp_p:
-                    d_p = json.loads(resp_p.read().decode("utf-8", errors="replace"))
-                batch_p = d_p.get("orders", [])
-                if not batch_p:
-                    break
-                for od_p in batch_p:
-                    slim_p = _slim_b2b_order(od_p)
-                    oid_p = slim_p.get("serial_order_id", "")
-                    c_dt_p = slim_p.get("commit_date", "")[:10]
-                    # 過去注文のうち「出荷日が当月以降」または「未出荷」の伝票だけを保存（過去出荷済は破棄して省メモリ）
-                    if oid_p and ((c_dt_p and c_dt_p >= commit_from_str) or not c_dt_p or c_dt_p.startswith("0000")):
-                        orders_map[oid_p] = slim_p
-                if prog_bar is not None:
-                    prog_bar.progress(min(1.0, (page_p + 1) / 80), text=f"過去3ヶ月分の予約注文→当月出荷分を照合中... ({len(orders_map):,} 件)")
-                if len(batch_p) < limit:
-                    break
-                offset_p += limit
-            except Exception:
-                break
-
-        # ステップ3：さらにv2 APIの出荷日検索（commit_date_from/to）で2ヶ月以上前の先行予約出荷分も100%補完
-        time.sleep(1.02)
-        v2_ids = _fetch_v2_commit_date_order_ids(commit_from_str, date_to_str, access_token)
-        missing_ids = [oid for oid in sorted(v2_ids) if oid not in orders_map]
-        for m_i, m_oid in enumerate(missing_ids):
-            if prog_bar is not None:
-                prog_bar.progress(min(1.0, (m_i + 1) / max(1, len(missing_ids))), text=f"先行予約の当月出荷分を補完中... ({m_i+1}/{len(missing_ids)}件)")
-            q_m = urllib.parse.urlencode({"serial_order_id": m_oid})
-            req_m = urllib.request.Request(f"{B2B_DOMAIN}/api/v1/orders.php?{q_m}", headers=headers, method="GET")
-            try:
-                with urllib.request.urlopen(req_m, timeout=15) as resp_m:
-                    d_m = json.loads(resp_m.read().decode("utf-8", errors="replace"))
-                for od_m in d_m.get("orders", []):
-                    oid_m = str(od_m.get("serial_order_id", "")).strip()
-                    if oid_m:
-                        orders_map[oid_m] = _slim_b2b_order(od_m)
+        base_dt = pd.to_datetime(date_from_str)
+        windows = [
+            ((base_dt - pd.Timedelta(days=15)).strftime("%Y-%m-%d"), (base_dt - pd.Timedelta(days=1)).strftime("%Y-%m-%d"), 30),
+            ((base_dt - pd.Timedelta(days=35)).strftime("%Y-%m-%d"), (base_dt - pd.Timedelta(days=16)).strftime("%Y-%m-%d"), 30),
+            ((base_dt - pd.Timedelta(days=75)).strftime("%Y-%m-%d"), (base_dt - pd.Timedelta(days=36)).strftime("%Y-%m-%d"), 30),
+        ]
+        for w_idx, (w_from, w_to, w_max_p) in enumerate(windows, 1):
+            offset_p = 0
+            for page_p in range(w_max_p):
                 time.sleep(1.02)
-            except Exception:
-                break
+                q_p = urllib.parse.urlencode({
+                    "order_date_from": f"{w_from} 00:00:00",
+                    "order_date_to": f"{w_to} 23:59:59",
+                    "limit": limit,
+                    "offset": offset_p
+                })
+                req_p = urllib.request.Request(f"{B2B_DOMAIN}/api/v1/orders.php?{q_p}", headers=headers, method="GET")
+                try:
+                    with urllib.request.urlopen(req_p, timeout=20) as resp_p:
+                        d_p = json.loads(resp_p.read().decode("utf-8", errors="replace"))
+                    batch_p = d_p.get("orders", [])
+                    if not batch_p:
+                        break
+                    for od_p in batch_p:
+                        slim_p = _slim_b2b_order(od_p)
+                        oid_p = slim_p.get("serial_order_id", "")
+                        c_dt_p = slim_p.get("commit_date", "")[:10]
+                        if oid_p and ((c_dt_p and c_dt_p >= commit_from_str) or not c_dt_p or c_dt_p.startswith("0000")):
+                            orders_map[oid_p] = slim_p
+                    if prog_bar is not None:
+                        prog_bar.progress(min(1.0, (page_p + 1) / w_max_p), text=f"過去受注({w_from}〜{w_to})の当月出荷分を照合中... ({len(orders_map):,} 件)")
+                    if len(batch_p) < limit:
+                        break
+                    offset_p += limit
+                except Exception:
+                    break
 
     if prog_bar is not None:
         prog_bar.empty()
@@ -5387,8 +5306,9 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     with c_ap5:
         st.write("")
         if st.button("⚡ 今すぐ最新を取得", type="primary", use_container_width=True):
-            quick_from = (now_d - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=10, silent=False)
+            # 直近4日分を取得してステータス変更（本日出荷完了になった伝票等）も即座に反映
+            quick_from = (now_d - pd.Timedelta(days=4)).strftime("%Y-%m-%d")
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=12, silent=False)
     with c_ap6:
         st.write("")
         if st.button("🔄 月初から全件再取得", use_container_width=True):
@@ -5397,11 +5317,12 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     if not cached_orders_list:
         cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(d_from_str, d_to_str, current_token, max_pages=50, silent=False, commit_from_str=d_from_str)
     elif (time.time() - last_sync_ts) >= 120:
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=6, silent=True)
+        quick_from = (now_d - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=6, silent=True)
 
     col_cap_l, col_cap_r = st.columns([3.8, 1.2])
     with col_cap_l:
-        st.caption(f"⚡ **省メモリ高速モード** ｜ 最終API取得(日本時間): **{last_up_str}** ／ キャッシュ件数: **{len(cached_orders_list):,} 件**（画面操作時に前回から2分以上経っていれば自動で最新注文を取得します）")
+        st.caption(f"⚡ **省メモリ高速モード** ｜ 最終API取得(日本時間): **{last_up_str}** ／ キャッシュ件数: **{len(cached_orders_list):,} 件**（上部の4カードや表の会社名をクリックすると詳細POPが開きます）")
     with col_cap_r:
         enable_auto_timer = st.toggle("⏱️ 放置時も5分自動更新", value=False, key="b2b_auto_timer_toggle")
 
@@ -5411,7 +5332,8 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             import gc
             prev_ts = st.session_state.get("_last_b2b_auto_sync_ts", 0.0)
             if (time.time() - prev_ts) >= 290:
-                fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=4, silent=True)
+                q_from = (now_d - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+                fetch_b2b_orders_into_cache(q_from, today_jst_str, current_token, max_pages=5, silent=True)
                 gc.collect()
                 st.rerun()
         _b2b_background_poller()
@@ -5421,7 +5343,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         st.error(f"⚠️ {api_msg}")
         st.stop()
 
-    # 受注ヘッダ＆商品明細の展開
+    # 受注ヘッダ＆商品明細の展開（スマレジEC・B2Bの期間別売上CSVと完全同一の計算式）
     order_header_rows = []
     detail_rows = []
     for od in raw_orders:
@@ -5477,7 +5399,9 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             qty = int(clean_num(dt_item.get("product_quantity", 0)))
             u_price = int(clean_num(dt_item.get("product_price_notax", dt_item.get("product_price", 0))))
             line_amt = u_price * qty
-            u_cost = int(clean_num(dt_item.get("plg_raku2_stock_price", cost_master_dict.get(sku, 0))))
+            # スマレジAPI側の原価（plg_raku2_stock_price）を優先し、0のときだけマスタ原価を使用
+            api_cost = clean_num(dt_item.get("plg_raku2_stock_price", 0))
+            u_cost = int(round(api_cost)) if api_cost > 0 else int(round(clean_num(cost_master_dict.get(sku, 0))))
             line_cost = u_cost * qty
             line_prof = line_amt - line_cost
             line_margin = round(line_prof / line_amt * 100.0, 1) if line_amt > 0 else 0.0
@@ -5509,13 +5433,15 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 "担当者": staff_nm
             })
 
-        # スマレジの「商品代金合計(税別)」と同じく、調整額を引く前の純粋な商品税別合計を使用する
+        # ★スマレジ「期間別売上」CSVと完全一致させる計算式：
+        # 商品代金合計(税別) は純粋な商品合計、粗利合計 ＝ 商品代金合計(税別) － 原価合計(税別) ＋ 調整額(discount)
+        disc_val = int(round(clean_num(od.get("discount", 0))))
         if ord_notax_sum == 0:
             sub_tax_in = int(clean_num(od.get("subtotal", 0)))
             tax_v = int(clean_num(od.get("tax", 0)))
             ord_notax_sum = (sub_tax_in - tax_v) if tax_v > 0 else int(round(sub_tax_in / 1.10))
 
-        ord_prof_sum = ord_notax_sum - ord_cost_sum
+        ord_prof_sum = ord_notax_sum - ord_cost_sum + disc_val
         ord_margin_pct = round(ord_prof_sum / ord_notax_sum * 100.0, 1) if ord_notax_sum > 0 else 0.0
 
         order_header_rows.append({
@@ -5528,6 +5454,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             "注文商品内訳(抜粋)": " / ".join(item_summary_list[:4]) + (" 他" if len(item_summary_list) > 4 else ""),
             "点数合計": ord_qty_sum,
             "商品代金(税別)": ord_notax_sum,
+            "調整額": disc_val,
             "原価合計": ord_cost_sum,
             "粗利額": ord_prof_sum,
             "粗利率_数値": ord_margin_pct,
@@ -5543,49 +5470,62 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         st.info("指定期間の受注データはありませんでした。")
         st.stop()
 
-    # サマリーカード計算（フィルタ前の期間全体集計）
+    # ========================================================
+    # ★ 4大サマリーカード集計 ＆ クリックで即座に開く詳細POP（モーダル）データ構築
+    # ========================================================
     today_str = now_d.strftime("%Y-%m-%d")
-    unshipped_df = hdr_df[hdr_df["区分"].str.contains("未出荷")]
-    shipped_df = hdr_df[hdr_df["区分"].str.contains("出荷済")]
-    today_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str)]
+    unshipped_df = hdr_df[hdr_df["区分"].str.contains("未出荷")].copy()
+    shipped_df = hdr_df[hdr_df["区分"].str.contains("出荷済")].copy()
+    today_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str)].copy()
 
     unshipped_amt = int(unshipped_df["商品代金(税別)"].sum())
+    unshipped_prof = int(unshipped_df["粗利額"].sum())
+    unshipped_mgn = (unshipped_prof / unshipped_amt * 100.0) if unshipped_amt > 0 else 0.0
+
     shipped_amt = int(shipped_df["商品代金(税別)"].sum())
     shipped_prof = int(shipped_df["粗利額"].sum())
     shipped_margin = (shipped_prof / shipped_amt * 100.0) if shipped_amt > 0 else 0.0
+
     today_amt = int(today_df["商品代金(税別)"].sum())
+    today_prof = int(today_df["粗利額"].sum())
+    today_mgn = (today_prof / today_amt * 100.0) if today_amt > 0 else 0.0
     today_cnt = len(today_df)
 
-    cur_ym_str = f"{now_d.year}年{now_d.month:02d}月"
-    yayoi_cur_month_amt = int(df[df["年月"] == cur_ym_str]["金額"].sum()) if not df.empty else 0
-    forecast_total = yayoi_cur_month_amt + unshipped_amt
+    # ④ 新機能：「🚨 要確認アラート（低粗利30%未満・原価割れ明細 ＆ 未出荷商品の在庫不足チェック）」
+    low_margin_det_df = det_df[(det_df["金額(税別)"] > 0) & (det_df["粗利率_数値"] < 30.0)].sort_values("粗利率_数値", ascending=True)
+    unship_det_df = det_df[det_df["区分"].str.contains("未出荷")].copy()
+    stock_short_rows = []
+    if not unship_det_df.empty:
+        unship_sku_agg = unship_det_df.groupby(["商品コード", "商品名"], as_index=False).agg(
+            未出荷受注数=("数量", "sum"),
+            未出荷金額=("金額(税別)", "sum"),
+            件数=("受注ID", "nunique")
+        ).sort_values("未出荷受注数", ascending=False)
+        for _, ur in unship_sku_agg.iterrows():
+            sk_u = str(ur["商品コード"]).strip()
+            req_q = int(ur["未出荷受注数"])
+            l_inf = (logi_inv_map or {}).get(sk_u, {})
+            good_q = int(l_inf.get("good_qty", 0))
+            y_res = int((yayoi_kakuho_map or {}).get(sk_u, 0))
+            free_q = good_q - y_res
+            after_ship_q = free_q - req_q
+            stock_short_rows.append({
+                "sku": sk_u,
+                "name": str(ur["商品名"]),
+                "cnt": int(ur["件数"]),
+                "req_qty": req_q,
+                "amt": int(ur["未出荷金額"]),
+                "good_qty": good_q,
+                "yayoi_res": y_res,
+                "free_qty": free_q,
+                "after_qty": after_ship_q,
+                "is_alert": (after_ship_q < 0 or (sk_u in logi_inv_map and free_q < req_q))
+            })
+    stock_alert_cnt = sum(1 for x in stock_short_rows if x["is_alert"])
+    low_mgn_cnt = len(low_margin_det_df)
+    total_alert_cnt = low_mgn_cnt + stock_alert_cnt
 
-    st.markdown(f"""
-    <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-bottom:12px;">
-        <div style="border:1px solid #cbd5e1; border-top:4px solid #dc2626; border-radius:6px; padding:10px; background:#fef2f2;">
-            <div style="font-size:12px; color:#991b1b;">🆕 本日受注速報（{now_d.strftime('%m/%d')}）</div>
-            <div style="font-size:20px; font-weight:bold; color:#dc2626; margin-top:2px;">¥{today_amt:,}</div>
-            <div style="font-size:11px; color:#7f1d1d; margin-top:2px;">本日の注文伝票数: <b>{today_cnt:,} 件</b></div>
-        </div>
-        <div style="border:1px solid #cbd5e1; border-top:4px solid #ea580c; border-radius:6px; padding:10px; background:#fff7ed;">
-            <div style="font-size:12px; color:#9a3412;">⏳ B2B 未出荷受注残（見込み売上）</div>
-            <div style="font-size:20px; font-weight:bold; color:#ea580c; margin-top:2px;">¥{unshipped_amt:,}</div>
-            <div style="font-size:11px; color:#7c2d12; margin-top:2px;">未出荷伝票: <b>{len(unshipped_df):,} 件</b></div>
-        </div>
-        <div style="border:1px solid #cbd5e1; border-top:4px solid #2563eb; border-radius:6px; padding:10px; background:#eff6ff;">
-            <div style="font-size:12px; color:#1e40af;">✅ B2B 期間内出荷済（税別）｜<b>{len(shipped_df):,} 件</b></div>
-            <div style="font-size:20px; font-weight:bold; color:#1d4ed8; margin-top:2px;">¥{shipped_amt:,}</div>
-            <div style="font-size:11px; color:#1e3a8a; margin-top:2px;">粗利額: <b>¥{shipped_prof:,}</b>（粗利率: <b>{shipped_margin:.1f}%</b>）</div>
-        </div>
-        <div style="border:1px solid #cbd5e1; border-top:4px solid #16a34a; border-radius:6px; padding:10px; background:#f0fdf4;">
-            <div style="font-size:12px; color:#166534;">🚀 当月着地見込み（弥生確定＋B2B未出荷）</div>
-            <div style="font-size:20px; font-weight:bold; color:#15803d; margin-top:2px;">¥{forecast_total:,}</div>
-            <div style="font-size:11px; color:#14532d; margin-top:2px;">弥生確定済: <b>¥{yayoi_cur_month_amt:,}</b> ＋ 見込み: <b>¥{unshipped_amt:,}</b></div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ステータス絞り込み反映
+    # ステータス絞り込み反映（下のメイン表用）
     if api_status_filter.startswith("⏳"):
         hdr_df = hdr_df[hdr_df["区分"].str.contains("未出荷")].copy()
         det_df = det_df[det_df["区分"].str.contains("未出荷")].copy()
@@ -5596,7 +5536,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         hdr_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str)].copy()
         det_df = det_df[det_df["受注日時"].str.startswith(today_str)].copy()
 
-    # ★ ご要望機能：得意先選択（ドリルダウン）＆ 昇順・降順ソートバー
+    # 得意先選択（ドリルダウン）＆ 昇順・降順ソートバー
     s_bar1, s_bar2, s_bar3, s_bar4 = st.columns([2.2, 1.2, 1.1, 1.3])
     cust_summary_df = hdr_df.groupby("得意先名", as_index=False)["商品代金(税別)"].sum().sort_values("商品代金(税別)", ascending=False)
     cust_options = ["（すべての得意先を表示）"] + [f"{r['得意先名']} （¥{int(r['商品代金(税別)']):,}）" for _, r in cust_summary_df.iterrows()]
@@ -5620,7 +5560,6 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         hdr_df = hdr_df[hdr_df["得意先名"] == selected_comp_name].copy()
         det_df = det_df[det_df["得意先名"] == selected_comp_name].copy()
 
-    # 昇順・降順の並び替え適用（デフォルトは受注日時の最新順＋受注ID降順）
     is_asc = sort_order_choice.startswith("⬆️")
     sort_target_hdr = "粗利率_数値" if sort_col_choice == "粗利率" else sort_col_choice
     if sort_target_hdr in hdr_df.columns:
@@ -5631,7 +5570,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     if sort_target_det in det_df.columns:
         det_df = det_df.sort_values(by=[sort_target_det, "受注ID"], ascending=[is_asc, is_asc]).reset_index(drop=True)
 
-    # ★ 売れた商品ランキング集計（商品コード×商品名 ごとの数量・金額・粗利額・粗利率）
+    # 売れた商品ランキング集計
     if not det_df.empty:
         prod_agg_df = det_df.groupby(["商品コード", "商品名", "JANコード"], as_index=False).agg(
             注文回数=("受注ID", "nunique"),
@@ -5649,7 +5588,6 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     else:
         prod_agg_df = pd.DataFrame()
 
-    # 得意先が選択されている場合は、上部にその得意先の「売れた商品内訳」を大きく表示！
     if selected_comp_name and not prod_agg_df.empty:
         c_tot_amt = int(prod_agg_df["金額(税別)"].sum())
         c_tot_prof = int(prod_agg_df["粗利額"].sum())
@@ -5665,11 +5603,8 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
 
     import html
 
-    def render_b2b_Interactive_orders_table(hdr_df_in, det_df_in, max_h=540):
-        if hdr_df_in.empty:
-            st.info("該当するデータがありません。")
-            return
-
+    def render_b2b_dashboard_and_table(hdr_df_in, det_df_in, max_h=540):
+        # 1) 伝票別の明細辞書
         order_details_map = {}
         for oid_val, grp in det_df_in.groupby("受注ID"):
             items = []
@@ -5687,6 +5622,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 })
             order_details_map[str(oid_val)] = items
 
+        # 2) 得意先別の期間内商品集計辞書
         comp_summary_map = {}
         for comp_val, grp in det_df_in.groupby("得意先名"):
             p_agg = grp.groupby(["商品コード", "商品名", "JANコード"], as_index=False).agg(
@@ -5714,7 +5650,64 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 })
             comp_summary_map[str(comp_val)] = c_items
 
-        disp_cols = [c for c in hdr_df_in.columns if c != "粗利率_数値"]
+        # 3) 上部4カードのPOP用データ作成
+        # ① 本日受注POPデータ
+        today_orders_js = []
+        for _, r in today_df.sort_values("受注ID", ascending=False).iterrows():
+            today_orders_js.append({
+                "oid": str(r["受注ID"]), "dt": str(r["受注日時"]), "status": str(r["受注ステータス"]),
+                "comp": str(r["得意先名"]), "items": str(r["注文商品内訳(抜粋)"]),
+                "qty": int(r["点数合計"]), "amt": int(r["商品代金(税別)"]),
+                "prof": int(r["粗利額"]), "mgn": str(r["粗利率"]), "staff": str(r["担当者"])
+            })
+
+        # ② 未出荷受注残POPデータ（未出荷伝票リスト ＆ 出荷予定商品集計＋在庫照合）
+        unship_orders_js = []
+        for _, r in unshipped_df.sort_values(["出荷予定日", "商品代金(税別)"], ascending=[True, False]).iterrows():
+            unship_orders_js.append({
+                "oid": str(r["受注ID"]), "ord_dt": str(r["受注日時"]), "hasso_dt": str(r["出荷予定日"] or "未定"),
+                "status": str(r["受注ステータス"]), "comp": str(r["得意先名"]),
+                "items": str(r["注文商品内訳(抜粋)"]), "qty": int(r["点数合計"]),
+                "amt": int(r["商品代金(税別)"]), "prof": int(r["粗利額"]),
+                "mgn": str(r["粗利率"]), "staff": str(r["担当者"])
+            })
+
+        # ③ 出荷済・日別集計POPデータ（スマレジ「期間別売上」CSVと1対1で照合できる日別表）
+        daily_ship_js = []
+        if not shipped_df.empty:
+            d_agg = shipped_df.groupby("出荷日", as_index=False).agg(
+                cnt=("受注ID", "count"),
+                amt=("商品代金(税別)", "sum"),
+                cost=("原価合計", "sum"),
+                adj=("調整額", "sum"),
+                prof=("粗利額", "sum")
+            ).sort_values("出荷日", ascending=True)
+            for _, r in d_agg.iterrows():
+                a_v = int(r["amt"])
+                p_v = int(r["prof"])
+                daily_ship_js.append({
+                    "date": str(r["出荷日"]),
+                    "cnt": int(r["cnt"]),
+                    "avg": int(round(a_v / max(1, int(r["cnt"])))),
+                    "amt": a_v,
+                    "cost": int(r["cost"]),
+                    "adj": int(r["adj"]),
+                    "prof": p_v,
+                    "mgn": f"{(p_v / a_v * 100):.1f}%" if a_v > 0 else "-"
+                })
+
+        # ④ 要確認アラートPOPデータ（低粗利30%未満・原価割れ明細 ＆ 在庫注意商品）
+        low_mgn_js = []
+        for _, r in low_margin_det_df.head(150).iterrows():
+            low_mgn_js.append({
+                "oid": str(r["受注ID"]), "dt": str(r["受注日時"]), "badge": str(r["区分"]),
+                "comp": str(r["得意先名"]), "sku": str(r["商品コード"]), "name": str(r["商品名"]),
+                "qty": int(r["数量"]), "price": int(r["単価(税別)"]), "amt": int(r["金額(税別)"]),
+                "cost": int(r["原価合計"]), "prof": int(r["粗利額"]), "mgn": str(r["粗利率"]),
+                "staff": str(r["担当者"])
+            })
+
+        disp_cols = [c for c in hdr_df_in.columns if c not in ["粗利率_数値", "調整額"]]
         num_cols = {"点数合計", "商品代金(税別)", "原価合計", "粗利額", "粗利率"}
 
         ths = "".join([
@@ -5729,7 +5722,6 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             comp_str = str(r.get("得意先名", ""))
             hdr_meta_map[oid_str] = {
                 "oid": oid_str,
-                "ec_oid": str(r.get("受注番号", "")),
                 "comp": comp_str,
                 "status": str(r.get("受注ステータス", "")),
                 "badge": str(r.get("区分", "")),
@@ -5764,7 +5756,12 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         payload_json = json.dumps({
             "headers": hdr_meta_map,
             "details": order_details_map,
-            "comp_summary": comp_summary_map
+            "comp_summary": comp_summary_map,
+            "today_orders": today_orders_js,
+            "unship_orders": unship_orders_js,
+            "unship_skus": stock_short_rows,
+            "daily_ship": daily_ship_js,
+            "low_mgn": low_mgn_js
         }, ensure_ascii=False)
 
         html_code = f"""
@@ -5774,6 +5771,17 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         <meta charset="utf-8">
         <style>
             body {{ font-family: "Meiryo UI", "Hiragino Sans", sans-serif; margin: 0; padding: 0; color: #0f172a; }}
+            /* 上部4枚のクリック可能サマリーカード */
+            .top-cards {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }}
+            .s-card {{
+                border: 1px solid #cbd5e1; border-radius: 7px; padding: 10px 12px; cursor: pointer;
+                transition: transform 0.12s ease, box-shadow 0.12s ease; position: relative;
+            }}
+            .s-card:hover {{ transform: translateY(-2px); box-shadow: 0 6px 14px rgba(0,0,0,0.12); }}
+            .s-card .click-hint {{
+                position: absolute; top: 8px; right: 10px; font-size: 11px; font-weight: 700;
+                padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.85);
+            }}
             .tbl-wrap {{ max-height: {max_h}px; overflow: auto; border: 1px solid #cbd5e1; border-radius: 6px; }}
             table.main-tbl {{ border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12.5px; }}
             table.main-tbl th {{
@@ -5798,33 +5806,61 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 background: rgba(15, 23, 42, 0.55); z-index: 9999; align-items: center; justify-content: center;
             }}
             .modal-card {{
-                background: #ffffff; width: 94%; max-width: 1060px; max-height: 88vh;
-                border-radius: 10px; box-shadow: 0 20px 30px rgba(0,0,0,0.25);
+                background: #ffffff; width: 95%; max-width: 1120px; max-height: 90vh;
+                border-radius: 10px; box-shadow: 0 20px 30px rgba(0,0,0,0.28);
                 display: flex; flex-direction: column; overflow: hidden;
             }}
             .modal-hdr {{
                 display: flex; justify-content: space-between; align-items: center;
-                padding: 14px 20px; border-bottom: 1px solid #e2e8f0; background: #f8fafc;
+                padding: 13px 20px; border-bottom: 1px solid #e2e8f0; background: #f8fafc;
             }}
-            .modal-title {{ font-size: 17px; font-weight: 800; color: #0f172a; }}
+            .modal-title {{ font-size: 16.5px; font-weight: 800; color: #0f172a; }}
             .close-btn {{
                 font-size: 22px; font-weight: bold; color: #64748b; cursor: pointer;
                 border: none; background: none; line-height: 1; padding: 2px 8px;
             }}
             .close-btn:hover {{ color: #0f172a; }}
-            .modal-body {{ padding: 16px 20px; overflow-y: auto; }}
+            .modal-body {{ padding: 15px 20px; overflow-y: auto; }}
             .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }}
             .kpi-box {{ border: 1px solid #cbd5e1; border-radius: 7px; padding: 10px 12px; background: #fff; }}
             .kpi-lbl {{ font-size: 11.5px; color: #475569; font-weight: 600; }}
             .kpi-val {{ font-size: 19px; font-weight: 800; margin-top: 3px; }}
             .kpi-sub {{ font-size: 11px; color: #64748b; margin-top: 3px; }}
             .sec-title {{ font-size: 13.5px; font-weight: 800; margin: 12px 0 6px 0; color: #1e293b; }}
-            table.sub-tbl {{ width: 100%; border-collapse: collapse; font-size: 12.5px; margin-bottom: 12px; }}
-            table.sub-tbl th {{ background: #f1f5f9; padding: 7px 10px; border: 1px solid #cbd5e1; text-align: left; }}
-            table.sub-tbl td {{ padding: 6px 10px; border: 1px solid #e2e8f0; }}
+            table.sub-tbl {{ width: 100%; border-collapse: collapse; font-size: 12.2px; margin-bottom: 12px; }}
+            table.sub-tbl th {{ background: #f1f5f9; padding: 7px 9px; border: 1px solid #cbd5e1; text-align: left; position: sticky; top: 0; }}
+            table.sub-tbl td {{ padding: 6px 9px; border: 1px solid #e2e8f0; }}
         </style>
         </head>
         <body>
+            <!-- クリックでPOPが開く4大サマリーカード -->
+            <div class="top-cards">
+                <div class="s-card" style="border-top:4px solid #dc2626; background:#fef2f2;" onclick="openCardModal('today')">
+                    <span class="click-hint" style="color:#dc2626;">🔍 クリックで内訳POP</span>
+                    <div style="font-size:12px; color:#991b1b; font-weight:700;">🆕 本日受注速報（{now_d.strftime('%m/%d')}）</div>
+                    <div style="font-size:21px; font-weight:800; color:#dc2626; margin-top:3px;">¥{today_amt:,}</div>
+                    <div style="font-size:11px; color:#7f1d1d; margin-top:3px;">本日伝票: <b>{today_cnt:,} 件</b> ｜ 粗利: <b>¥{today_prof:,}</b> ({today_mgn:.1f}%)</div>
+                </div>
+                <div class="s-card" style="border-top:4px solid #ea580c; background:#fff7ed;" onclick="openCardModal('unshipped')">
+                    <span class="click-hint" style="color:#ea580c;">🔍 クリックで内訳POP</span>
+                    <div style="font-size:12px; color:#9a3412; font-weight:700;">⏳ B2B 未出荷受注残（見込み売上）</div>
+                    <div style="font-size:21px; font-weight:800; color:#ea580c; margin-top:3px;">¥{unshipped_amt:,}</div>
+                    <div style="font-size:11px; color:#7c2d12; margin-top:3px;">未出荷伝票: <b>{len(unshipped_df):,} 件</b> ｜ 見込粗利: <b>¥{unshipped_prof:,}</b> ({unshipped_mgn:.1f}%)</div>
+                </div>
+                <div class="s-card" style="border-top:4px solid #2563eb; background:#eff6ff;" onclick="openCardModal('shipped')">
+                    <span class="click-hint" style="color:#1d4ed8;">🔍 日別売上POP</span>
+                    <div style="font-size:12px; color:#1e40af; font-weight:700;">✅ B2B 期間内出荷済（税別）｜<b>{len(shipped_df):,} 件</b></div>
+                    <div style="font-size:21px; font-weight:800; color:#1d4ed8; margin-top:3px;">¥{shipped_amt:,}</div>
+                    <div style="font-size:11px; color:#1e3a8a; margin-top:3px;">粗利額: <b>¥{shipped_prof:,}</b>（粗利率: <b>{shipped_margin:.1f}%</b>）</div>
+                </div>
+                <div class="s-card" style="border-top:4px solid #7c3aed; background:#f5f3ff;" onclick="openCardModal('alerts')">
+                    <span class="click-hint" style="color:#6d28d9;">🔍 クリックで確認POP</span>
+                    <div style="font-size:12px; color:#5b21b6; font-weight:700;">🚨 要確認：低粗利・在庫引当チェック</div>
+                    <div style="font-size:21px; font-weight:800; color:{'#dc2626' if total_alert_cnt > 0 else '#15803d'}; margin-top:3px;">{total_alert_cnt:,} 件 <span style="font-size:13px; font-weight:600;">の要注意明細</span></div>
+                    <div style="font-size:11px; color:#4c1d95; margin-top:3px;">粗利30%未満: <b>{low_mgn_cnt:,} 行</b> ｜ 未出荷在庫不足: <b>{stock_alert_cnt:,} 品目</b></div>
+                </div>
+            </div>
+
             <div class="tbl-wrap">
                 <table class="main-tbl">
                     <thead><tr>{ths}</tr></thead>
@@ -5845,6 +5881,180 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             <script>
             const DATA = {payload_json};
             function fmtNum(n) {{ return Number(n || 0).toLocaleString(); }}
+
+            function openCardModal(cardType) {{
+                const titleEl = document.getElementById("mTitle");
+                const bodyEl = document.getElementById("mBody");
+
+                if (cardType === 'unshipped') {{
+                    titleEl.innerHTML = `⏳ B2B 未出荷受注残（見込み売上）内訳一覧（全 ${{DATA.unship_orders.length}} 伝票 ／ ¥${{fmtNum({unshipped_amt})}}）`;
+                    let ordRows = DATA.unship_orders.map(o => `
+                        <tr>
+                            <td><b>${{o.hasso_dt}}</b></td>
+                            <td>${{o.ord_dt}}</td>
+                            <td>${{o.oid}}</td>
+                            <td><span style="background:#ffedd5; color:#9a3412; padding:2px 6px; border-radius:4px; font-weight:700;">${{o.status}}</span></td>
+                            <td><a href="javascript:void(0);" class="pop-link" onclick="openOrderModal('${{o.oid}}')">🔍 ${{o.comp}}</a></td>
+                            <td>${{o.items}}</td>
+                            <td class="num">${{fmtNum(o.qty)}}</td>
+                            <td class="num"><b>¥${{fmtNum(o.amt)}}</b></td>
+                            <td class="num" style="color:#15803d; font-weight:700;">¥${{fmtNum(o.prof)}}</td>
+                            <td class="num">${{o.mgn}}</td>
+                            <td>${{o.staff}}</td>
+                        </tr>
+                    `).join("");
+
+                    let skuRows = DATA.unship_skus.map(s => `
+                        <tr style="${{s.is_alert ? 'background:#fef2f2;' : ''}}">
+                            <td><b>${{s.sku}}</b></td>
+                            <td>${{s.name}}</td>
+                            <td class="num">${{fmtNum(s.cnt)}}件</td>
+                            <td class="num"><b style="color:#ea580c; font-size:13.5px;">${{fmtNum(s.req_qty)}} 個</b></td>
+                            <td class="num">¥${{fmtNum(s.amt)}}</td>
+                            <td class="num">${{fmtNum(s.good_qty)}}</td>
+                            <td class="num">${{fmtNum(s.yayoi_res)}}</td>
+                            <td class="num"><b>${{fmtNum(s.free_qty)}}</b></td>
+                            <td class="num" style="color:${{s.after_qty < 0 ? '#dc2626' : '#15803d'}}; font-weight:800;">
+                                ${{s.after_qty < 0 ? '🚨 ' + fmtNum(s.after_qty) + ' (不足)' : '✅ +' + fmtNum(s.after_qty)}}
+                            </td>
+                        </tr>
+                    `).join("");
+
+                    bodyEl.innerHTML = `
+                        <div class="sec-title">📋 ① 未出荷の受注伝票一覧（得意先名をクリックするとその伝票の明細へ移動します）</div>
+                        <table class="sub-tbl">
+                            <thead>
+                                <tr>
+                                    <th>出荷予定日</th><th>受注日時</th><th>受注ID</th><th>ステータス</th>
+                                    <th>得意先名(クリックで詳細)</th><th>注文商品内訳</th><th class="num">点数</th>
+                                    <th class="num">商品代金(税別)</th><th class="num">粗利額</th><th class="num">粗利率</th><th>担当</th>
+                                </tr>
+                            </thead>
+                            <tbody>${{ordRows || '<tr><td colspan="11">未出荷の伝票はありません</td></tr>'}}</tbody>
+                        </table>
+
+                        <div class="sec-title">📦 ② 未出荷商品のピッキング合計数 ＆ ロジザード有効フリー在庫照合（全 ${{DATA.unship_skus.length}} 品目）</div>
+                        <table class="sub-tbl">
+                            <thead>
+                                <tr>
+                                    <th>商品コード</th><th>商品名</th><th class="num">伝票数</th>
+                                    <th class="num">未出荷 必要数</th><th class="num">見込金額(税別)</th>
+                                    <th class="num">ロジ良品在庫</th><th class="num">弥生確保数</th>
+                                    <th class="num">現在フリー在庫</th><th class="num">出荷後 残フリー在庫</th>
+                                </tr>
+                            </thead>
+                            <tbody>${{skuRows || '<tr><td colspan="9">データなし</td></tr>'}}</tbody>
+                        </table>
+                    `;
+                }} else if (cardType === 'shipped') {{
+                    titleEl.innerHTML = `✅ B2B 期間内出荷済・出荷日別 売上集計表（スマレジ『期間別売上』突合用）`;
+                    let dRows = DATA.daily_ship.map(d => `
+                        <tr>
+                            <td><b>${{d.date}}</b></td>
+                            <td class="num"><b>${{fmtNum(d.cnt)}} 件</b></td>
+                            <td class="num">¥${{fmtNum(d.avg)}}</td>
+                            <td class="num"><b style="color:#1d4ed8;">¥${{fmtNum(d.amt)}}</b></td>
+                            <td class="num">¥${{fmtNum(d.cost)}}</td>
+                            <td class="num" style="color:${{d.adj < 0 ? '#dc2626' : '#475569'}};">¥${{fmtNum(d.adj)}}</td>
+                            <td class="num" style="color:#15803d; font-weight:700;">¥${{fmtNum(d.prof)}}</td>
+                            <td class="num"><b>${{d.mgn}}</b></td>
+                        </tr>
+                    `).join("");
+                    bodyEl.innerHTML = `
+                        <div class="sec-title">📅 出荷日（commit_date）別の件数・商品代金合計（税別）・原価・調整額・粗利合計</div>
+                        <table class="sub-tbl">
+                            <thead>
+                                <tr>
+                                    <th>出荷日</th><th class="num">受注件数</th><th class="num">受注額平均(税別)</th>
+                                    <th class="num">商品代金合計(税別)</th><th class="num">原価合計(税別)</th>
+                                    <th class="num">調整額</th><th class="num">粗利合計</th><th class="num">粗利率</th>
+                                </tr>
+                            </thead>
+                            <tbody>${{dRows}}</tbody>
+                        </table>
+                    `;
+                }} else if (cardType === 'today') {{
+                    titleEl.innerHTML = `🆕 本日受注速報（{now_d.strftime('%Y/%m/%d')}）注文伝票一覧（全 ${{DATA.today_orders.length}} 件）`;
+                    let tRows = DATA.today_orders.map(o => `
+                        <tr>
+                            <td>${{o.dt}}</td><td>${{o.oid}}</td><td>${{o.status}}</td>
+                            <td><a href="javascript:void(0);" class="pop-link" onclick="openOrderModal('${{o.oid}}')">🔍 ${{o.comp}}</a></td>
+                            <td>${{o.items}}</td><td class="num">${{fmtNum(o.qty)}}</td>
+                            <td class="num"><b>¥${{fmtNum(o.amt)}}</b></td>
+                            <td class="num" style="color:#15803d; font-weight:700;">¥${{fmtNum(o.prof)}}</td>
+                            <td class="num">${{o.mgn}}</td><td>${{o.staff}}</td>
+                        </tr>
+                    `).join("");
+                    bodyEl.innerHTML = `
+                        <table class="sub-tbl">
+                            <thead>
+                                <tr>
+                                    <th>受注日時</th><th>受注ID</th><th>ステータス</th><th>得意先名(クリックで詳細)</th>
+                                    <th>注文商品内訳</th><th class="num">点数</th><th class="num">商品代金(税別)</th>
+                                    <th class="num">粗利額</th><th class="num">粗利率</th><th>担当</th>
+                                </tr>
+                            </thead>
+                            <tbody>${{tRows || '<tr><td colspan="10">本日の受注はまだありません</td></tr>'}}</tbody>
+                        </table>
+                    `;
+                }} else if (cardType === 'alerts') {{
+                    titleEl.innerHTML = `🚨 要確認アラート詳細（粗利率30%未満・原価割れ明細 ＆ 未出荷商品の在庫不足リスト）`;
+                    let lRows = DATA.low_mgn.map(x => `
+                        <tr style="${{x.prof <= 0 ? 'background:#fef2f2;' : ''}}">
+                            <td>${{x.dt}}</td><td>${{x.badge}}</td>
+                            <td><a href="javascript:void(0);" class="pop-link" onclick="openOrderModal('${{x.oid}}')">🔍 ${{x.comp}}</a></td>
+                            <td><b>${{x.sku}}</b></td><td>${{x.name}}</td>
+                            <td class="num">${{fmtNum(x.qty)}}</td>
+                            <td class="num"><b>¥${{fmtNum(x.price)}}</b></td>
+                            <td class="num">¥${{fmtNum(x.amt)}}</td>
+                            <td class="num">¥${{fmtNum(x.cost)}}</td>
+                            <td class="num" style="color:#dc2626; font-weight:700;">¥${{fmtNum(x.prof)}}</td>
+                            <td class="num"><b style="color:#dc2626;">${{x.mgn}}</b></td>
+                            <td>${{x.staff}}</td>
+                        </tr>
+                    `).join("");
+
+                    let alertSkus = DATA.unship_skus.filter(s => s.is_alert).map(s => `
+                        <tr style="background:#fef2f2;">
+                            <td><b>${{s.sku}}</b></td><td>${{s.name}}</td>
+                            <td class="num">${{fmtNum(s.cnt)}}件</td>
+                            <td class="num"><b style="color:#dc2626;">${{fmtNum(s.req_qty)}} 個</b></td>
+                            <td class="num">${{fmtNum(s.good_qty)}}</td>
+                            <td class="num">${{fmtNum(s.yayoi_res)}}</td>
+                            <td class="num"><b>${{fmtNum(s.free_qty)}}</b></td>
+                            <td class="num" style="color:#dc2626; font-weight:800;">🚨 ${{fmtNum(s.after_qty)}} 個</td>
+                        </tr>
+                    `).join("");
+
+                    bodyEl.innerHTML = `
+                        <div class="sec-title">⚠️ ① 粗利率30%未満・原価割れの注文明細（単価設定ミスや特価品の確認用：全 ${{DATA.low_mgn.length}} 行）</div>
+                        <table class="sub-tbl">
+                            <thead>
+                                <tr>
+                                    <th>受注日時</th><th>区分</th><th>得意先名(クリックで伝票詳細)</th>
+                                    <th>商品コード</th><th>商品名</th><th class="num">数量</th><th class="num">販売単価</th>
+                                    <th class="num">金額(税別)</th><th class="num">原価合計</th><th class="num">粗利額</th>
+                                    <th class="num">粗利率</th><th>担当</th>
+                                </tr>
+                            </thead>
+                            <tbody>${{lRows || '<tr><td colspan="12">粗利率30%未満の明細はありません</td></tr>'}}</tbody>
+                        </table>
+
+                        <div class="sec-title">🚨 ② 未出荷の商品で「ロジザード有効フリー在庫」が不足する要注意商品（全 ${{DATA.unship_skus.filter(s=>s.is_alert).length}} 品目）</div>
+                        <table class="sub-tbl">
+                            <thead>
+                                <tr>
+                                    <th>商品コード</th><th>商品名</th><th class="num">未出荷伝票数</th>
+                                    <th class="num">未出荷 必要数</th><th class="num">ロジ良品在庫</th>
+                                    <th class="num">弥生確保数</th><th class="num">現在フリー在庫</th><th class="num">出荷後 過不足</th>
+                                </tr>
+                            </thead>
+                            <tbody>${{alertSkus || '<tr><td colspan="8">現在、在庫不足になる未出荷商品はありません</td></tr>'}}</tbody>
+                        </table>
+                    `;
+                }}
+                document.getElementById("orderModal").style.display = "flex";
+            }}
 
             function openOrderModal(oid) {{
                 const h = DATA.headers[oid];
@@ -5903,7 +6113,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                         <div class="kpi-box" style="border-top:4px solid #16a34a;">
                             <div class="kpi-lbl">✨ 粗利額 ＆ 粗利率</div>
                             <div class="kpi-val" style="color:#15803d;">¥${{fmtNum(h.prof)}}（${{h.mgn}}）</div>
-                            <div class="kpi-sub">受注番号: ${{h.ec_oid}}</div>
+                            <div class="kpi-sub">受注ID: ${{h.oid}}</div>
                         </div>
                     </div>
 
@@ -5943,10 +6153,10 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         </body>
         </html>
         """
-        components.html(html_code, height=max_h + 30, scrolling=False)
+        components.html(html_code, height=max_h + 135, scrolling=False)
 
     tab_b2b_1, tab_b2b_2, tab_b2b_3 = st.tabs([
-        f"📋 ① 受注伝票一覧（{len(hdr_df):,} 件｜会社名クリックでPOP表示）",
+        f"📋 ① 受注伝票一覧（{len(hdr_df):,} 件｜上部の4カードや会社名クリックでPOP表示）",
         f"🏆 ② 売れた商品ランキング（{len(prod_agg_df):,} 品目）",
         f"📦 ③ 商品明細・リアルタイム注文一覧（{len(det_df):,} 行）"
     ])
@@ -5954,12 +6164,12 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     with tab_b2b_1:
         c_lim1, c_lim2 = st.columns([3.8, 1.2])
         with c_lim1:
-            st.caption("💡 表の **「🔍 得意先名」** または **「🔍 注文商品内訳」** をクリックすると、待ち時間ゼロで注文商品の詳細ポップアップが開きます！")
+            st.caption("💡 上の **4つのサマリーカード（本日受注／未出荷受注残／期間内出荷済／要確認アラート）** や表の **「🔍 得意先名」** をクリックすると、待ち時間ゼロで詳細POPが開きます！")
         with c_lim2:
             b2b_disp_lim = st.selectbox("表の表示件数（省メモリ）", [200, 500, "全件"], index=0, key="b2b_tbl_lim_sel", label_visibility="collapsed")
         hdr_show = hdr_df.head(int(b2b_disp_lim)) if b2b_disp_lim != "全件" else hdr_df
         det_show = det_df[det_df["受注ID"].isin(hdr_show["受注ID"])] if b2b_disp_lim != "全件" else det_df
-        render_b2b_Interactive_orders_table(hdr_show, det_show, max_h=540)
+        render_b2b_dashboard_and_table(hdr_show, det_show, max_h=520)
 
     with tab_b2b_2:
         render_universal_table(prod_agg_df.head(300), max_h=520)
