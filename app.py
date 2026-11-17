@@ -202,18 +202,14 @@ def get_gdrive_service_and_folder():
         return None, None
 
 def sync_all_from_gdrive(force=False):
-    if "_last_gdrive_sync_ts" not in st.session_state and os.path.exists(CACHE_FILE) and not force:
+    sync_meta_file = os.path.join(GDRIVE_SYNC_DIR, "_sync_meta.json")
+    if "_last_gdrive_sync_ts" not in st.session_state and os.path.exists(sync_meta_file) and not force:
         st.session_state["_last_gdrive_sync_ts"] = time.time()
         st.session_state["_gdrive_diag"] = "⚡ 高速起動モード（最新ファイルを読み込む時は右上の同期ボタンを押してください）"
         return True
     last_sync = st.session_state.get("_last_gdrive_sync_ts", 0)
-    if not force and (time.time() - last_sync < 600):
+    if not force and os.path.exists(sync_meta_file) and (time.time() - last_sync < 600):
         return True
-
-    service, folder_id = get_gdrive_service_and_folder()
-    if not service or not folder_id:
-        st.session_state["_gdrive_diag"] = "❌ Googleドライブ未接続（st.secrets の設定を確認してください）"
-        return False
 
     try:
         from googleapiclient.http import MediaIoBaseDownload
