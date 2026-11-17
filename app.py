@@ -219,6 +219,9 @@ def sync_all_from_gdrive(force=False):
     try:
         from googleapiclient.http import MediaIoBaseDownload
         os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+        os.makedirs(GDRIVE_SYNC_DIR, exist_ok=True)
 
     try:
         from googleapiclient.http import MediaIoBaseDownload
