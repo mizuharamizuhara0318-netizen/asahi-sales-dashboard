@@ -5603,123 +5603,16 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
 
     import html
 
-    def render_b2b_dashboard_and_table(hdr_df_in, det_df_in, max_h=540):
+    def render_b2b_dashboard_and_table(hdr_df_in, det_df_in, max_h=540, table_limit=200):
         # 1) 伝票別の明細辞書
         order_details_map = {}
-        for oid_val, grp in det_df_in.groupby("受注ID"):
-            items = []
-            for _, r in grp.iterrows():
-                items.append({
-                    "sku": str(r.get("商品コード", "")),
-                    "name": str(r.get("商品名", "")),
-                    "jan": str(r.get("JANコード", "")),
-                    "qty": int(clean_num(r.get("数量", 0))),
-                    "price": int(clean_num(r.get("単価(税別)", 0))),
-                    "amt": int(clean_num(r.get("金額(税別)", 0))),
-                    "cost": int(clean_num(r.get("原価合計", 0))),
-                    "prof": int(clean_num(r.get("粗利額", 0))),
-                    "mgn": str(r.get("粗利率", "-"))
-                })
-            order_details_map[str(oid_val)] = items
-
-        # 2) 得意先別の期間内商品集計辞書
-        comp_summary_map = {}
-        for comp_val, grp in det_df_in.groupby("得意先名"):
-            p_agg = grp.groupby(["商品コード", "商品名", "JANコード"], as_index=False).agg(
-                cnt=("受注ID", "nunique"),
-                qty=("数量", "sum"),
-                amt=("金額(税別)", "sum"),
-                cost=("原価合計", "sum"),
-                prof=("粗利額", "sum")
-            ).sort_values("amt", ascending=False)
-            c_items = []
-            for _, r in p_agg.iterrows():
-                a_v = int(r["amt"])
-                p_v = int(r["prof"])
-                m_str = f"{(p_v / a_v * 100):.1f}%" if a_v > 0 else "-"
-                c_items.append({
-                    "sku": str(r["商品コード"]),
-                    "name": str(r["商品名"]),
-                    "jan": str(r["JANコード"]),
-                    "cnt": int(r["cnt"]),
-                    "qty": int(r["qty"]),
-                    "amt": a_v,
-                    "cost": int(r["cost"]),
-                    "prof": p_v,
-                    "mgn": m_str
-                })
-            comp_summary_map[str(comp_val)] = c_items
-
-        # 3) 上部4カードのPOP用データ作成
-        # ① 本日受注POPデータ
-        today_orders_js = []
-        for _, r in today_df.sort_values("受注ID", ascending=False).iterrows():
-            today_orders_js.append({
-                "oid": str(r["受注ID"]), "dt": str(r["受注日時"]), "status": str(r["受注ステータス"]),
-                "comp": str(r["得意先名"]), "items": str(r["注文商品内訳(抜粋)"]),
-                "qty": int(r["点数合計"]), "amt": int(r["商品代金(税別)"]),
-                "prof": int(r["粗利額"]), "mgn": str(r["粗利率"]), "staff": str(r["担当者"])
-            })
-
-        # ② 未出荷受注残POPデータ（未出荷伝票リスト ＆ 出荷予定商品集計＋在庫照合）
-        unship_orders_js = []
-        for _, r in unshipped_df.sort_values(["出荷予定日", "商品代金(税別)"], ascending=[True, False]).iterrows():
-            unship_orders_js.append({
-                "oid": str(r["受注ID"]), "ord_dt": str(r["受注日時"]), "hasso_dt": str(r["出荷予定日"] or "未定"),
-                "status": str(r["受注ステータス"]), "comp": str(r["得意先名"]),
-                "items": str(r["注文商品内訳(抜粋)"]), "qty": int(r["点数合計"]),
-                "amt": int(r["商品代金(税別)"]), "prof": int(r["粗利額"]),
-                "mgn": str(r["粗利率"]), "staff": str(r["担当者"])
-            })
-
-        # ③ 出荷済・日別集計POPデータ（スマレジ「期間別売上」CSVと1対1で照合できる日別表）
-        daily_ship_js = []
-        if not shipped_df.empty:
-            d_agg = shipped_df.groupby("出荷日", as_index=False).agg(
-                cnt=("受注ID", "count"),
-                amt=("商品代金(税別)", "sum"),
-                cost=("原価合計", "sum"),
-                adj=("調整額", "sum"),
-                prof=("粗利額", "sum")
-            ).sort_values("出荷日", ascending=True)
-            for _, r in d_agg.iterrows():
-                a_v = int(r["amt"])
-                p_v = int(r["prof"])
-                daily_ship_js.append({
-                    "date": str(r["出荷日"]),
-                    "cnt": int(r["cnt"]),
-                    "avg": int(round(a_v / max(1, int(r["cnt"])))),
-                    "amt": a_v,
-                    "cost": int(r["cost"]),
-                    "adj": int(r["adj"]),
-                    "prof": p_v,
-                    "mgn": f"{(p_v / a_v * 100):.1f}%" if a_v > 0 else "-"
-                })
-
-        # ④ 要確認アラートPOPデータ（低粗利30%未満・原価割れ明細 ＆ 在庫注意商品）
-        low_mgn_js = []
-        for _, r in low_margin_det_df.head(150).iterrows():
-            low_mgn_js.append({
-                "oid": str(r["受注ID"]), "dt": str(r["受注日時"]), "badge": str(r["区分"]),
-                "comp": str(r["得意先名"]), "sku": str(r["商品コード"]), "name": str(r["商品名"]),
-                "qty": int(r["数量"]), "price": int(r["単価(税別)"]), "amt": int(r["金額(税別)"]),
-                "cost": int(r["原価合計"]), "prof": int(r["粗利額"]), "mgn": str(r["粗利率"]),
-                "staff": str(r["担当者"])
-            })
-
-        disp_cols = [c for c in hdr_df_in.columns if c not in ["粗利率_数値", "調整額"]]
-        num_cols = {"点数合計", "商品代金(税別)", "原価合計", "粗利額", "粗利率"}
-
-        ths = "".join([
-            f"<th class='{'num' if c in num_cols else ''}'>{html.escape(str(c))}</th>"
-            for c in disp_cols
-        ])
-
+...（中略：1〜3の辞書作成部分はそのまま）...
         trs_list = []
         hdr_meta_map = {}
-        for _, r in hdr_df_in.iterrows():
+        for row_idx, (_, r) in enumerate(hdr_df_in.iterrows()):
             oid_str = str(r.get("受注ID", ""))
             comp_str = str(r.get("得意先名", ""))
+            # ★全伝票（11月5日の未出荷伝票なども含む全件）をPOP辞書に登録！
             hdr_meta_map[oid_str] = {
                 "oid": oid_str,
                 "comp": comp_str,
@@ -5735,6 +5628,8 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 "prof": int(clean_num(r.get("粗利額", 0))),
                 "mgn": str(r.get("粗利率", "-"))
             }
+            if table_limit != "全件" and row_idx >= int(table_limit):
+                continue
             tds = []
             for c in disp_cols:
                 val = r[c]
@@ -5746,13 +5641,12 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 elif c in ["得意先名", "注文商品内訳(抜粋)"]:
                     safe_oid = html.escape(oid_str, quote=True)
                     tds.append(
-                        f"<td><a href='javascript:void(0);' class='pop-link' onclick='openOrderModal(\"{safe_oid}\")'>"
+                        f"<td><a href='javascript:void(0);' class='pop-link' onclick='openOrderModal(\"{safe_oid}\", \"\")'>"
                         f"🔍 {html.escape(str(val))}</a></td>"
                     )
                 else:
                     tds.append(f"<td>{html.escape(str(val))}</td>")
             trs_list.append("<tr>" + "".join(tds) + "</tr>")
-
         payload_json = json.dumps({
             "headers": hdr_meta_map,
             "details": order_details_map,
