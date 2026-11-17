@@ -1484,7 +1484,6 @@ def finalize_sales_df(df, cost_master, code_name_dict=None):
         mask_same = (df["商品名"] == df["商品コード"]) | (df["商品名"] == "")
         df.loc[mask_same, "商品名"] = df.loc[mask_same, "商品コード"].map(lambda c: code_name_dict.get(c, c))
 
-    # ★重要：以前の「得意先名で担当者を上書きする処理」を完全削除し、M列の担当コード（1〜12）だけを忠実に反映！
     if "担当者" in df.columns:
         df["担当者"] = df["担当者"].map(convert_staff_name)
 
@@ -1498,35 +1497,28 @@ def finalize_sales_df(df, cost_master, code_name_dict=None):
         df["粗利額"] = df["金額"] - df["原価合計"]
     return df
 
-    if code_name_dict:
-        mask_same = (df["商品名"] == df["商品コード"]) | (df["商品名"] == "")
-        df.loc[mask_same, "商品名"] = df.loc[mask_same, "商品コード"].map(lambda c: code_name_dict.get(c, c))
-
-    # ★修正：すでに伝票に「担当者」が入っている行は絶対に上書きせず、担当者が空欄の行だけ得意先の最新担当者で補完する！
-    if "担当者" in df.columns and "得意先名" in df.columns:
-        df["担当者"] = df["担当者"].map(convert_staff_name)
-        valid_staff_df = df[df["担当者"].str.strip().ne("")].sort_values("日付_dt")
-        if not valid_staff_df.empty:
-            cust_current_staff_map = valid_staff_df.groupby("得意先名")["担当者"].last().to_dict()
-            empty_mask = df["担当者"].str.strip().eq("")
-            df.loc[empty_mask, "担当者"] = df.loc[empty_mask, "得意先名"].map(lambda c: cust_current_staff_map.get(c, ""))
-
-    for n_col in ["数量", "単価", "金額"]:
-        if n_col in df.columns:
-            df[n_col] = df[n_col].apply(clean_num).round().astype(int)
-
-    if "商品コード" in df.columns:
-        df["単価原価"] = df["商品コード"].map(lambda c: cost_master.get(str(c).strip(), 0.0))
-        df["原価合計"] = (df["数量"] * df["単価原価"]).round().astype(int)
-        df["粗利額"] = df["金額"] - df["原価合計"]
-    return df
-
+@st.cache_data(ttl=120, show_spinner=False, max_entries=1)
 def _get_data_files_signature():
+    sig = []
+    for d in [GDRIVE_SYNC_DIR, BASE_DIR]:
+        if os.path.exists(d):
+            for fn in sorted(os.listdir(d)):
+                if fn.lower().endswith((".csv", ".parquet", ".xlsx")):
+                    full_p = os.path.join(d, fn)
+                    try:
+                        sig.append(f"{fn}_{int(os.path.getmtime(full_p))}_{os.path.getsize(full_p)}")
+                    except Exception:
+                        pass
+    return "|".join(sig)
+
+@st.cache_data(show_spinner=False, max_entries=1)
+def load_and_prep_data(_file_sig=""):
+    import gc
+    gc.collect()
     cost_path, cost_mtime = get_cost_master_file_info()
     cost_master = load_cost_master(cost_path, cost_mtime)
     jan_path, jan_mtime = get_jan_file_info()
     _, jan_title_dict_local, _ = load_jan_master_v2(jan_path, jan_mtime)
-
     cached_df = pd.DataFrame()
     existing_sources = set()
     existing_date_sources = set()
@@ -5230,118 +5222,6 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
     up_str = _save_b2b_orders_disk_cache(orders_map)
     st.session_state["_last_b2b_auto_sync_ts"] = time.time()
     return list(orders_map.values()), "OK", up_str
-    now_str = _now_jst().strftime("%Y/%m/%d %H:%M:%S")
-    payload = {"orders_map": orders_map, "updated_at": now_str}
-    try:
-        with open(B2B_ORDERS_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-    except Exception:
-        pass
-    return now_str
-
-def _fetch_v2_commit_date_order_ids(commit_from_str, commit_to_str, access_token):
-    """v2 受注検索APIで『出荷日(commit_date)』が期間内の全受注IDを取得する（10月以前の受注で11月出荷された伝票の取りこぼし防止）"""
-    found_ids = set()
-    headers = {"Authorization": f"Bearer {access_token}"}
-    for offset in [0, 500, 1000, 1500]:
-        q_params = urllib.parse.urlencode({
-            "search_options[commit_date_from]": commit_from_str,
-            "search_options[commit_date_to]": commit_to_str,
-            "search_options[limit]": 500,
-            "search_options[offset]": offset,
-            "search_fields": "order_id"
-        })
-        url = f"{B2B_DOMAIN}/api/v2/orders/search?{q_params}"
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                raw_txt = resp.read().decode("utf-8", errors="replace")
-                data = json.loads(raw_txt)
-            # v2レスポンスから受注IDを抽出
-            rows = data.get("orders", data.get("data", data if isinstance(data, list) else []))
-            if isinstance(rows, dict):
-                rows = list(rows.values())
-            if not rows:
-                break
-            for r in rows:
-                if isinstance(r, dict):
-                    oid = str(r.get("order_id") or r.get("serial_order_id") or "").strip()
-                    if oid.isdigit():
-                        found_ids.add(oid)
-            if len(rows) < 500:
-                break
-            time.sleep(1.02)
-        except Exception:
-            break
-    return found_ids
-
-def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=30, silent=False, commit_from_str=None):
-    if not access_token:
-        return [], "アクセストークンが未設定です", ""
-    cache_data = _load_b2b_orders_disk_cache()
-    orders_map = cache_data.get("orders_map", {})
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    offset = 0
-    limit = 50
-    prog_bar = None if silent else st.progress(0, text="スマレジEC・B2Bから受注データを取得しています...")
-    for page_i in range(max_pages):
-        q_params = urllib.parse.urlencode({
-            "order_date_from": f"{date_from_str} 00:00:00",
-            "order_date_to": f"{date_to_str} 23:59:59",
-            "limit": limit,
-            "offset": offset
-        })
-        url = f"{B2B_DOMAIN}/api/v1/orders.php?{q_params}"
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read().decode("utf-8", errors="replace"))
-            orders_batch = data.get("orders", [])
-            if not orders_batch:
-                break
-            for od in orders_batch:
-                oid = str(od.get("serial_order_id", "")).strip()
-                if oid:
-                    orders_map[oid] = od
-            if prog_bar is not None:
-                prog_bar.progress(min(1.0, (page_i + 1) / max_pages), text=f"取得中... ({len(orders_map):,} 件読込済)")
-            if len(orders_batch) < limit:
-                break
-            offset += limit
-            time.sleep(1.02)
-        except Exception as e:
-            if prog_bar is not None:
-                prog_bar.empty()
-            up_str = _save_b2b_orders_disk_cache(orders_map)
-            return list(orders_map.values()), f"API通信エラー: {str(e)}", up_str
-
-    # ★重要：もしv2 APIで「出荷日が期間内なのにキャッシュにまだ無い過去注文ID」が見つかれば、個別に補完取得する
-    if commit_from_str and not silent:
-        time.sleep(1.02)
-        v2_ids = _fetch_v2_commit_date_order_ids(commit_from_str, date_to_str, access_token)
-        missing_ids = [oid for oid in sorted(v2_ids) if oid not in orders_map]
-        for m_i, m_oid in enumerate(missing_ids):
-            if prog_bar is not None:
-                prog_bar.progress(min(1.0, (m_i + 1) / max(1, len(missing_ids))), text=f"過去受注の当月出荷分を補完中... ({m_i+1}/{len(missing_ids)}件)")
-            q_p = urllib.parse.urlencode({"serial_order_id": m_oid})
-            req_m = urllib.request.Request(f"{B2B_DOMAIN}/api/v1/orders.php?{q_p}", headers=headers, method="GET")
-            try:
-                with urllib.request.urlopen(req_m, timeout=15) as resp_m:
-                    d_m = json.loads(resp_m.read().decode("utf-8", errors="replace"))
-                for od_m in d_m.get("orders", []):
-                    oid_m = str(od_m.get("serial_order_id", "")).strip()
-                    if oid_m:
-                        orders_map[oid_m] = od_m
-                time.sleep(1.02)
-            except Exception:
-                break
-
-    if prog_bar is not None:
-        prog_bar.empty()
-    up_str = _save_b2b_orders_disk_cache(orders_map)
-    st.session_state["_last_b2b_auto_sync_ts"] = time.time()
-    return list(orders_map.values()), "OK", up_str
 
 if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)':
     st.markdown("#### ⚡ 楽楽B2B（スマレジEC・B2B）リアルタイム受注 ＆ 見込み売上速報")
@@ -5414,24 +5294,21 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     with c_ap5:
         st.write("")
         if st.button("⚡ 今すぐ最新を取得", type="primary", use_container_width=True):
-            # 昨日〜今日の全注文を確実に取得（最大8ページ＝400件）
             quick_from = (now_d - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=8, silent=False)
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=6, silent=False)
     with c_ap6:
         st.write("")
         if st.button("🔄 月初から全件再取得", use_container_width=True):
-            # 9月・10月受注→11月出荷の伝票も拾えるよう45日前から取得＋v2出荷日検索で完全補完
-            buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=45)).strftime("%Y-%m-%d")
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=55, silent=False, commit_from_str=d_from_str)
+            buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=28, silent=False, commit_from_str=d_from_str)
 
     # ① 初回（キャッシュが空のとき）は全件自動取得
     if not cached_orders_list:
-        buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=45)).strftime("%Y-%m-%d")
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=55, silent=False, commit_from_str=d_from_str)
+        buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=14)).strftime("%Y-%m-%d")
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=28, silent=False, commit_from_str=d_from_str)
     # ② 前回のAPI取得から120秒（2分）以上経過していれば、本日の最新注文を自動取得！
     elif (time.time() - last_sync_ts) >= 120:
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=6, silent=True)
-
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=4, silent=True)
     col_cap_l, col_cap_r = st.columns([3.8, 1.2])
     with col_cap_l:
         st.caption(f"⚡ **省メモリ高速モード** ｜ 最終API取得(日本時間): **{last_up_str}** ／ キャッシュ件数: **{len(cached_orders_list):,} 件**（画面操作時に前回から2分以上経っていれば自動で最新注文を取得します）")
