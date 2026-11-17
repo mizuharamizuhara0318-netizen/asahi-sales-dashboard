@@ -2219,7 +2219,20 @@ VIEW_MODES = [
     '🚀 次回値上げ・価格改定シミュレーター',
     '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)'
 ]
+_qp_view_raw = st.query_params.get("view", "")
+_qp_view = _qp_view_raw[0] if isinstance(_qp_view_raw, list) else str(_qp_view_raw)
+_default_v_idx = VIEW_MODES.index(_qp_view) if _qp_view in VIEW_MODES else 0
+
 col_top1, col_top2 = st.columns([1.6, 2])
+with col_top1:
+    view_type = st.selectbox("表示モード", VIEW_MODES, index=_default_v_idx, key="main_view_mode_sel")
+
+try:
+    if _qp_view != view_type:
+        st.query_params["view"] = view_type
+except Exception:
+    pass
+
 with col_top2:
     if view_type == '🧮 簡易見積＆利益シミュレーター':
         st.write("")
@@ -2227,9 +2240,14 @@ with col_top2:
         hanko_status = "角印: **読込完了**" if hanko_bytes else "⚠️ 印鑑未検出"
         grp_status = f"グループ管理: **{len(member_group_master_dict):,} 件**" if member_group_master_dict else "⚠️ グループ未検出"
         st.info(f"📁 原価: **{len(cost_master_dict):,} 件** | {grp_status} | {jan_status} | {hanko_status}")
+        quick_choice = '当月'
     elif view_type == '🏭 在庫・確保数＆発注検討アラート':
         st.write("")
         st.info(f"📦 ロジザード登録: **{len(logi_inv_map):,} 品番** | 🔒 弥生確保: **{len(yayoi_kakuho_map):,} 品番** | 📋 発注検討表: **{len(hacchu_master_map):,} 品番**")
+        quick_choice = '当月'
+    elif view_type in ['⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)', '🚀 次回値上げ・価格改定シミュレーター']:
+        st.write("")
+        quick_choice = '当月'
     else:
         quick_choice = st.radio("期間ショートカット", ['当月', '前月', '当期累計', '前期累計', '全データ累計', '手動指定'], horizontal=True, key="period_shortcut_radio_top")
 
@@ -3706,7 +3724,7 @@ if "analysis_ym_start_v3" not in st.session_state:
 if "analysis_ym_end_v3" not in st.session_state:
     st.session_state["analysis_ym_end_v3"] = e_def if e_def in desc_valid_ym else desc_valid_ym[0]
 
-if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート']:
+if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート', '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)', '🚀 次回値上げ・価格改定シミュレーター']:
     col_mode, col_p1, col_p2, col_staff = st.columns([1, 1.2, 1.2, 1.6])
     with col_mode:
         date_mode = st.radio("指定単位", ["年月で指定", "日で指定"], horizontal=True, key="date_mode_radio_analysis")
