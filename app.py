@@ -5152,7 +5152,43 @@ def _save_b2b_orders_disk_cache(orders_map):
         pass
     return now_str
 
-def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=30, silent=False):
+def _fetch_v2_commit_date_order_ids(commit_from_str, commit_to_str, access_token):
+    """v2 受注検索APIで『出荷日(commit_date)』が期間内の全受注IDを取得する（10月以前の受注で11月出荷された伝票の取りこぼし防止）"""
+    found_ids = set()
+    headers = {"Authorization": f"Bearer {access_token}"}
+    for offset in [0, 500, 1000, 1500]:
+        q_params = urllib.parse.urlencode({
+            "search_options[commit_date_from]": commit_from_str,
+            "search_options[commit_date_to]": commit_to_str,
+            "search_options[limit]": 500,
+            "search_options[offset]": offset,
+            "search_fields": "order_id"
+        })
+        url = f"{B2B_DOMAIN}/api/v2/orders/search?{q_params}"
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                raw_txt = resp.read().decode("utf-8", errors="replace")
+                data = json.loads(raw_txt)
+            # v2レスポンスから受注IDを抽出
+            rows = data.get("orders", data.get("data", data if isinstance(data, list) else []))
+            if isinstance(rows, dict):
+                rows = list(rows.values())
+            if not rows:
+                break
+            for r in rows:
+                if isinstance(r, dict):
+                    oid = str(r.get("order_id") or r.get("serial_order_id") or "").strip()
+                    if oid.isdigit():
+                        found_ids.add(oid)
+            if len(rows) < 500:
+                break
+            time.sleep(1.02)
+        except Exception:
+            break
+    return found_ids
+
+def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pages=30, silent=False, commit_from_str=None):
     if not access_token:
         return [], "アクセストークンが未設定です", ""
     cache_data = _load_b2b_orders_disk_cache()
@@ -5192,6 +5228,27 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
                 prog_bar.empty()
             up_str = _save_b2b_orders_disk_cache(orders_map)
             return list(orders_map.values()), f"API通信エラー: {str(e)}", up_str
+
+    # ★重要：もしv2 APIで「出荷日が期間内なのにキャッシュにまだ無い過去注文ID」が見つかれば、個別に補完取得する
+    if commit_from_str and not silent:
+        time.sleep(1.02)
+        v2_ids = _fetch_v2_commit_date_order_ids(commit_from_str, date_to_str, access_token)
+        missing_ids = [oid for oid in sorted(v2_ids) if oid not in orders_map]
+        for m_i, m_oid in enumerate(missing_ids):
+            if prog_bar is not None:
+                prog_bar.progress(min(1.0, (m_i + 1) / max(1, len(missing_ids))), text=f"過去受注の当月出荷分を補完中... ({m_i+1}/{len(missing_ids)}件)")
+            q_p = urllib.parse.urlencode({"serial_order_id": m_oid})
+            req_m = urllib.request.Request(f"{B2B_DOMAIN}/api/v1/orders.php?{q_p}", headers=headers, method="GET")
+            try:
+                with urllib.request.urlopen(req_m, timeout=15) as resp_m:
+                    d_m = json.loads(resp_m.read().decode("utf-8", errors="replace"))
+                for od_m in d_m.get("orders", []):
+                    oid_m = str(od_m.get("serial_order_id", "")).strip()
+                    if oid_m:
+                        orders_map[oid_m] = od_m
+                time.sleep(1.02)
+            except Exception:
+                break
 
     if prog_bar is not None:
         prog_bar.empty()
