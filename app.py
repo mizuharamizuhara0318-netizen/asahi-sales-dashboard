@@ -5333,16 +5333,16 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     with c_ap6:
         st.write("")
         if st.button("🔄 月初から全件再取得", use_container_width=True):
-            buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=35, silent=False)
+            # 9月・10月受注→11月出荷の伝票も拾えるよう45日前から取得＋v2出荷日検索で完全補完
+            buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=45)).strftime("%Y-%m-%d")
+            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=55, silent=False, commit_from_str=d_from_str)
 
     # ① 初回（キャッシュが空のとき）は全件自動取得
     if not cached_orders_list:
-        buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=35, silent=False)
-    # ② 前回のAPI取得から120秒（2分）以上経過していれば、本日（または昨日〜今日）の最新注文を自動取得！
+        buf_from = (pd.to_datetime(d_from_str) - pd.Timedelta(days=45)).strftime("%Y-%m-%d")
+        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(buf_from, d_to_str, current_token, max_pages=55, silent=False, commit_from_str=d_from_str)
+    # ② 前回のAPI取得から120秒（2分）以上経過していれば、本日の最新注文を自動取得！
     elif (time.time() - last_sync_ts) >= 120:
-        # 本日分の注文（00:00〜23:59）をピンポイント取得するため、昨日の100件に邪魔されず今日の最新注文まで1秒で到達する
         cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=6, silent=True)
 
     col_cap_l, col_cap_r = st.columns([3.8, 1.2])
@@ -5367,6 +5367,9 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         st.error(f"⚠️ {api_msg}")
         st.stop()
 
+    # ★ご指定の4ステータス（「確定済み」「弥生販売」「実売上請求待ち」「処理済み」）
+    SHIPPED_VALID_STATUS_KEYWORDS = ["確定済", "弥生販売", "実売上請求待ち", "実売上", "処理済"]
+
     # 受注ヘッダ＆商品明細の展開
     order_header_rows = []
     detail_rows = []
@@ -5386,7 +5389,9 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         ord_date_10 = ord_dt_raw[:10] if len(ord_dt_raw) >= 10 else ""
         commit_date_10 = commit_dt[:10] if (commit_dt and len(commit_dt) >= 10 and not commit_dt.startswith("0000")) else ""
 
-        is_shipped = bool(commit_date_10) or any(k in status_nm for k in ["発送済", "出荷済", "完了", "実売上"])
+        # ★ご指定ルール：「出荷日(commit_date_10)がある」かつ「確定済・弥生販売・実売上請求待ち・処理済のいずれかに入っている」ものだけを出荷済とする！
+        has_valid_ship_status = any(k in status_nm for k in SHIPPED_VALID_STATUS_KEYWORDS) if status_nm else True
+        is_shipped = bool(commit_date_10) and has_valid_ship_status
         ship_badge = "✅ 出荷済" if is_shipped else "⏳ 未出荷(見込み)"
 
         # 期間フィルタリング（出荷日基準 or 受注日基準）
