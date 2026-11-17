@@ -5369,7 +5369,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         oid = str(od.get("serial_order_id", "")).strip()
         comp = clean_cust_name(str(od.get("order_company_name", "")).strip()) or str(od.get("order_name01", "")).strip()
         status_nm = str(od.get("order_status_name", "")).strip()
-        if "キャンセル" in status_nm or "取消" in status_nm:
+        if "キャンセル" in status_nm or "取消" in status_nm or "テスト" in status_nm or "テスト" in comp:
             continue
 
         hasso_dt = str(od.get("hasso_date", "") or "").strip()
@@ -5381,7 +5381,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         ord_date_10 = ord_dt_raw[:10] if len(ord_dt_raw) >= 10 else ""
         commit_date_10 = commit_dt[:10] if (commit_dt and len(commit_dt) >= 10 and not commit_dt.startswith("0000")) else ""
 
-        # ★ご指定ルール：「出荷日(commit_date_10)がある」かつ「確定済・弥生販売・実売上請求待ち・処理済のいずれかに入っている」ものだけを出荷済とする！
+        # 出荷日(commit_date_10)があり、かつ「確定済み・弥生販売・実売上請求待ち・処理済み」のいずれかに入っている伝票を出荷済とする
         has_valid_ship_status = any(k in status_nm for k in SHIPPED_VALID_STATUS_KEYWORDS) if status_nm else True
         is_shipped = bool(commit_date_10) and has_valid_ship_status
         ship_badge = "✅ 出荷済" if is_shipped else "⏳ 未出荷(見込み)"
@@ -5451,15 +5451,18 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 "担当者": staff_nm
             })
 
+        # ★調整額（discount：値引・端数調整）を反映してスマレジ側の税別合計と一致させる
+        disc_val = int(clean_num(od.get("discount", 0)))
         if ord_notax_sum == 0:
             sub_tax_in = int(clean_num(od.get("subtotal", 0)))
             tax_v = int(clean_num(od.get("tax", 0)))
             ord_notax_sum = (sub_tax_in - tax_v) if tax_v > 0 else int(round(sub_tax_in / 1.10))
+        else:
+            ord_notax_sum = ord_notax_sum - disc_val
 
         ord_prof_sum = ord_notax_sum - ord_cost_sum
         ord_margin_pct = round(ord_prof_sum / ord_notax_sum * 100.0, 1) if ord_notax_sum > 0 else 0.0
 
-        # ★ご要望通り：「受注番号」を削除し、「出荷日」と「担当者」を一番右側に配置！
         order_header_rows.append({
             "区分": ship_badge,
             "受注日時": ord_dt_raw[:16],
@@ -5477,6 +5480,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             "出荷日": commit_date_10,
             "担当者": staff_nm
         })
+
     hdr_df = pd.DataFrame(order_header_rows)
     det_df = pd.DataFrame(detail_rows)
 
