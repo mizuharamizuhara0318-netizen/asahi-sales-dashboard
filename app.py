@@ -5107,7 +5107,7 @@ def _now_jst():
     return datetime.utcnow() + timedelta(hours=9)
 
 cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(today_jst_str, today_jst_str, current_token, max_pages=4, silent=True)
-col_cap_l, col_cap_r = st.columns([3.8, 1.2])
+    col_cap_l, col_cap_r = st.columns([3.8, 1.2])
     with col_cap_l:
         st.caption(f"⚡ **省メモリ高速モード** ｜ 最終API取得(日本時間): **{last_up_str}** ／ キャッシュ件数: **{len(cached_orders_list):,} 件**（画面操作時に前回から2分以上経っていれば自動で最新注文を取得します）")
     with col_cap_r:
