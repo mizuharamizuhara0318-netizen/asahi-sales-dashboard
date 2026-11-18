@@ -1102,6 +1102,145 @@ def _fmt_zip_hyphen(z_val):
         return f"{digits[:3]}-{digits[3:]}"
     return s
 
+def get_next_smaregi_order_id():
+    """スマレジEC・B2Bの最新受注ID（例: 102264）をAPI＆キャッシュから取得し、次の連番（102265）を返す"""
+    max_id = 0
+    # 1) まずローカルキャッシュ内の最大受注IDを確認
+    b2b_cache_p = os.path.join(GDRIVE_SYNC_DIR, "b2b_orders_cache.json")
+    if os.path.exists(b2b_cache_p):
+        try:
+            with open(b2b_cache_p, "r", encoding="utf-8") as f:
+                c_map = json.load(f).get("orders_map", {})
+            for k in c_map.keys():
+                if str(k).isdigit():
+                    max_id = max(max_id, int(k))
+        except Exception:
+            pass
+
+    # 2) さらにAPIで本日分の最新受注IDをリアルタイム確認して最大値を更新
+    try:
+        tok = get_valid_b2b_access_token() if "get_valid_b2b_access_token" in globals() else ""
+        if tok:
+            import urllib.request, urllib.parse
+            today_s = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+            q_p = urllib.parse.urlencode({
+                "order_date_from": f"{today_s} 00:00:00",
+                "order_date_to": f"{today_s} 23:59:59",
+                "fields": "serial_order_id",
+                "limit": 50,
+                "offset": 0
+            })
+            req = urllib.request.Request(
+                f"https://smilekidsb2b.com/api/v1/orders.php?{q_p}",
+                headers={"Authorization": f"Bearer {tok}"}, method="GET"
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                d = json.loads(resp.read().decode("utf-8", errors="replace"))
+            for od in d.get("orders", []):
+                oid_s = str(od.get("serial_order_id", "")).strip()
+                if oid_s.isdigit():
+                    max_id = max(max_id, int(oid_s))
+    except Exception:
+        pass
+
+    return str(max_id + 1) if max_id > 0 else (datetime.utcnow() + timedelta(hours=9)).strftime("%Y%m%d%H%M")
+
+def register_order_directly_to_smaregi_api(csv_bytes_cp932):
+    """生成した正規フォーマットの受注データをスマレジEC・B2B APIへ直接POST登録する"""
+    tok = get_valid_b2b_access_token() if "get_valid_b2b_access_token" in globals() else ""
+    if not tok:
+        return False, "スマレジEC・B2Bのアクセストークンが未設定です。"
+    import urllib.request, urllib.parse
+    df_ord = pd.read_csv(io.BytesIO(csv_bytes_cp932), encoding="cp932", dtype=str, keep_default_na=False)
+    if df_ord.empty:
+        return False, "登録する商品明細がありません。"
+    r0 = df_ord.iloc[0]
+    ec_oid = str(r0.get("EC注文番号", "")).strip()
+    details_payload = []
+    for idx, r in df_ord.iterrows():
+        details_payload.append({
+            "order_product_code": r.get("ご購入明細商品コード", ""),
+            "product_code": r.get("ご購入明細商品コード", ""),
+            "product_name": r.get("ご購入明細商品名", ""),
+            "product_price_notax": int(clean_num(r.get("ご購入明細税抜単価", 0))),
+            "product_price": int(clean_num(r.get("ご購入明細税込単価", 0))),
+            "product_tax": int(clean_num(r.get("ご購入明細消費税", 0))),
+            "product_tax_rate": 10,
+            "product_quantity": int(clean_num(r.get("ご購入明細数量", 1))),
+            "product_total": int(clean_num(r.get("ご購入明細金額", 0))),
+            "product_tax_kbn": "0",
+            "product_postage_kbn": "0",
+            "product_daibiki_kbn": "0",
+            "product_reg_flag": "商品"
+        })
+    order_payload = {
+        "orders": [{
+            "order_customer_id": r0.get("顧客ID", "-1"),
+            "order_message": r0.get("要望等", ""),
+            "order_name01": r0.get("注文者お名前(姓)", "ご担当者"),
+            "order_name02": r0.get("注文者お名前(名)", "様"),
+            "order_kana01": r0.get("注文者お名前(フリガナ・姓)", "ゴタントウシャ"),
+            "order_kana02": r0.get("注文者お名前(フリガナ名)", "サマ"),
+            "order_company_name": r0.get("注文者会社名", ""),
+            "order_email": r0.get("注文者メールアドレス", ""),
+            "order_email_type": "1",
+            "order_tel": r0.get("注文者電話番号", ""),
+            "order_fax": r0.get("注文者FAX", ""),
+            "order_zip": r0.get("注文者郵便番号", ""),
+            "order_pref": r0.get("注文者都道府県", ""),
+            "order_addr01": r0.get("注文者住所1", ""),
+            "order_addr02": r0.get("注文者住所2", ""),
+            "order_sex": "1",
+            "order_job": r0.get("注文者職種", ""),
+            "subtotal": int(sum(clean_num(r.get("ご購入明細金額", 0)) for _, r in df_ord.iterrows())),
+            "discount": 0,
+            "deliv_fee": int(clean_num(r0.get("送料（税別）", 0))),
+            "charge": int(clean_num(r0.get("手数料（税別）", 0))),
+            "coupon_name": r0.get("クーポン名", ""),
+            "ec_type": "16",
+            "ec_order_id": ec_oid,
+            "ec_shop_id": "1000",
+            "ec_shop_name": "旭電機化成",
+            "order_root": "1",
+            "order_status": "1",
+            "payment_id": r0.get("支払方法ID", "3"),
+            "payment_status": "0",
+            "deliv_id": "1",
+            "reserve_type": "0",
+            "plg_raku2_order_date": r0.get("注文日時", ""),
+            "hasso_date": r0.get("出荷予定日", ""),
+            "note": r0.get("ひとことメモ", ""),
+            "note_attention": r0.get("伝達事項", ""),
+            "shippings": [{
+                "shipping_name01": r0.get("送付先お名前(姓)", "ご"),
+                "shipping_name02": r0.get("送付先お名前(名)", "担当者"),
+                "shipping_company_name": r0.get("送付先会社名", ""),
+                "shipping_tel": r0.get("送付先電話番号", ""),
+                "shipping_zip": r0.get("送付先郵便番号", ""),
+                "shipping_pref": r0.get("送付先都道府県", ""),
+                "shipping_addr01": r0.get("送付先住所1", ""),
+                "shipping_addr02": r0.get("送付先住所2", ""),
+                "shipping_date": r0.get("お届け日", "")
+            }],
+            "details": details_payload
+        }]
+    }
+    headers = {
+        "Authorization": f"Bearer {tok}",
+        "Content-Type": "application/json; charset=utf-8"
+    }
+    body_bytes = json.dumps(order_payload, ensure_ascii=True).encode("utf-8")
+    for ep in ["/api/v1/orders.php", "/api/v2/orders"]:
+        try:
+            req = urllib.request.Request(f"https://smilekidsb2b.com{ep}", data=body_bytes, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                res_j = json.loads(resp.read().decode("utf-8", errors="replace"))
+            if str(res_j.get("success", "")).lower() == "ok" or "orders" in res_j or "order_id" in str(res_j):
+                return True, f"受注番号（EC注文番号）: {ec_oid} でスマレジに直接登録しました！"
+        except Exception as e:
+            last_err = str(e)
+    return False, f"API直接登録がサポートされていないかエラーが発生しました（{last_err}）。隣のCSV出力ボタンから取り込んでください（AR列の注文番号は {ec_oid} で自動採番済みです）。"
+
 def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
     rows = []
     pay_map = {"銀行振込": 3, "代金引換": 2, "現行通り": 3, "掛け払い（月末締め翌月末払い）": 3}
@@ -1109,6 +1248,8 @@ def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
     now_dt_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y/%m/%d %H:%M")
     ship_dt_str = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y/%m/%d")
     deliv_dt_str = (datetime.utcnow() + timedelta(hours=9, days=1)).strftime("%Y/%m/%d")
+    # ★スマレジの最新受注ID＋1（例: 102265）を自動で取得してAR列（EC注文番号）にセット！
+    auto_next_ec_oid = str(est_data.get("auto_ec_order_id", "")).strip() or get_next_smaregi_order_id()
 
     # 会社名から customer_master_df（注文者会社名シート）を検索（㈱や（株）やスペースの違いも吸収して照合）
     comp_raw = str(est_data.get("cust_comp", "") or "").strip()
@@ -1257,7 +1398,7 @@ def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
             '消費税額': unit_tax,
             '入金額': 0,
             'EC種類': 16,
-            'EC注文番号': est_data.get("q_no", "").replace("-", ""),
+            'EC注文番号': auto_next_ec_oid,
             'EC店舗ID': 1000, 'EC店舗名': "旭電機化成",
             '販売ルートID': 1, '受注ステータス': 1, '支払方法ID': pay_id, '決済ステータス': 0, '配送方法ID': 1,
             '配送区分': 0, '申込番号種類': 0,
@@ -3646,16 +3787,22 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             </body></html>
             """
 
+            next_smaregi_id = get_next_smaregi_order_id()
+            current_estimate_obj["auto_ec_order_id"] = next_smaregi_id
+            csv_bytes_ready = create_smaregi_order_csv_bytes(current_estimate_obj, raw_prod_title_map, jan_std_price_dict)
+
+            st.caption(f"🔢 **スマレジ自動連番連動中**：現在スマレジの最新受注IDから自動算出した次の注文番号 **`{next_smaregi_id}`** をAR列（EC注文番号）に自動セットしています（A列の受注IDとピタッと一致します）。")
+
             file_prefix = q_cust_comp.replace(' ', '_') if q_cust_comp else "御見積書"
-            btn_c1, btn_c2, btn_c3 = st.columns([1.4, 1.4, 1.6])
+            btn_c1, btn_c2, btn_c3, btn_c4 = st.columns([1.2, 1.2, 1.4, 1.5])
             with btn_c1:
-                if st.button("💾 この見積を保存して一覧へ登録", use_container_width=True, key=f"save_btn_{s_key}"):
+                if st.button("💾 見積を保存", use_container_width=True, key=f"save_btn_{s_key}"):
                     st.session_state.saved_estimates.insert(0, current_estimate_obj)
                     save_quotes_list(st.session_state.saved_estimates)
                     st.success("✅ 保存済み見積一覧に登録しました！")
             with btn_c2:
                 st.download_button(
-                    label="📥 御見積書（Excel・角印付き）",
+                    label="📥 御見積書(Excel)",
                     data=generate_quote_excel_exact_style(calc_df),
                     file_name=f"御見積書_{file_prefix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -3663,12 +3810,18 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 )
             with btn_c3:
                 st.download_button(
-                    label="🛒 注文確定：スマレジ取込用CSV出力",
-                    data=create_smaregi_order_csv_bytes(current_estimate_obj, raw_prod_title_map, jan_std_price_dict),
-                    file_name=f"order_{q_no}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                    mime="text/csv", use_container_width=True, key=f"dl_csv_{s_key}"
+                    label=f"🛒 CSV出力 (注文番号:{next_smaregi_id})",
+                    data=csv_bytes_ready,
+                    file_name=f"order_{next_smaregi_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                    mime="text/csv", type="primary", use_container_width=True, key=f"dl_csv_{s_key}"
                 )
-
+            with btn_c4:
+                if st.button(f"🚀 APIでスマレジへ直接注文登録", use_container_width=True, key=f"api_reg_btn_{s_key}"):
+                    ok_api, msg_api = register_order_directly_to_smaregi_api(csv_bytes_ready)
+                    if ok_api:
+                        st.success(f"✅ {msg_api}")
+                    else:
+                        st.warning(f"ℹ️ {msg_api}")
             st.write("")
             st.markdown("##### 👁️ PDFプレビュー表示＆ワンクリックPDF保存")
             components.html(pdf_template_html, height=720, scrolling=True)
