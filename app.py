@@ -4123,9 +4123,58 @@ elif view_type == '👤 担当者別 売上＆目標達成分析':
         def calc_annual_target(st_name):
             return int(staff_target_master.get(normalize_target_staff_name(st_name), {}).get("annual", 0))
 
+        # ★B2Bの「未出荷受注残」と弥生の「在庫確保残」から、担当者別の『未出荷注文残（見込売上）』を算出！
+        b2b_unship_by_staff = {}
+        b2b_cache_path = os.path.join(GDRIVE_SYNC_DIR, "b2b_orders_cache.json")
+        if os.path.exists(b2b_cache_path):
+            try:
+                with open(b2b_cache_path, "r", encoding="utf-8") as f_b:
+                    b_orders = json.load(f_b).get("orders_map", {}).values()
+                cust_to_staff_map = df[df["担当者"].str.strip().ne("")].groupby("得意先名")["担当者"].last().to_dict() if not df.empty else {}
+                for od in b_orders:
+                    st_nm = str(od.get("order_status_name", "")).strip()
+                    if "キャンセル" in st_nm or "取消" in st_nm:
+                        continue
+                    c_dt = str(od.get("commit_date", "") or "").strip()
+                    if c_dt and len(c_dt) >= 10 and not c_dt.startswith("0000"):
+                        continue  # すでに出荷済のものは除外
+                    comp_b = clean_cust_name(str(od.get("order_company_name", "")).strip()) or str(od.get("order_name01", "")).strip()
+                    s_raw = str(od.get("customer_charge", "") or "").strip()
+                    s_norm = normalize_target_staff_name(s_raw) if s_raw else cust_to_staff_map.get(comp_b, "")
+                    amt_b = sum(int(clean_num(dt.get("product_price_notax", dt.get("product_price", 0)))) * int(clean_num(dt.get("product_quantity", 0))) for dt in (od.get("details") or []))
+                    if s_norm and amt_b > 0:
+                        b2b_unship_by_staff[s_norm] = b2b_unship_by_staff.get(s_norm, 0) + amt_b
+            except Exception:
+                pass
+
+        # 弥生の在庫確保データ（yayoi_kakuho_df）の金額換算も合算（不要な場合はチェックボックスで切替可能）
+        yayoi_kakuho_by_staff = {}
+        if not yayoi_kakuho_df.empty:
+            sku_avg_price = df[df["数量"] > 0].groupby("商品コード")["単価"].last().to_dict() if not df.empty else {}
+            for _, kr in yayoi_kakuho_df.iterrows():
+                st_k = normalize_target_staff_name(str(kr.get("担当者", "")).strip())
+                sk_k = str(kr.get("商品コード", "")).strip()
+                q_k = int(clean_num(kr.get("確保残数", 0)))
+                u_p = int(sku_avg_price.get(sk_k, member_default_min_map.get(sk_k, 0)))
+                if st_k and q_k > 0 and u_p > 0:
+                    yayoi_kakuho_by_staff[st_k] = yayoi_kakuho_by_staff.get(st_k, 0) + (q_k * u_p)
+
+        inc_kakuho = st.checkbox("📦 B2B未出荷残に加えて『弥生・在庫確保残（引当残）』の見込金額も着地予測に含める", value=False, key="st_inc_yayoi_kakuho_chk")
+
+        def get_staff_backlog_amt(st_name):
+            norm_s = normalize_target_staff_name(st_name)
+            val = int(b2b_unship_by_staff.get(norm_s, 0))
+            if inc_kakuho:
+                val += int(yayoi_kakuho_by_staff.get(norm_s, 0))
+            return val
+
+        staff_agg["未出荷注文残"] = staff_agg["担当者"].map(get_staff_backlog_amt)
+        staff_agg["着地見込額(残含)"] = staff_agg["販売金額"] + staff_agg["未出荷注文残"]
         staff_agg["期間目標額"] = staff_agg["担当者"].map(calc_period_target)
         staff_agg["目標差額"] = staff_agg["販売金額"] - staff_agg["期間目標額"]
         staff_agg["目標達成率"] = staff_agg.apply(lambda r: f"{(r['販売金額'] / r['期間目標額'] * 100):.1f}%" if r["期間目標額"] > 0 else "-", axis=1)
+        staff_agg["見込達成率(残含)"] = staff_agg.apply(lambda r: f"✅ {(r['着地見込額(残含)'] / r['期間目標額'] * 100):.1f}%" if r["期間目標額"] > 0 and r['着地見込額(残含)'] >= r['期間目標額'] else (f"{(r['着地見込額(残含)'] / r['期間目標額'] * 100):.1f}%" if r["期間目標額"] > 0 else "-"), axis=1)
+        staff_agg["見込目標差額"] = staff_agg["着地見込額(残含)"] - staff_agg["期間目標額"]
         staff_agg["通期目標額"] = staff_agg["担当者"].map(calc_annual_target)
         staff_agg["通期進捗率"] = staff_agg.apply(lambda r: f"{(r['販売金額'] / r['通期目標額'] * 100):.1f}%" if r["通期目標額"] > 0 else "-", axis=1)
 
@@ -4137,16 +4186,34 @@ elif view_type == '👤 担当者別 売上＆目標達成分析':
         staff_agg = staff_agg.sort_values(by="販売金額", ascending=False)
         staff_agg.insert(0, "順位", range(1, len(staff_agg) + 1))
 
-        cols_st = ["順位", "担当者", "販売金額", "期間目標額", "目標達成率", "目標差額", "通期目標額", "通期進捗率", "前年売上額", "前年比", "増減額", "粗利額", "粗利率", "数量", "担当得意先数", "取扱品目数", "構成比"]
+        cols_st = [
+            "順位", "担当者", "販売金額", "未出荷注文残", "着地見込額(残含)",
+            "期間目標額", "目標達成率", "見込達成率(残含)", "目標差額", "見込目標差額",
+            "通期目標額", "通期進捗率", "前年売上額", "前年比", "増減額",
+            "粗利額", "粗利率", "数量", "担当得意先数", "取扱品目数", "構成比"
+        ]
         show_st_df = staff_agg[[c for c in cols_st if c in staff_agg.columns]].copy()
 
-        tot_prof, tot_tgt, tot_ly = int(staff_agg["粗利額"].sum()), int(staff_agg["期間目標額"].sum()), int(staff_agg["前年売上額"].sum())
+        tot_prof = int(staff_agg["粗利額"].sum())
+        tot_tgt = int(staff_agg["期間目標額"].sum())
+        tot_ly = int(staff_agg["前年売上額"].sum())
+        tot_backlog = int(staff_agg["未出荷注文残"].sum())
+        tot_forecast = total_sales + tot_backlog
         tot_ach = f"{(total_sales / tot_tgt * 100):.1f}%" if tot_tgt > 0 else "-"
+        tot_fc_ach = f"{(tot_forecast / tot_tgt * 100):.1f}%" if tot_tgt > 0 else "-"
         yoy_tot_str = f"{(total_sales / tot_ly * 100):.1f}%" if tot_ly > 0 else "-"
 
-        c_sum1, c_sum2 = st.columns([4, 1.2])
+        c_sum1, c_sum2 = st.columns([4.2, 1.0])
         with c_sum1:
-            st.markdown(f"<div class='total-card' style='margin-bottom:0;'><b>期間売上合計:</b> <span style='color:#d93025; font-size:16px; font-weight:bold;'>¥{total_sales:,}</span> &nbsp;|&nbsp; <b>期間目標合計:</b> ¥{tot_tgt:,} (達成率: <b style='color:#1a73e8;'>{tot_ach}</b>) &nbsp;|&nbsp; <b>前年同期合計:</b> ¥{tot_ly:,} (前年比: <b>{yoy_tot_str}</b>) &nbsp;|&nbsp; <b>粗利合計:</b> <span style='color:#188038; font-weight:bold;'>¥{tot_prof:,}</span></div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div class='total-card' style='margin-bottom:0;'>"
+                f"<b>確定売上合計:</b> <span style='color:#d93025; font-size:16px; font-weight:bold;'>¥{total_sales:,}</span> (達成率: <b>{tot_ach}</b>) &nbsp;|&nbsp; "
+                f"<b>⏳ 未出荷注文残:</b> <span style='color:#ea580c; font-weight:bold;'>+¥{tot_backlog:,}</span> &nbsp;|&nbsp; "
+                f"<b>🚀 注文残出荷時の着地見込:</b> <span style='color:#15803d; font-size:16px; font-weight:bold;'>¥{tot_forecast:,}</span> (見込達成率: <b style='color:#1a73e8;'>{tot_fc_ach}</b>) &nbsp;|&nbsp; "
+                f"<b>期間目標:</b> ¥{tot_tgt:,} &nbsp;|&nbsp; <b>粗利合計:</b> <span style='color:#188038; font-weight:bold;'>¥{tot_prof:,}</span>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
         with c_sum2:
             st.download_button(label="📥 Excelで保存", data=generate_excel_bytes(show_st_df, "担当者別分析"), file_name=f"担当者別売上分析_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         st.write("")
