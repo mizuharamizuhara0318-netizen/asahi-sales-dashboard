@@ -1102,10 +1102,58 @@ def _fmt_zip_hyphen(z_val):
         return f"{digits[:3]}-{digits[3:]}"
     return s
 
+def _get_b2b_token_anywhere():
+    """どの表示モード（見積シミュレーター等）からでも設定済みのB2Bトークンを確実に取得する"""
+    if "get_valid_b2b_access_token" in globals():
+        try:
+            t = get_valid_b2b_access_token()
+            if t:
+                return t
+        except Exception:
+            pass
+    cand_paths = [
+        os.path.join(GDRIVE_SYNC_DIR, "b2b_oauth_token.json"),
+        os.path.join(BASE_DIR, "b2b_oauth_token.json"),
+        os.path.join(BASE_SHARE, "b2b_oauth_token.json")
+    ]
+    for p in cand_paths:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                if d and d.get("access_token"):
+                    return str(d["access_token"]).strip()
+            except Exception:
+                pass
+    # ローカルに無ければGoogleドライブから直接取得
+    service, folder_id = get_gdrive_service_and_folder()
+    if service and folder_id:
+        try:
+            from googleapiclient.http import MediaIoBaseDownload
+            q = f"'{folder_id}' in parents and name = 'b2b_oauth_token.json' and trashed = false"
+            res = service.files().list(
+                q=q, fields="files(id, name)",
+                supportsAllDrives=True, includeItemsFromAllDrives=True
+            ).execute().get("files", [])
+            if res:
+                req = service.files().get_media(fileId=res[0]["id"], supportsAllDrives=True)
+                fh = io.BytesIO()
+                dl = MediaIoBaseDownload(fh, req)
+                done = False
+                while not done:
+                    _, done = dl.next_chunk()
+                d = json.loads(fh.getvalue().decode("utf-8", errors="replace"))
+                if d and d.get("access_token"):
+                    with open(os.path.join(GDRIVE_SYNC_DIR, "b2b_oauth_token.json"), "w", encoding="utf-8") as f_out:
+                        json.dump(d, f_out, ensure_ascii=False, indent=2)
+                    return str(d["access_token"]).strip()
+        except Exception:
+            pass
+    return ""
+
 def get_next_smaregi_order_id():
-    """スマレジEC・B2Bの最新受注ID（例: 102264）をAPI＆キャッシュから取得し、次の連番（102265）を返す"""
+    """スマレジEC・B2Bの最新受注IDをAPI＆キャッシュからリアルタイム取得し、次の連番（+1）を返す"""
     max_id = 0
-    # 1) まずローカルキャッシュ内の最大受注IDを確認
     b2b_cache_p = os.path.join(GDRIVE_SYNC_DIR, "b2b_orders_cache.json")
     if os.path.exists(b2b_cache_p):
         try:
@@ -1117,14 +1165,14 @@ def get_next_smaregi_order_id():
         except Exception:
             pass
 
-    # 2) さらにAPIで本日分の最新受注IDをリアルタイム確認して最大値を更新
     try:
-        tok = get_valid_b2b_access_token() if "get_valid_b2b_access_token" in globals() else ""
+        tok = _get_b2b_token_anywhere()
         if tok:
             import urllib.request, urllib.parse
             today_s = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d")
+            from_s = (datetime.utcnow() + timedelta(hours=9) - timedelta(days=2)).strftime("%Y-%m-%d")
             q_p = urllib.parse.urlencode({
-                "order_date_from": f"{today_s} 00:00:00",
+                "order_date_from": f"{from_s} 00:00:00",
                 "order_date_to": f"{today_s} 23:59:59",
                 "fields": "serial_order_id",
                 "limit": 50,
@@ -1147,7 +1195,7 @@ def get_next_smaregi_order_id():
 
 def register_order_directly_to_smaregi_api(csv_bytes_cp932):
     """生成した正規フォーマットの受注データをスマレジEC・B2B APIへ直接POST登録する"""
-    tok = get_valid_b2b_access_token() if "get_valid_b2b_access_token" in globals() else ""
+    tok = _get_b2b_token_anywhere()
     if not tok:
         return False, "スマレジEC・B2Bのアクセストークンが未設定です。"
     import urllib.request, urllib.parse
@@ -1230,16 +1278,20 @@ def register_order_directly_to_smaregi_api(csv_bytes_cp932):
         "Content-Type": "application/json; charset=utf-8"
     }
     body_bytes = json.dumps(order_payload, ensure_ascii=True).encode("utf-8")
+    last_err = ""
     for ep in ["/api/v1/orders.php", "/api/v2/orders"]:
         try:
             req = urllib.request.Request(f"https://smilekidsb2b.com{ep}", data=body_bytes, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=20) as resp:
-                res_j = json.loads(resp.read().decode("utf-8", errors="replace"))
-            if str(res_j.get("success", "")).lower() == "ok" or "orders" in res_j or "order_id" in str(res_j):
-                return True, f"受注番号（EC注文番号）: {ec_oid} でスマレジに直接登録しました！"
+                res_txt = resp.read().decode("utf-8", errors="replace")
+                res_j = json.loads(res_txt)
+            err_cd = str(res_j.get("error_cd", ""))
+            if str(res_j.get("success", "")).lower() == "ok" and err_cd in ["", "N-0001"]:
+                return True, f"注文番号（EC注文番号）: {ec_oid} でスマレジに直接登録しました！"
+            last_err = f"{err_cd} {res_j.get('error_message', res_txt[:120])}".strip()
         except Exception as e:
             last_err = str(e)
-    return False, f"API直接登録がサポートされていないかエラーが発生しました（{last_err}）。隣のCSV出力ボタンから取り込んでください（AR列の注文番号は {ec_oid} で自動採番済みです）。"
+    return False, f"スマレジAPIの仕様上、受注APIは検索（GET）のみ許可されているかエラーが返されました（応答: {last_err}）。隣の『🛒 CSV出力 (注文番号:{ec_oid})』ボタンから取り込んでください（AR列の注文番号は {ec_oid} で自動採番済みです）。"
 
 def create_smaregi_order_csv_bytes(est_data, raw_title_map, std_price_map):
     rows = []
