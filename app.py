@@ -5663,9 +5663,9 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
                 "prof": int(r["粗利額"]), "mgn": str(r["粗利率"]), "staff": str(r["担当者"])
             })
 
-        # ② 未出荷受注残POPデータ（未出荷伝票リスト ＆ 出荷予定商品集計＋在庫照合）
+        ## ② 未出荷受注残POPデータ（未出荷伝票リスト ＆ 出荷予定商品集計＋在庫照合）
         unship_orders_js = []
-        for _, r in unshipped_df.sort_values(["出荷予定日", "商品代金(税別)"], ascending=[True, False]).iterrows():
+        for _, r in unshipped_df.sort_values(["出荷予定日", "受注ID"], ascending=[False, False]).iterrows():
             unship_orders_js.append({
                 "oid": str(r["受注ID"]), "ord_dt": str(r["受注日時"]), "hasso_dt": str(r["出荷予定日"] or "未定"),
                 "status": str(r["受注ステータス"]), "comp": str(r["得意先名"]),
