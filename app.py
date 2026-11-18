@@ -3846,15 +3846,15 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
             st.caption(f"🔢 **スマレジ自動連番連動中**：現在スマレジの最新受注IDから自動算出した次の注文番号 **`{next_smaregi_id}`** をAR列（EC注文番号）に自動セットしています（A列の受注IDとピタッと一致します）。")
 
             file_prefix = q_cust_comp.replace(' ', '_') if q_cust_comp else "御見積書"
-            btn_c1, btn_c2, btn_c3, btn_c4 = st.columns([1.2, 1.2, 1.4, 1.5])
+            btn_c1, btn_c2, btn_c3 = st.columns([1.4, 1.4, 1.8])
             with btn_c1:
-                if st.button("💾 見積を保存", use_container_width=True, key=f"save_btn_{s_key}"):
+                if st.button("💾 この見積を保存して一覧へ登録", use_container_width=True, key=f"save_btn_{s_key}"):
                     st.session_state.saved_estimates.insert(0, current_estimate_obj)
                     save_quotes_list(st.session_state.saved_estimates)
                     st.success("✅ 保存済み見積一覧に登録しました！")
             with btn_c2:
                 st.download_button(
-                    label="📥 御見積書(Excel)",
+                    label="📥 御見積書（Excel・角印付き）",
                     data=generate_quote_excel_exact_style(calc_df),
                     file_name=f"御見積書_{file_prefix}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -3862,18 +3862,11 @@ if view_type == '🧮 簡易見積＆利益シミュレーター':
                 )
             with btn_c3:
                 st.download_button(
-                    label=f"🛒 CSV出力 (注文番号:{next_smaregi_id})",
+                    label=f"🛒 注文確定：スマレジCSV出力 (注文番号:{next_smaregi_id})",
                     data=csv_bytes_ready,
                     file_name=f"order_{next_smaregi_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                     mime="text/csv", type="primary", use_container_width=True, key=f"dl_csv_{s_key}"
                 )
-            with btn_c4:
-                if st.button(f"🚀 APIでスマレジへ直接注文登録", use_container_width=True, key=f"api_reg_btn_{s_key}"):
-                    ok_api, msg_api = register_order_directly_to_smaregi_api(csv_bytes_ready)
-                    if ok_api:
-                        st.success(f"✅ {msg_api}")
-                    else:
-                        st.warning(f"ℹ️ {msg_api}")
             st.write("")
             st.markdown("##### 👁️ PDFプレビュー表示＆ワンクリックPDF保存")
             components.html(pdf_template_html, height=720, scrolling=True)
