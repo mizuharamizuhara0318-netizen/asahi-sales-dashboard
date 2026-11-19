@@ -5221,52 +5221,115 @@ B2B_REDIRECT_URI = "https://localhost:8501"
 B2B_TOKEN_FILE = os.path.join(GDRIVE_SYNC_DIR, "b2b_oauth_token.json")
 LOCAL_B2B_TOKEN_FILE = os.path.join(BASE_DIR, "b2b_oauth_token.json")
 
+def _extract_token_dict(raw_obj):
+    if not isinstance(raw_obj, dict):
+        return {}
+    # {"access_token": ...} または {"data": {"access_token": ...}} どちらにも対応
+    d = dict(raw_obj.get("data")) if isinstance(raw_obj.get("data"), dict) else dict(raw_obj)
+    acc = str(d.get("access_token", "") or "").strip()
+    if acc:
+        d["access_token"] = acc
+        return d
+    return {}
+
 def load_b2b_token_info():
+    # 0) まず st.secrets に直接設定されたトークンがあれば最優先で使用（再起動・スリープでも100%消えない）
+    secret_acc = str(st.secrets.get("b2b_access_token", "") or "").strip()
+    secret_ref = str(st.secrets.get("b2b_refresh_token", "") or "").strip()
+
+    loaded_candidates = []
     for p in [B2B_TOKEN_FILE, LOCAL_B2B_TOKEN_FILE, os.path.join(BASE_SHARE, "b2b_oauth_token.json")]:
         if os.path.exists(p):
             try:
                 with open(p, "r", encoding="utf-8") as f:
-                    d = json.load(f)
-                    if d and "access_token" in d:
-                        return d
+                    d = _extract_token_dict(json.load(f))
+                if d:
+                    loaded_candidates.append(d)
             except Exception:
                 pass
-    # ローカルに見つからない場合はGoogleドライブから直接取得して復元
-    service, folder_id = get_gdrive_service_and_folder()
-    if service and folder_id:
-        try:
-            from googleapiclient.http import MediaIoBaseDownload
-            q = f"'{folder_id}' in parents and name = 'b2b_oauth_token.json' and trashed = false"
-            res = service.files().list(
-                q=q, fields="files(id, name)",
-                supportsAllDrives=True, includeItemsFromAllDrives=True
-            ).execute().get("files", [])
-            if res:
-                req = service.files().get_media(fileId=res[0]["id"], supportsAllDrives=True)
-                fh = io.BytesIO()
-                dl = MediaIoBaseDownload(fh, req)
-                done = False
-                while not done:
-                    _, done = dl.next_chunk()
-                d = json.loads(fh.getvalue().decode("utf-8", errors="replace"))
-                if d and "access_token" in d:
-                    for p in [B2B_TOKEN_FILE, LOCAL_B2B_TOKEN_FILE]:
-                        try:
-                            with open(p, "w", encoding="utf-8") as f_out:
-                                json.dump(d, f_out, ensure_ascii=False, indent=2)
-                        except Exception:
-                            pass
-                    return d
-        except Exception:
-            pass
+
+    # ローカルに無ければGoogleドライブから直接取得して復元
+    if not loaded_candidates:
+        service, folder_id = get_gdrive_service_and_folder()
+        if service and folder_id:
+            try:
+                from googleapiclient.http import MediaIoBaseDownload
+                q = f"'{folder_id}' in parents and name = 'b2b_oauth_token.json' and trashed = false"
+                res = service.files().list(
+                    q=q, fields="files(id, name, modifiedTime)",
+                    orderBy="modifiedTime desc",
+                    supportsAllDrives=True, includeItemsFromAllDrives=True
+                ).execute().get("files", [])
+                if res:
+                    req = service.files().get_media(fileId=res[0]["id"], supportsAllDrives=True)
+                    fh = io.BytesIO()
+                    dl = MediaIoBaseDownload(fh, req)
+                    done = False
+                    while not done:
+                        _, done = dl.next_chunk()
+                    d = _extract_token_dict(json.loads(fh.getvalue().decode("utf-8", errors="replace")))
+                    if d:
+                        if "saved_at" not in d:
+                            d["saved_at"] = time.time()
+                        loaded_candidates.append(d)
+                        for p in [B2B_TOKEN_FILE, LOCAL_B2B_TOKEN_FILE]:
+                            try:
+                                os.makedirs(os.path.dirname(p), exist_ok=True)
+                                with open(p, "w", encoding="utf-8") as f_out:
+                                    json.dump(d, f_out, ensure_ascii=False, indent=2)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+    if loaded_candidates:
+        # saved_at が一番新しいものを採用
+        loaded_candidates.sort(key=lambda x: float(x.get("saved_at", 0)), reverse=True)
+        best = dict(loaded_candidates[0])
+        if secret_acc and not best.get("access_token"):
+            best["access_token"] = secret_acc
+        if secret_ref and not best.get("refresh_token"):
+            best["refresh_token"] = secret_ref
+        if "saved_at" not in best:
+            best["saved_at"] = time.time()
+        return best
+
+    if secret_acc:
+        return {
+            "access_token": secret_acc,
+            "refresh_token": secret_ref,
+            "expires_in": 8640000,
+            "saved_at": time.time()
+        }
+
     return {}
 
 def save_b2b_token_info(t_dict):
-    t_dict["saved_at"] = time.time()
+    clean_d = _extract_token_dict(t_dict)
+    if not clean_d:
+        return
+    prev_info = {}
+    for p in [B2B_TOKEN_FILE, LOCAL_B2B_TOKEN_FILE]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f_old:
+                    prev_info = _extract_token_dict(json.load(f_old))
+                if prev_info:
+                    break
+            except Exception:
+                pass
+    # 新しいレスポンスに refresh_token が含まれない場合は過去の refresh_token を引き継ぐ
+    if not clean_d.get("refresh_token") and prev_info.get("refresh_token"):
+        clean_d["refresh_token"] = prev_info["refresh_token"]
+    clean_d["saved_at"] = time.time()
+    if not clean_d.get("expires_in"):
+        clean_d["expires_in"] = 8640000
+
     for p in [B2B_TOKEN_FILE, LOCAL_B2B_TOKEN_FILE]:
         try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
-                json.dump(t_dict, f, ensure_ascii=False, indent=2)
+                json.dump(clean_d, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
     upload_file_to_gdrive(LOCAL_B2B_TOKEN_FILE, "b2b_oauth_token.json")
@@ -5288,12 +5351,15 @@ def exchange_b2b_code_for_token(raw_code_or_url):
     with urllib.request.urlopen(req, timeout=15) as resp:
         res_body = resp.read().decode("utf-8", errors="replace")
         res_json = json.loads(res_body)
-        if "access_token" in res_json:
-            save_b2b_token_info(res_json)
-            return True, res_json
+        d_tok = _extract_token_dict(res_json)
+        if d_tok:
+            save_b2b_token_info(d_tok)
+            return True, d_tok
         return False, res_json
 
 def refresh_b2b_access_token(refresh_tok):
+    if not refresh_tok:
+        return None
     for ep in ["/api/oauth/token.php", "/oauth/token.php"]:
         try:
             token_url = f"{B2B_DOMAIN}{ep}"
@@ -5306,20 +5372,27 @@ def refresh_b2b_access_token(refresh_tok):
             req = urllib.request.Request(token_url, data=params, method="POST")
             with urllib.request.urlopen(req, timeout=15) as resp:
                 res_json = json.loads(resp.read().decode("utf-8", errors="replace"))
-                if "access_token" in res_json:
-                    save_b2b_token_info(res_json)
-                    return res_json["access_token"]
+                d_tok = _extract_token_dict(res_json)
+                if d_tok:
+                    if not d_tok.get("refresh_token"):
+                        d_tok["refresh_token"] = refresh_tok
+                    save_b2b_token_info(d_tok)
+                    return d_tok["access_token"]
         except Exception:
             continue
     return None
 
 def get_valid_b2b_access_token():
     t_info = load_b2b_token_info()
-    acc_tok = t_info.get("access_token", "")
-    ref_tok = t_info.get("refresh_token", "")
-    saved_at = float(t_info.get("saved_at", 0))
-    expires_in = float(t_info.get("expires_in", 8640000))  # 100日間
-    if acc_tok and (time.time() - saved_at) > (expires_in - 86400) and ref_tok:
+    acc_tok = str(t_info.get("access_token", "") or "").strip()
+    ref_tok = str(t_info.get("refresh_token", "") or "").strip()
+    saved_at = float(t_info.get("saved_at", time.time()))
+    try:
+        expires_in = float(t_info.get("expires_in", 8640000))
+    except Exception:
+        expires_in = 8640000.0
+    # 有効期限（通常100日＝8,640,000秒）の1日前を切ったら自動更新（もしexpires_inが異常に小さい値でも誤更新しないよう保護）
+    if acc_tok and ref_tok and expires_in >= 3600 and (time.time() - saved_at) > (expires_in - 86400):
         new_tok = refresh_b2b_access_token(ref_tok)
         if new_tok:
             return new_tok
