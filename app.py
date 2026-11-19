@@ -6610,7 +6610,6 @@ def find_proposal_attachment(prop_id, filename_hint=""):
                     found_excels.append(fp)
     return found_imgs, found_excels
 
-@st.dialog("💡 商品提案 詳細・進捗更新＆資料プレビュー", width="large")
 def render_proposal_detail_panel(prop_id):
     proposals = load_saved_proposals()
     target_idx = next((i for i, p in enumerate(proposals) if str(p.get("prop_id")) == str(prop_id)), None)
