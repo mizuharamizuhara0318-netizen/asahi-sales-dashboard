@@ -6635,10 +6635,15 @@ def show_proposal_detail_dialog(prop_id):
     w_map = {"標準 (70%)": "70vw", "広め (85%)": "85vw", "フル幅 (96%)": "96vw"}
     st.markdown(f"""
     <style>
-        div[data-testid="stDialog"] div[role="dialog"],
-        div[data-baseweb="modal"] > div > div {{
+        div[role="dialog"],
+        div[aria-modal="true"],
+        div[data-testid="stDialog"] {{
             width: {w_map[w_choice]} !important;
             max-width: {w_map[w_choice]} !important;
+        }}
+        div[role="dialog"] > div {{
+            width: 100% !important;
+            max-width: 100% !important;
         }}
     </style>
     """, unsafe_allow_html=True)
