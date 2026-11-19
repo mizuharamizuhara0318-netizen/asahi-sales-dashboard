@@ -31,6 +31,10 @@ st.markdown("""
         .main-header { font-size: 16px; padding: 6px 10px; }
         .total-card { font-size: 12px; padding: 8px 10px; }
     }
+    div[data-testid="stDialog"] > div > div {
+    width: 90vw !important;
+    max-width: 1400px !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
