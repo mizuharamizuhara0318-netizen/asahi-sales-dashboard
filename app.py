@@ -31,12 +31,7 @@ st.markdown("""
         .main-header { font-size: 16px; padding: 6px 10px; }
         .total-card { font-size: 12px; padding: 8px 10px; }
     }
-/* ポップアップ（st.dialog）の横幅制限をすべて解除して画面の96%まで広げる */
-div[data-testid="stDialog"] div[role="dialog"],
-div[data-baseweb="modal"] > div > div {
-    width: 96vw !important;
-    max-width: 96vw !important;
-}
+
 </style>
 """, unsafe_allow_html=True)
 
