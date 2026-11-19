@@ -6699,15 +6699,24 @@ def show_proposal_detail_dialog(prop_id):
     with tab_xls:
         if excel_paths:
             for ep in excel_paths:
-                c_x1, c_x2 = st.columns([2.5, 1.5])
+                c_x1, c_x2, c_x3 = st.columns([2.0, 1.5, 1.2])
                 with c_x1:
                     xls = pd.ExcelFile(ep)
                     sel_sheet = st.selectbox("表示するシートを選択", xls.sheet_names, key=f"prop_sh_{prop_id}_{os.path.basename(ep)}")
                 with c_x2:
+                    tbl_size = st.radio(
+                        "表の高さ",
+                        ["標準 (500px)", "大 (750px)", "特大 (1000px)"],
+                        index=1,
+                        horizontal=True,
+                        key=f"prop_sz_{prop_id}_{os.path.basename(ep)}"
+                    )
+                    h_map = {"標準 (500px)": 500, "大 (750px)": 750, "特大 (1000px)": 1000}
+                with c_x3:
                     st.write("")
                     with open(ep, "rb") as f_dl:
                         st.download_button(
-                            label=f"📥 原本ExcelをDL",
+                            label="📥 原本ExcelをDL",
                             data=f_dl.read(),
                             file_name=os.path.basename(ep),
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -6716,8 +6725,7 @@ def show_proposal_detail_dialog(prop_id):
                         )
                 try:
                     df_sheet = pd.read_excel(xls, sheet_name=sel_sheet).fillna("")
-                    # 高さも600pxに拡大して見やすく
-                    st.dataframe(df_sheet, use_container_width=True, height=600)
+                    st.dataframe(df_sheet, use_container_width=True, height=h_map[tbl_size])
                 except Exception as e:
                     st.error(f"Excel読込エラー: {e}")
         else:
