@@ -4104,12 +4104,38 @@ else:
     ym_end = st.session_state.get("analysis_ym_end_v3", latest_ym)
     sel_staff, sel_cust, search_cust, sel_prod, search_prod, limit_val, matched_custs, chosen_sub_branch = "（すべて）", "（すべて）", "", "（すべて）", "", 50, [], ""
 
-prod_first_seen_dt = df.groupby("商品コード")["日付_dt"].min().to_dict()
-code_to_name = df.dropna(subset=["商品コード", "商品名"]).drop_duplicates(subset=["商品コード"]).set_index("商品コード")["商品名"].to_dict()
-for k_t, v_t in (jan_title_dict or {}).items():
-    if v_t and str(v_t).strip() not in ["", "nan"]:
-        code_to_name[str(k_t).strip()] = str(v_t).strip()
+@st.cache_data(show_spinner=False, max_entries=1)
+def _build_sales_lookup_cache(_df_len, _max_dt_str, _jan_title_dict):
+    first_seen = df.groupby("商品コード")["日付_dt"].min().to_dict() if not df.empty else {}
+    c2n = (
+        df.dropna(subset=["商品コード", "商品名"])
+        .drop_duplicates(subset=["商品コード"])
+        .set_index("商品コード")["商品名"]
+        .to_dict()
+        if not df.empty
+        else {}
+    )
+    for k_t, v_t in (_jan_title_dict or {}).items():
+        sk_t = str(k_t).strip()
+        if v_t and str(v_t).strip() not in ["", "nan"]:
+            c2n[sk_t] = str(v_t).strip()
 
+    p_pairs = df[["商品コード", "商品名"]].dropna().drop_duplicates() if not df.empty else pd.DataFrame(columns=["商品コード", "商品名"])
+    p_list = ["（すべて）"] + sorted([
+        f"{str(r['商品コード']).strip()} : {str(r['商品名']).strip()}"
+        for _, r in p_pairs.iterrows()
+        if str(r["商品コード"]).strip() not in ["", "nan", "None"]
+    ])
+    u_custs = (
+        sorted([str(x).strip() for x in df["得意先名"].dropna().unique() if str(x).strip() not in ["", "nan", "None"]])
+        if not df.empty
+        else []
+    )
+    return first_seen, c2n, p_list, u_custs
+
+prod_first_seen_dt, code_to_name, prod_list, all_unique_custs = _build_sales_lookup_cache(
+    len(df), str(max_date), jan_title_dict
+)
 one_year_ago_date = pd.Timestamp(max_date) - pd.DateOffset(years=1)
 active_months_list = []
 
