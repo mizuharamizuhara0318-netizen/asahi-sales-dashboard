@@ -6616,39 +6616,31 @@ def find_proposal_attachment(prop_id, filename_hint=""):
     return found_imgs, found_excels
 
 @st.dialog("💡 商品提案 詳細・進捗更新＆資料プレビュー", width="large")
-def show_proposal_detail_dialog(prop_id):
+def render_proposal_detail_panel(prop_id):
     proposals = load_saved_proposals()
     target_idx = next((i for i, p in enumerate(proposals) if str(p.get("prop_id")) == str(prop_id)), None)
     if target_idx is None:
-        st.error("該当する提案データが見つかりませんでした。")
+        st.session_state.pop("selected_prop_id", None)
         return
 
     item = proposals[target_idx]
-    # --- ポップアップの横幅を動的に切り替える ---
-    w_choice = st.radio(
-        "↔️ 画面の横幅",
-        ["標準 (70%)", "広め (85%)", "フル幅 (96%)"],
-        index=2,
-        horizontal=True,
-        key=f"prop_width_{prop_id}"
-    )
-    w_map = {"標準 (70%)": "70vw", "広め (85%)": "85vw", "フル幅 (96%)": "96vw"}
-    st.markdown(f"""
-    <style>
-        /* 白いポップアップ本体だけ横幅を変更する（半透明背景は触らない） */
-        div[data-testid="stDialog"] div[role="dialog"] {{
-            width: {w_map[w_choice]} !important;
-            max-width: {w_map[w_choice]} !important;
-        }}
-        div[data-testid="stDialog"] div[role="dialog"] > div {{
-            width: 100% !important;
-            max-width: 100% !important;
-        }}
-    </style>
-    """, unsafe_allow_html=True)
-    st.markdown(f"#### 💡 【{item['prop_id']}】 {item['prod_name']} &nbsp; <span style='font-size:14px; color:#2563eb;'>（提案者: {item.get('staff','')} ／ ステータス: {item.get('status','')}）</span>", unsafe_allow_html=True)
 
-    # --- ① 編集フォームは折りたたんでおく（会議中は邪魔にならない） ---
+    # ヘッダー行（タイトル ＋ 閉じるボタン）
+    h_col1, h_col2 = st.columns([5.0, 1.0])
+    with h_col1:
+        st.markdown(
+            f"<div class='side-panel-header' style='margin-bottom:4px;'>"
+            f"💡 【{item['prop_id']}】 {item['prod_name']} &nbsp;|&nbsp; "
+            f"提案者: {item.get('staff','')} &nbsp;|&nbsp; ステータス: {item.get('status','')}"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+    with h_col2:
+        if st.button("✖️ 詳細を閉じる", use_container_width=True, key=f"close_prop_{prop_id}"):
+            st.session_state.pop("selected_prop_id", None)
+            st.rerun()
+
+    # --- ① 編集フォーム（普段は折りたたんでスッキリ表示） ---
     with st.expander("✏️ 進捗ステータス・担当者・添付資料を編集する", expanded=False):
         with st.form(f"edit_prop_form_{prop_id}"):
             c1, c2, c3 = st.columns([1.2, 1.4, 1.2])
@@ -6697,11 +6689,12 @@ def show_proposal_detail_dialog(prop_id):
             if deleted:
                 proposals.pop(target_idx)
                 save_proposals_list(proposals)
+                st.session_state.pop("selected_prop_id", None)
                 st.warning("🗑️ 削除しました。")
                 time.sleep(0.4)
                 st.rerun()
 
-    # --- ② メイン：画像・Excelを画面いっぱいに大きく表示 ---
+    # --- ② メイン：モニター全幅で画像・Excelを表示 ---
     img_paths, excel_paths = find_proposal_attachment(prop_id, item.get("img_file", ""))
     _, excel_paths_2 = find_proposal_attachment(prop_id, item.get("excel_file", ""))
     for ep in excel_paths_2:
@@ -6716,6 +6709,7 @@ def show_proposal_detail_dialog(prop_id):
     with tab_img:
         if img_paths:
             for ip in img_paths:
+                st.caption(f"📄 ファイル: `{os.path.basename(ip)}`")
                 st.image(ip, use_container_width=True)
         else:
             st.info("まだキャプチャー画像が登録されていません。")
@@ -6723,7 +6717,7 @@ def show_proposal_detail_dialog(prop_id):
     with tab_xls:
         if excel_paths:
             for ep in excel_paths:
-                c_x1, c_x2, c_x3 = st.columns([2.0, 1.5, 1.2])
+                c_x1, c_x2, c_x3 = st.columns([2.0, 1.8, 1.2])
                 with c_x1:
                     xls = pd.ExcelFile(ep)
                     sel_sheet = st.selectbox("表示するシートを選択", xls.sheet_names, key=f"prop_sh_{prop_id}_{os.path.basename(ep)}")
@@ -6748,12 +6742,14 @@ def show_proposal_detail_dialog(prop_id):
                             key=f"dl_prop_xls_{prop_id}_{os.path.basename(ep)}"
                         )
                 try:
-                    df_sheet = pd.read_excel(xls, sheet_name=sel_sheet).round(1).fillna("")
+                    # 小数点誤差を丸めてモニター全幅で表示
+                    df_sheet = pd.read_excel(xls, sheet_name=sel_sheet).round(2).fillna("")
                     st.dataframe(df_sheet, use_container_width=True, height=h_map[tbl_size])
                 except Exception as e:
                     st.error(f"Excel読込エラー: {e}")
         else:
             st.info("まだExcelファイルが登録されていません。")
+
 
 if view_type == '💡 商品提案・進捗管理':
     st.markdown("#### 💡 商品提案・進捗管理ダッシュボード")
@@ -6762,7 +6758,6 @@ if view_type == '💡 商品提案・進捗管理':
     # 1. 新規提案の登録パネル
     with st.expander("➕ 新しい商品提案を登録する（画像・Excel添付OK）", expanded=False):
         with st.form("new_proposal_form", clear_on_submit=True):
-            # 次の提案IDを自動採番（例: P001, P002...）
             existing_nums = [int(re.sub(r'\D', '', str(p.get("prop_id", "0"))) or 0) for p in proposals_list]
             next_id = f"P{(max(existing_nums) + 1 if existing_nums else 1):03d}"
 
@@ -6833,7 +6828,7 @@ if view_type == '💡 商品提案・進捗管理':
     with pf3:
         f_pkw = st.text_input("🔍 商品名・ID・メモで検索", placeholder="キーワードを入力...", key="prop_filt_kw")
 
-    # 4. 一覧テーブル表示（既存のクリック可能テーブルを流用するため、提案IDを「商品コード」列として渡す）
+    # 4. 一覧テーブル表示
     rows_p = []
     for p in proposals_list:
         if f_pstaff != "（すべて）" and p.get("staff") != f_pstaff:
@@ -6849,7 +6844,7 @@ if view_type == '💡 商品提案・進捗管理':
         has_xls = "📊" if (xlss or xlss2) else "-"
 
         rows_p.append({
-            "商品コード": p.get("prop_id", ""),  # クリック対象（🔍リンクになる）
+            "商品コード": p.get("prop_id", ""),
             "提案商品名": p.get("prod_name", ""),
             "提案者": p.get("staff", ""),
             "進捗ステータス": p.get("status", ""),
@@ -6860,15 +6855,23 @@ if view_type == '💡 商品提案・進捗管理':
         })
 
     if rows_p:
-        st.caption("💡 表内の **「🔍 提案ID（商品コード欄）」** をクリックすると、**進捗更新フォーム・提案書画像プレビュー・Excel中身** がポップアップ表示されます。")
+        st.caption("💡 表内の **「🔍 提案ID（商品コード欄）」** をクリックすると、すぐ下に **モニター全幅で画像・Excelプレビュー** が表示されます。")
         prop_disp_df = pd.DataFrame(rows_p)
-        clicked_prop = render_clickable_product_table(prop_disp_df, comp_key="proposal_clickable_tbl_v1", max_h=560)
+        # 一覧表はコンパクトにして下にプレビューが見えやすくする
+        clicked_prop = render_clickable_product_table(prop_disp_df, comp_key="proposal_clickable_tbl_v1", max_h=280)
         if clicked_prop and isinstance(clicked_prop, dict) and clicked_prop.get("sku"):
             last_pr_ts = st.session_state.get("_last_prop_click_ts", 0)
             cur_pr_ts = clicked_prop.get("ts", 0)
             if cur_pr_ts != last_pr_ts:
                 st.session_state["_last_prop_click_ts"] = cur_pr_ts
-                show_proposal_detail_dialog(clicked_prop["sku"])
+                st.session_state["selected_prop_id"] = clicked_prop["sku"]
+                st.rerun()
+
+        # 5. クリックされた提案の詳細・Excel・画像をモニター全幅で下に表示
+        sel_pid = st.session_state.get("selected_prop_id")
+        if sel_pid:
+            st.divider()
+            render_proposal_detail_panel(sel_pid)
     else:
         st.info("まだ商品提案が登録されていません。上の「➕ 新しい商品提案を登録する」から追加してみてください。")
     st.stop()
