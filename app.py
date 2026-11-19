@@ -6624,6 +6624,24 @@ def show_proposal_detail_dialog(prop_id):
         return
 
     item = proposals[target_idx]
+    # --- ポップアップの横幅を動的に切り替える ---
+    w_choice = st.radio(
+        "↔️ 画面の横幅",
+        ["標準 (70%)", "広め (85%)", "フル幅 (96%)"],
+        index=2,
+        horizontal=True,
+        key=f"prop_width_{prop_id}"
+    )
+    w_map = {"標準 (70%)": "70vw", "広め (85%)": "85vw", "フル幅 (96%)": "96vw"}
+    st.markdown(f"""
+    <style>
+        div[data-testid="stDialog"] div[role="dialog"],
+        div[data-baseweb="modal"] > div > div {{
+            width: {w_map[w_choice]} !important;
+            max-width: {w_map[w_choice]} !important;
+        }}
+    </style>
+    """, unsafe_allow_html=True)
     st.markdown(f"#### 💡 【{item['prop_id']}】 {item['prod_name']} &nbsp; <span style='font-size:14px; color:#2563eb;'>（提案者: {item.get('staff','')} ／ ステータス: {item.get('status','')}）</span>", unsafe_allow_html=True)
 
     # --- ① 編集フォームは折りたたんでおく（会議中は邪魔にならない） ---
