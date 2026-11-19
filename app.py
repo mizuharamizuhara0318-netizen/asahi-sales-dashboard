@@ -6725,7 +6725,7 @@ def show_proposal_detail_dialog(prop_id):
                             key=f"dl_prop_xls_{prop_id}_{os.path.basename(ep)}"
                         )
                 try:
-                    df_sheet = pd.read_excel(xls, sheet_name=sel_sheet).fillna("")
+                    df_sheet = pd.read_excel(xls, sheet_name=sel_sheet).round(1).fillna("")
                     st.dataframe(df_sheet, use_container_width=True, height=h_map[tbl_size])
                 except Exception as e:
                     st.error(f"Excel読込エラー: {e}")
