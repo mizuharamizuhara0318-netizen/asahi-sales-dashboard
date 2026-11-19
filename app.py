@@ -331,14 +331,14 @@ def sync_all_from_gdrive(force=False):
                 continue
             if fname.lower().startswith("order_") and "order_r" not in fname.lower() and "マスター" not in fname:
                 continue
-            if not fname.lower().endswith((".csv", ".xlsx", ".xls", ".json", ".png")):
+            if not fname.lower().endswith((".csv", ".xlsx", ".xls", ".json", ".png", ".jpg", ".jpeg")):
                 continue
 
             if "order_r" in fname.lower() or "マスター" in fname:
                 master_detected_name = fname
 
             target_path = os.path.join(GDRIVE_SYNC_DIR, fname)
-            is_inventory_or_master = ("ロジザード" in fname or "在庫" in fname or "ランク" in fname or fname.lower().endswith((".xlsx", ".xls", ".json", ".png")))
+            is_inventory_or_master = ("ロジザード" in fname or "在庫" in fname or "ランク" in fname or fname.lower().endswith((".xlsx", ".xls", ".json", ".png", ".jpg", ".jpeg")))
 
             if fname.lower().endswith(".csv") and not is_inventory_or_master:
                 drive_csv_names.append(fname)
@@ -2510,7 +2510,8 @@ VIEW_MODES = [
     '📈 商品別 前年実績比較',
     '📊 得意先別 前年実績比較',
     '🚀 次回値上げ・価格改定シミュレーター',
-    '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)'
+    '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)',
+    '💡 商品提案・進捗管理'
 ]
 _qp_view_raw = st.query_params.get("view", "")
 _qp_view = _qp_view_raw[0] if isinstance(_qp_view_raw, list) else str(_qp_view_raw)
@@ -6549,4 +6550,289 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
 
     with tab_b2b_3:
         render_universal_table(det_df.drop(columns=["粗利率_数値"], errors="ignore").head(500), max_h=520)
+    st.stop()
+# ========================================================
+# ★ 💡 商品提案・進捗管理（画像プレビュー＆Excel中身ポップアップ対応）
+# ========================================================
+SAVED_PROPOSALS_FILE = os.path.join(BASE_SHARE, "saved_proposals.json")
+LOCAL_PROPOSALS_FILE = os.path.join(BASE_DIR, "saved_proposals.json")
+PROPOSAL_STATUS_LIST = ["起案中", "原価・仕様検討", "サンプル確認", "上長確認", "採用・商品化", "見送り"]
+
+def load_saved_proposals():
+    for f in [SAVED_PROPOSALS_FILE, LOCAL_PROPOSALS_FILE, os.path.join(GDRIVE_SYNC_DIR, "saved_proposals.json")]:
+        if os.path.exists(f):
+            try:
+                with open(f, "r", encoding="utf-8") as fp:
+                    return json.load(fp)
+            except Exception:
+                pass
+    return []
+
+def save_proposals_list(p_list):
+    target_f = SAVED_PROPOSALS_FILE if os.path.exists(os.path.dirname(SAVED_PROPOSALS_FILE)) else LOCAL_PROPOSALS_FILE
+    try:
+        with open(target_f, "w", encoding="utf-8") as f:
+            json.dump(p_list, f, ensure_ascii=False, indent=2)
+        upload_file_to_gdrive(target_f, "saved_proposals.json")
+    except Exception:
+        with open(LOCAL_PROPOSALS_FILE, "w", encoding="utf-8") as f:
+            json.dump(p_list, f, ensure_ascii=False, indent=2)
+        upload_file_to_gdrive(LOCAL_PROPOSALS_FILE, "saved_proposals.json")
+
+def find_proposal_attachment(prop_id, filename_hint=""):
+    """提案IDまたは登録ファイル名から画像・Excelファイルをローカル／Drive同期フォルダから探す"""
+    search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
+    found_imgs, found_excels = [], []
+
+    # 1) 登録済みファイル名を優先チェック
+    if filename_hint:
+        for d in search_dirs:
+            p = os.path.join(d, filename_hint)
+            if os.path.exists(p):
+                if filename_hint.lower().endswith((".png", ".jpg", ".jpeg")):
+                    found_imgs.append(p)
+                elif filename_hint.lower().endswith((".xlsx", ".xls")):
+                    found_excels.append(p)
+                break
+
+    # 2) 提案IDを含むファイル（例: P001.png, P001_企画書.xlsx 等）を自動検出
+    for d in search_dirs:
+        if not os.path.exists(d):
+            continue
+        for ext in ("*.png", "*.jpg", "*.jpeg"):
+            for fp in glob.glob(os.path.join(d, f"*{prop_id}*{ext[1:]}")):
+                if fp not in found_imgs:
+                    found_imgs.append(fp)
+        for ext in ("*.xlsx", "*.xls"):
+            for fp in glob.glob(os.path.join(d, f"*{prop_id}*{ext[1:]}")):
+                if fp not in found_excels:
+                    found_excels.append(fp)
+    return found_imgs, found_excels
+
+@st.dialog("💡 商品提案 詳細・進捗更新＆資料プレビュー", width="large")
+def show_proposal_detail_dialog(prop_id):
+    proposals = load_saved_proposals()
+    target_idx = next((i for i, p in enumerate(proposals) if str(p.get("prop_id")) == str(prop_id)), None)
+    if target_idx is None:
+        st.error("該当する提案データが見つかりませんでした。")
+        return
+
+    item = proposals[target_idx]
+    st.markdown(f"#### 💡 【{item['prop_id']}】 {item['prod_name']}")
+
+    # --- 上部：進捗・担当者・メモの編集フォーム ---
+    with st.form(f"edit_prop_form_{prop_id}"):
+        c1, c2, c3 = st.columns([1.2, 1.4, 1.2])
+        staff_opts = list(STAFF_MAP.values())
+        cur_staff_idx = staff_opts.index(item.get("staff", "水原")) if item.get("staff") in staff_opts else 0
+        cur_stat_idx = PROPOSAL_STATUS_LIST.index(item.get("status", "起案中")) if item.get("status") in PROPOSAL_STATUS_LIST else 0
+
+        with c1:
+            new_staff = st.selectbox("👤 提案者", staff_opts, index=cur_staff_idx)
+        with c2:
+            new_status = st.selectbox("🚦 進捗ステータス", PROPOSAL_STATUS_LIST, index=cur_stat_idx)
+        with c3:
+            new_target_dt = st.text_input("📅 目標発売・確認日", value=item.get("target_date", ""))
+
+        new_memo = st.text_area("📝 進捗メモ・コメント", value=item.get("memo", ""), height=80)
+        new_file = st.file_uploader("📎 提案書（キャプチャー画像 / Excel）を追加・差し替え", type=["png", "jpg", "jpeg", "xlsx", "xls"])
+
+        col_s1, col_s2 = st.columns([3, 1])
+        with col_s1:
+            submitted = st.form_submit_button("💾 進捗・内容を保存してGoogleドライブへ同期", type="primary", use_container_width=True)
+        with col_s2:
+            deleted = st.form_submit_button("🗑️ この提案を削除", use_container_width=True)
+
+        if submitted:
+            item["staff"] = new_staff
+            item["status"] = new_status
+            item["target_date"] = new_target_dt
+            item["memo"] = new_memo
+            item["updated_at"] = datetime.now().strftime("%Y/%m/%d %H:%M")
+
+            if new_file is not None:
+                ext = os.path.splitext(new_file.name)[1].lower()
+                save_fname = f"proposal_{prop_id}{ext}"
+                save_path = os.path.join(GDRIVE_SYNC_DIR, save_fname)
+                with open(save_path, "wb") as f_out:
+                    f_out.write(new_file.getbuffer())
+                upload_file_to_gdrive(save_path, save_fname)
+                if ext in (".png", ".jpg", ".jpeg"):
+                    item["img_file"] = save_fname
+                else:
+                    item["excel_file"] = save_fname
+
+            proposals[target_idx] = item
+            save_proposals_list(proposals)
+            st.success("✅ 保存しました！")
+            time.sleep(0.4)
+            st.rerun()
+
+        if deleted:
+            proposals.pop(target_idx)
+            save_proposals_list(proposals)
+            st.warning("🗑️ 削除しました。")
+            time.sleep(0.4)
+            st.rerun()
+
+    st.divider()
+
+    # --- 下部：画像プレビュー ＆ Excel中身表示 ---
+    img_paths, excel_paths = find_proposal_attachment(prop_id, item.get("img_file", ""))
+    _, excel_paths_2 = find_proposal_attachment(prop_id, item.get("excel_file", ""))
+    for ep in excel_paths_2:
+        if ep not in excel_paths:
+            excel_paths.append(ep)
+
+    tab_img, tab_xls = st.tabs([
+        f"🖼️ 提案書キャプチャー画像（{len(img_paths)}件）",
+        f"📊 Excelデータ中身（{len(excel_paths)}件）"
+    ])
+
+    with tab_img:
+        if img_paths:
+            for ip in img_paths:
+                st.caption(f"📄 ファイル: `{os.path.basename(ip)}`")
+                st.image(ip, use_container_width=True)
+        else:
+            st.info("まだキャプチャー画像が登録されていません。上のフォームから画像を添付するか、Googleドライブに「提案IDを含む画像（例: `P001.png`）」を置くと自動表示されます。")
+
+    with tab_xls:
+        if excel_paths:
+            for ep in excel_paths:
+                st.caption(f"📊 Excelファイル: `{os.path.basename(ep)}`")
+                with open(ep, "rb") as f_dl:
+                    st.download_button(
+                        label=f"📥 原本Excelをダウンロード ({os.path.basename(ep)})",
+                        data=f_dl.read(),
+                        file_name=os.path.basename(ep),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_prop_xls_{prop_id}_{os.path.basename(ep)}"
+                    )
+                try:
+                    xls = pd.ExcelFile(ep)
+                    sel_sheet = st.selectbox("表示するシートを選択", xls.sheet_names, key=f"prop_sh_{prop_id}_{os.path.basename(ep)}")
+                    df_sheet = pd.read_excel(xls, sheet_name=sel_sheet).fillna("")
+                    st.dataframe(df_sheet, use_container_width=True, height=400)
+                except Exception as e:
+                    st.error(f"Excel読込エラー: {e}")
+        else:
+            st.info("まだExcelファイルが登録されていません。上のフォームからExcelを添付するか、Googleドライブに「提案IDを含むExcel（例: `P001.xlsx`）」を置くと中身が自動表示されます。")
+
+if view_type == '💡 商品提案・進捗管理':
+    st.markdown("#### 💡 商品提案・進捗管理ダッシュボード")
+    proposals_list = load_saved_proposals()
+
+    # 1. 新規提案の登録パネル
+    with st.expander("➕ 新しい商品提案を登録する（画像・Excel添付OK）", expanded=False):
+        with st.form("new_proposal_form", clear_on_submit=True):
+            # 次の提案IDを自動採番（例: P001, P002...）
+            existing_nums = [int(re.sub(r'\D', '', str(p.get("prop_id", "0"))) or 0) for p in proposals_list]
+            next_id = f"P{(max(existing_nums) + 1 if existing_nums else 1):03d}"
+
+            nc1, nc2, nc3, nc4 = st.columns([1.0, 2.2, 1.2, 1.3])
+            with nc1: new_pid = st.text_input("提案ID", value=next_id)
+            with nc2: new_pname = st.text_input("提案商品名", placeholder="例: 折りたたみ防災バケツ 10L")
+            with nc3: new_pstaff = st.selectbox("提案者", list(STAFF_MAP.values()), index=7)
+            with nc4: new_pstat = st.selectbox("初期ステータス", PROPOSAL_STATUS_LIST, index=0)
+
+            nc5, nc6 = st.columns([2.5, 1.5])
+            with nc5: new_pmemo = st.text_input("概要・ポイント・社内サーバーパス等", placeholder="例: 想定下代480円 / サーバー場所: \\\\server\\企画\\...")
+            with nc6: new_ptarget = st.text_input("目標確認・発売時期", placeholder="例: 2026年12月")
+
+            up_prop_files = st.file_uploader("📎 提案書キャプチャー画像 / Excel（複数同時OK）", type=["png", "jpg", "jpeg", "xlsx", "xls"], accept_multiple_files=True)
+
+            if st.form_submit_button("✅ 商品提案を登録する", type="primary", use_container_width=True):
+                if not new_pname.strip():
+                    st.warning("提案商品名を入力してください。")
+                else:
+                    img_f, xls_f = "", ""
+                    for uf in (up_prop_files or []):
+                        ext = os.path.splitext(uf.name)[1].lower()
+                        save_fn = f"proposal_{new_pid.strip()}{ext}"
+                        save_p = os.path.join(GDRIVE_SYNC_DIR, save_fn)
+                        with open(save_p, "wb") as f_o:
+                            f_o.write(uf.getbuffer())
+                        upload_file_to_gdrive(save_p, save_fn)
+                        if ext in (".png", ".jpg", ".jpeg"):
+                            img_f = save_fn
+                        else:
+                            xls_f = save_fn
+
+                    proposals_list.insert(0, {
+                        "prop_id": new_pid.strip(),
+                        "prod_name": new_pname.strip(),
+                        "staff": new_pstaff,
+                        "status": new_pstat,
+                        "target_date": new_ptarget.strip(),
+                        "memo": new_pmemo.strip(),
+                        "img_file": img_f,
+                        "excel_file": xls_f,
+                        "updated_at": datetime.now().strftime("%Y/%m/%d %H:%M")
+                    })
+                    save_proposals_list(proposals_list)
+                    st.success(f"✅ 【{new_pid}】{new_pname} を登録しました！")
+                    time.sleep(0.4)
+                    st.rerun()
+
+    # 2. 進捗ステータス別の件数サマリー
+    stat_counts = {s: sum(1 for p in proposals_list if p.get("status") == s) for s in PROPOSAL_STATUS_LIST}
+    st.markdown(f"""
+    <div class="total-card">
+        <b>全提案数:</b> <span style="color:#1a73e8; font-size:16px; font-weight:bold;">{len(proposals_list)} 件</span> &nbsp;|&nbsp;
+        起案中: <b>{stat_counts['起案中']}</b> &nbsp;|&nbsp;
+        原価・仕様検討: <b>{stat_counts['原価・仕様検討']}</b> &nbsp;|&nbsp;
+        サンプル確認: <b>{stat_counts['サンプル確認']}</b> &nbsp;|&nbsp;
+        上長確認: <b style="color:#ea580c;">{stat_counts['上長確認']}</b> &nbsp;|&nbsp;
+        採用・商品化: <b style="color:#16a34a;">{stat_counts['採用・商品化']}</b>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 3. 絞り込みフィルター
+    pf1, pf2, pf3 = st.columns([1.3, 1.3, 2.0])
+    with pf1:
+        f_pstaff = st.selectbox("👤 提案者で絞り込み", ["（すべて）"] + list(STAFF_MAP.values()), key="prop_filt_staff")
+    with pf2:
+        f_pstat = st.selectbox("🚦 進捗ステータスで絞り込み", ["（すべて）"] + PROPOSAL_STATUS_LIST, key="prop_filt_stat")
+    with pf3:
+        f_pkw = st.text_input("🔍 商品名・ID・メモで検索", placeholder="キーワードを入力...", key="prop_filt_kw")
+
+    # 4. 一覧テーブル表示（既存のクリック可能テーブルを流用するため、提案IDを「商品コード」列として渡す）
+    rows_p = []
+    for p in proposals_list:
+        if f_pstaff != "（すべて）" and p.get("staff") != f_pstaff:
+            continue
+        if f_pstat != "（すべて）" and p.get("status") != f_pstat:
+            continue
+        if f_pkw.strip() and f_pkw.strip().lower() not in json.dumps(p, ensure_ascii=False).lower():
+            continue
+
+        imgs, xlss = find_proposal_attachment(p.get("prop_id", ""), p.get("img_file", ""))
+        _, xlss2 = find_proposal_attachment(p.get("prop_id", ""), p.get("excel_file", ""))
+        has_img = "🖼️" if imgs else "-"
+        has_xls = "📊" if (xlss or xlss2) else "-"
+
+        rows_p.append({
+            "商品コード": p.get("prop_id", ""),  # クリック対象（🔍リンクになる）
+            "提案商品名": p.get("prod_name", ""),
+            "提案者": p.get("staff", ""),
+            "進捗ステータス": p.get("status", ""),
+            "資料": f"{has_img} / {has_xls}",
+            "目標時期": p.get("target_date", ""),
+            "進捗メモ": p.get("memo", ""),
+            "更新日時": p.get("updated_at", "")
+        })
+
+    if rows_p:
+        st.caption("💡 表内の **「🔍 提案ID（商品コード欄）」** をクリックすると、**進捗更新フォーム・提案書画像プレビュー・Excel中身** がポップアップ表示されます。")
+        prop_disp_df = pd.DataFrame(rows_p)
+        clicked_prop = render_clickable_product_table(prop_disp_df, comp_key="proposal_clickable_tbl_v1", max_h=560)
+        if clicked_prop and isinstance(clicked_prop, dict) and clicked_prop.get("sku"):
+            last_pr_ts = st.session_state.get("_last_prop_click_ts", 0)
+            cur_pr_ts = clicked_prop.get("ts", 0)
+            if cur_pr_ts != last_pr_ts:
+                st.session_state["_last_prop_click_ts"] = cur_pr_ts
+                show_proposal_detail_dialog(clicked_prop["sku"])
+    else:
+        st.info("まだ商品提案が登録されていません。上の「➕ 新しい商品提案を登録する」から追加してみてください。")
     st.stop()
