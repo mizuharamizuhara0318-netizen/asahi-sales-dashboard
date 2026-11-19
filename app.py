@@ -4061,7 +4061,7 @@ if "analysis_ym_start_v3" not in st.session_state:
 if "analysis_ym_end_v3" not in st.session_state:
     st.session_state["analysis_ym_end_v3"] = e_def if e_def in desc_valid_ym else desc_valid_ym[0]
 
-if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート', '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)', '🚀 次回値上げ・価格改定シミュレーター']:
+if view_type not in ['📑 営業会議用：上位客先別売上実績', '📊 営業会議用：上位社 売上比較シート', '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API)', '🚀 次回値上げ・価格改定シミュレーター', '💡 商品提案・進捗管理']:
     col_mode, col_p1, col_p2, col_staff = st.columns([1, 1.2, 1.2, 1.6])
     with col_mode:
         date_mode = st.radio("指定単位", ["年月で指定", "日で指定"], horizontal=True, key="date_mode_radio_analysis")
