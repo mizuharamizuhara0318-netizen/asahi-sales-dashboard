@@ -6622,41 +6622,47 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            # 1. 指定シートだけを残し、横向き・1ページ収め設定を強制適用して一時保存
-            wb = openpyxl.load_workbook(excel_path)
-            for name in list(wb.sheetnames):
-                if name != sheet_name:
-                    del wb[name]
+            ext = os.path.splitext(excel_path)[1].lower()
+            target_for_pdf = excel_path
 
-            ws = wb[sheet_name]
-            ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
-            ws.page_setup.paperSize = ws.PAPERSIZE_A4
-            ws.sheet_properties.pageSetUpPr.fitToPage = True
-            ws.page_setup.fitToWidth = 1
-            ws.page_setup.fitToHeight = 1
-            ws.page_margins.left = 0.2
-            ws.page_margins.right = 0.2
-            ws.page_margins.top = 0.2
-            ws.page_margins.bottom = 0.2
+            # .xlsx の場合は指定シートだけ抜き出して横向き1ページ設定を適用
+            if ext == ".xlsx":
+                wb = openpyxl.load_workbook(excel_path)
+                for name in list(wb.sheetnames):
+                    if name != sheet_name:
+                        del wb[name]
 
-            tmp_xlsx = os.path.join(tmpdir, "target_sheet.xlsx")
-            wb.save(tmp_xlsx)
-            wb.close()
+                ws = wb[sheet_name]
+                ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+                ws.page_setup.paperSize = ws.PAPERSIZE_A4
+                ws.sheet_properties.pageSetUpPr.fitToPage = True
+                ws.page_setup.fitToWidth = 1
+                ws.page_setup.fitToHeight = 1
+                ws.page_margins.left = 0.2
+                ws.page_margins.right = 0.2
+                ws.page_margins.top = 0.2
+                ws.page_margins.bottom = 0.2
 
-            # 2. LibreOfficeでPDFに変換
+                tmp_xlsx = os.path.join(tmpdir, "target_sheet.xlsx")
+                wb.save(tmp_xlsx)
+                wb.close()
+                target_for_pdf = tmp_xlsx
+
+            # LibreOfficeでPDFに変換
             cmd = [
                 "libreoffice",
                 "--headless",
                 "--convert-to", "pdf",
                 "--outdir", tmpdir,
-                tmp_xlsx
+                target_for_pdf
             ]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            tmp_pdf = os.path.join(tmpdir, "target_sheet.pdf")
+            base_pdf_name = os.path.splitext(os.path.basename(target_for_pdf))[0] + ".pdf"
+            tmp_pdf = os.path.join(tmpdir, base_pdf_name)
             if not os.path.exists(tmp_pdf):
                 return None, f"PDF変換失敗: {res.stderr or res.stdout}"
 
-            # 3. PyMuPDFで高画質PNG画像に変換
+            # PyMuPDFで高画質PNG画像に変換
             doc = fitz.open(tmp_pdf)
             imgs = []
             for page in doc:
