@@ -6581,6 +6581,62 @@ def save_proposals_list(p_list):
         upload_file_to_gdrive(LOCAL_PROPOSALS_FILE, "saved_proposals.json")
 
 def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_xls"):
+    @st.cache_data(show_spinner=False)
+def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
+    """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す"""
+    import subprocess
+    import tempfile
+    import openpyxl
+    import fitz  # PyMuPDF
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 1. 指定シートだけを残し、横向き・1ページ収め設定を強制適用して一時保存
+            wb = openpyxl.load_workbook(excel_path)
+            for name in list(wb.sheetnames):
+                if name != sheet_name:
+                    del wb[name]
+
+            ws = wb[sheet_name]
+            ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
+            ws.page_setup.paperSize = ws.PAPERSIZE_A4
+            ws.sheet_properties.pageSetUpPr.fitToPage = True
+            ws.page_setup.fitToWidth = 1
+            ws.page_setup.fitToHeight = 1
+            # 余白を狭くして画面いっぱいに見やすくする
+            ws.page_margins.left = 0.2
+            ws.page_margins.right = 0.2
+            ws.page_margins.top = 0.2
+            ws.page_margins.bottom = 0.2
+
+            tmp_xlsx = os.path.join(tmpdir, "target_sheet.xlsx")
+            wb.save(tmp_xlsx)
+            wb.close()
+
+            # 2. LibreOfficeでPDFに変換
+            cmd = [
+                "libreoffice",
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", tmpdir,
+                tmp_xlsx
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            tmp_pdf = os.path.join(tmpdir, "target_sheet.pdf")
+            if not os.path.exists(tmp_pdf):
+                return None, f"PDF変換失敗: {res.stderr or res.stdout}"
+
+            # 3. PyMuPDFで高画質PNG画像に変換
+            doc = fitz.open(tmp_pdf)
+            imgs = []
+            for page in doc:
+                pix = page.get_pixmap(dpi=150)
+                imgs.append(pix.tobytes("png"))
+            doc.close()
+            return imgs, "OK"
+    except Exception as e:
+        return None, str(e)
+        
     """LibreOfficeを使ってExcelをPDFに変換する（Googleドライブの容量制限を回避）"""
     import subprocess
     import tempfile
@@ -6748,7 +6804,49 @@ def render_proposal_detail_panel(prop_id):
     ])
 
     with tab_pdf:
-        if pdf_paths:
+        # Excelが登録されている場合は、シートを選んで「1ページ丸ごと画像」で表示
+        if excel_paths:
+            ep = excel_paths[0]
+            try:
+                xls_obj = pd.ExcelFile(ep)
+                sheet_names = xls_obj.sheet_names
+            except Exception as e:
+                sheet_names = []
+                st.error(f"Excelシート読込エラー: {e}")
+
+            if sheet_names:
+                c_p1, c_p2 = st.columns([3.5, 1.2])
+                with c_p1:
+                    sel_pdf_sheet = st.selectbox(
+                        "📑 表示するシートを選択（自動で横向き1ページに収めます）",
+                        sheet_names,
+                        key=f"prop_pdf_sh_{prop_id}_{os.path.basename(ep)}"
+                    )
+                with c_p2:
+                    st.write("")
+                    with open(ep, "rb") as f_xdl:
+                        st.download_button(
+                            label="📥 原本ExcelをDL",
+                            data=f_xdl.read(),
+                            file_name=os.path.basename(ep),
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True,
+                            key=f"dl_prop_xls_from_pdf_{prop_id}_{os.path.basename(ep)}"
+                        )
+
+                with st.spinner(f"シート「{sel_pdf_sheet}」を1ページ資料として描画しています..."):
+                    mtime = os.path.getmtime(ep)
+                    png_list, err_msg = render_excel_sheet_as_1page_png(ep, mtime, sel_pdf_sheet)
+                if png_list:
+                    for p_idx, png_bytes in enumerate(png_list):
+                        st.image(png_bytes, use_container_width=True)
+                        if len(png_list) > 1:
+                            st.caption(f"ページ {p_idx + 1} / {len(png_list)}")
+                else:
+                    st.error(f"プレビュー生成エラー: {err_msg}")
+
+        # ExcelがなくPDF単体で登録されている場合は、そのままPDFを画像表示
+        elif pdf_paths:
             for pp in pdf_paths:
                 c_p1, c_p2 = st.columns([3.5, 1.2])
                 with c_p1:
@@ -6764,10 +6862,9 @@ def render_proposal_detail_panel(prop_id):
                             key=f"dl_prop_pdf_{prop_id}_{os.path.basename(pp)}"
                         )
                 try:
-                    import fitz  # PyMuPDF
+                    import fitz
                     doc = fitz.open(pp)
                     for page_idx, page in enumerate(doc):
-                        # 解像度2倍（高画質）でPNG画像化して全幅表示
                         pix = page.get_pixmap(dpi=150)
                         st.image(pix.tobytes("png"), use_container_width=True)
                         if len(doc) > 1:
@@ -6776,29 +6873,7 @@ def render_proposal_detail_panel(prop_id):
                 except Exception as e:
                     st.error(f"PDF画像化エラー: {e}")
         else:
-            if excel_paths:
-                st.info("まだPDF資料が作成されていません。下のボタンで登録済みExcelから今すぐ生成できます。")
-                if st.button("🔄 登録済みExcelからPDF資料を今すぐ生成する", type="primary", key=f"btn_gen_pdf_{prop_id}"):
-                    with st.spinner("Googleドライブ経由でPDFに変換しています..."):
-                        with open(excel_paths[0], "rb") as f_x:
-                            x_bytes = f_x.read()
-                        pdf_bytes, conv_err = convert_excel_to_1page_pdf_via_gdrive(x_bytes, f"tmp_{prop_id}")
-                        if pdf_bytes:
-                            pdf_fname = f"proposal_{prop_id}.pdf"
-                            pdf_path = os.path.join(GDRIVE_SYNC_DIR, pdf_fname)
-                            with open(pdf_path, "wb") as f_pdf:
-                                f_pdf.write(pdf_bytes)
-                            upload_file_to_gdrive(pdf_path, pdf_fname)
-                            item["pdf_file"] = pdf_fname
-                            proposals[target_idx] = item
-                            save_proposals_list(proposals)
-                            st.success("✅ PDFを生成しました！")
-                            time.sleep(0.4)
-                            st.rerun()
-                        else:
-                            st.error(f"PDF変換エラー: {conv_err}")
-            else:
-                st.info("まだPDF資料がありません。上の「✏️ 編集する」からExcelまたはPDFをアップロードしてください。")
+            st.info("まだ資料がありません。上の「✏️ 編集する」からExcelまたはPDFをアップロードしてください。")
 
     with tab_img:
         if img_paths:
