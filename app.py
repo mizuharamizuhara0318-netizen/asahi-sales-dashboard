@@ -6581,15 +6581,15 @@ def save_proposals_list(p_list):
         upload_file_to_gdrive(LOCAL_PROPOSALS_FILE, "saved_proposals.json")
 
 def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_xls"):
-    """ExcelをGoogleドライブ経由で『横向き・1ページに収めたPDF』に自動変換する"""
+    """ExcelをGoogleドライブAPI標準機能でPDFに自動変換する"""
     service, folder_id = get_gdrive_service_and_folder()
     if not service or not folder_id:
-        return None
+        return None, "Googleドライブ未接続です"
+    slide_or_sheet_id = None
     try:
-        import urllib.request
-        from google.auth.transport.requests import Request
-        from googleapiclient.http import MediaIoBaseUpload
+        from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
+        # 1. Googleスプレッドシート形式に変換しながら一時アップロード
         file_metadata = {
             "name": temp_name,
             "parents": [folder_id],
@@ -6603,24 +6603,27 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
         uploaded = service.files().create(
             body=file_metadata, media_body=media, fields="id", supportsAllDrives=True
         ).execute()
-        sheet_id = uploaded.get("id")
+        slide_or_sheet_id = uploaded.get("id")
 
-        creds = service._http.credentials
-        if not creds.valid:
-            creds.refresh(Request())
+        # 2. Drive API標準の export_media でPDFとしてダウンロード
+        req = service.files().export_media(fileId=slide_or_sheet_id, mimeType="application/pdf")
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, req)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        pdf_bytes = fh.getvalue()
 
-        export_url = (
-            f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?"
-            f"format=pdf&size=A4&portrait=false&scale=4&gridlines=false&sheetnames=false&printtitle=false"
-        )
-        req = urllib.request.Request(export_url, headers={"Authorization": f"Bearer {creds.token}"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            pdf_bytes = resp.read()
-
-        try:
-            service.files().delete(fileId=sheet_id, supportsAllDrives=True).execute()
-        except Exception:
-            pass
+        return pdf_bytes, "OK"
+    except Exception as e:
+        return None, str(e)
+    finally:
+        # 一時ファイルを確実に削除
+        if slide_or_sheet_id:
+            try:
+                service.files().delete(fileId=slide_or_sheet_id, supportsAllDrives=True).execute()
+            except Exception:
+                pass
 
         return pdf_bytes
     except Exception:
