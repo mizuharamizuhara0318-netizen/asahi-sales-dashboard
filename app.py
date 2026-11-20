@@ -6591,7 +6591,6 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
             with open(xlsx_path, "wb") as f:
                 f.write(excel_bytes)
 
-            # LibreOfficeをヘッドレスモードで実行してPDF化
             cmd = [
                 "libreoffice",
                 "--headless",
@@ -6611,12 +6610,6 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
         return None, "LibreOfficeが見つかりません。GitHubの packages.txt に libreoffice を追加してください。"
     except Exception as e:
         return None, str(e)
-    finally:
-        if slide_or_sheet_id:
-            try:
-                service.files().delete(fileId=slide_or_sheet_id, supportsAllDrives=True).execute()
-            except Exception:
-                pass
 
 def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""):
     """提案IDや登録ファイル名から画像・Excel・PDFを探す（同じファイル名の重複を除外）"""
