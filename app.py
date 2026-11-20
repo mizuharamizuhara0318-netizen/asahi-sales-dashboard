@@ -169,7 +169,7 @@ def find_file_multidir(filename_pattern, exclude_substr=None):
 
 # ========================================================
 # ★ ☁️ Googleドライブ 双方向・高速差分同期エンジン
-# ========================================================
+# =======================================================
 @st.cache_data(show_spinner=False)
 def _get_gdrive_creds_info():
     try:
@@ -6636,6 +6636,14 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
             return imgs, "OK"
     except Exception as e:
         return None, str(e)
+
+except Exception as e:
+        return None, str(e)
+
+@st.cache_data(show_spinner=False)
+def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
+    """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す"""
+    import subprocess
         
     """LibreOfficeを使ってExcelをPDFに変換する（Googleドライブの容量制限を回避）"""
     import subprocess
