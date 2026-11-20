@@ -6581,38 +6581,34 @@ def save_proposals_list(p_list):
         upload_file_to_gdrive(LOCAL_PROPOSALS_FILE, "saved_proposals.json")
 
 def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_xls"):
-    """ExcelをGoogleドライブAPI標準機能でPDFに自動変換する"""
-    service, folder_id = get_gdrive_service_and_folder()
-    if not service or not folder_id:
-        return None, "Googleドライブ未接続です"
-    slide_or_sheet_id = None
+    """LibreOfficeを使ってExcelをPDFに変換する（Googleドライブの容量制限を回避）"""
+    import subprocess
+    import tempfile
+
     try:
-        from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xlsx_path = os.path.join(tmpdir, f"{temp_name}.xlsx")
+            with open(xlsx_path, "wb") as f:
+                f.write(excel_bytes)
 
-        file_metadata = {
-            "name": temp_name,
-            "parents": [folder_id],
-            "mimeType": "application/vnd.google-apps.spreadsheet"
-        }
-        media = MediaIoBaseUpload(
-            io.BytesIO(excel_bytes),
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            resumable=True
-        )
-        uploaded = service.files().create(
-            body=file_metadata, media_body=media, fields="id", supportsAllDrives=True
-        ).execute()
-        slide_or_sheet_id = uploaded.get("id")
+            # LibreOfficeをヘッドレスモードで実行してPDF化
+            cmd = [
+                "libreoffice",
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", tmpdir,
+                xlsx_path
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            pdf_path = os.path.join(tmpdir, f"{temp_name}.pdf")
 
-        req = service.files().export_media(fileId=slide_or_sheet_id, mimeType="application/pdf")
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, req)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        pdf_bytes = fh.getvalue()
-
-        return pdf_bytes, "OK"
+            if os.path.exists(pdf_path):
+                with open(pdf_path, "rb") as f_pdf:
+                    return f_pdf.read(), "OK"
+            else:
+                return None, f"変換失敗: {res.stderr or res.stdout}"
+    except FileNotFoundError:
+        return None, "LibreOfficeが見つかりません。GitHubの packages.txt に libreoffice を追加してください。"
     except Exception as e:
         return None, str(e)
     finally:
