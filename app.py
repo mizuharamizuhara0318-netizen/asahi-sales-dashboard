@@ -6581,7 +6581,7 @@ def save_proposals_list(p_list):
         upload_file_to_gdrive(LOCAL_PROPOSALS_FILE, "saved_proposals.json")
 
 def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_xls"):
-    @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
     """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す"""
     import subprocess
