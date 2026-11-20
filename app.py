@@ -6804,9 +6804,9 @@ def render_proposal_detail_panel(prop_id):
     )
 
     tab_pdf, tab_img, tab_xls = st.tabs([
-        f"📄 1ページ資料プレビュー（{len(pdf_paths)}件）",
+        f"📄 1ページ資料プレビュー（{1 if (excel_paths or pdf_paths) else 0}件）",
         f"🖼️ キャプチャー画像（{len(img_paths)}件）",
-        f"📊 Excel表データ（{len(excel_paths)}件）"
+        f"📊 Excel表データ（{len(excel_paths[:1])}件）"
     ])
 
     with tab_pdf:
@@ -6891,7 +6891,7 @@ def render_proposal_detail_panel(prop_id):
 
     with tab_xls:
         if excel_paths:
-            for ep in excel_paths:
+            for ep in excel_paths[:1]: 
                 c_x1, c_x2, c_x3 = st.columns([2.0, 1.8, 1.2])
                 with c_x1:
                     xls = pd.ExcelFile(ep)
