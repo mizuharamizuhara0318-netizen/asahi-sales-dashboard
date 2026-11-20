@@ -6581,7 +6581,38 @@ def save_proposals_list(p_list):
         upload_file_to_gdrive(LOCAL_PROPOSALS_FILE, "saved_proposals.json")
 
 def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_xls"):
-　　@st.cache_data(show_spinner=False)
+    """LibreOfficeを使ってExcelをPDFに変換する（Googleドライブの容量制限を回避）"""
+    import subprocess
+    import tempfile
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            xlsx_path = os.path.join(tmpdir, f"{temp_name}.xlsx")
+            with open(xlsx_path, "wb") as f:
+                f.write(excel_bytes)
+
+            cmd = [
+                "libreoffice",
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", tmpdir,
+                xlsx_path
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            pdf_path = os.path.join(tmpdir, f"{temp_name}.pdf")
+
+            if os.path.exists(pdf_path):
+                with open(pdf_path, "rb") as f_pdf:
+                    return f_pdf.read(), "OK"
+            else:
+                return None, f"変換失敗: {res.stderr or res.stdout}"
+    except FileNotFoundError:
+        return None, "LibreOfficeが見つかりません。GitHubの packages.txt に libreoffice を追加してください。"
+    except Exception as e:
+        return None, str(e)
+
+
+@st.cache_data(show_spinner=False)
 def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
     """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す"""
     import subprocess
@@ -6603,7 +6634,6 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
             ws.sheet_properties.pageSetUpPr.fitToPage = True
             ws.page_setup.fitToWidth = 1
             ws.page_setup.fitToHeight = 1
-            # 余白を狭くして画面いっぱいに見やすくする
             ws.page_margins.left = 0.2
             ws.page_margins.right = 0.2
             ws.page_margins.top = 0.2
