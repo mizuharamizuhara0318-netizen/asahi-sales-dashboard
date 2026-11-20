@@ -6667,9 +6667,6 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
     except Exception as e:
         return None, str(e)
 
-except Exception as e:
-        return None, str(e)
-
 @st.cache_data(show_spinner=False)
 def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
     """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す"""
