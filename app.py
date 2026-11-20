@@ -332,14 +332,14 @@ def sync_all_from_gdrive(force=False):
                 continue
             if fname.lower().startswith("order_") and "order_r" not in fname.lower() and "マスター" not in fname:
                 continue
-            if not fname.lower().endswith((".csv", ".xlsx", ".xls", ".json", ".png", ".jpg", ".jpeg")):
+            if not fname.lower().endswith((".csv", ".xlsx", ".xls", ".json", ".png", ".jpg", ".jpeg", ".pdf")):
                 continue
 
             if "order_r" in fname.lower() or "マスター" in fname:
                 master_detected_name = fname
 
             target_path = os.path.join(GDRIVE_SYNC_DIR, fname)
-            is_inventory_or_master = ("ロジザード" in fname or "在庫" in fname or "ランク" in fname or fname.lower().endswith((".xlsx", ".xls", ".json", ".png", ".jpg", ".jpeg")))
+            is_inventory_or_master = ("ロジザード" in fname or "在庫" in fname or "ランク" in fname or fname.lower().endswith((".xlsx", ".xls", ".json", ".png", ".jpg", ".jpeg", ".pdf")))
 
             if fname.lower().endswith(".csv") and not is_inventory_or_master:
                 drive_csv_names.append(fname)
@@ -6553,7 +6553,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         render_universal_table(det_df.drop(columns=["粗利率_数値"], errors="ignore").head(500), max_h=520)
     st.stop()
 # ========================================================
-# ★ 💡 商品提案・進捗管理（画像プレビュー＆Excel中身ポップアップ対応）
+# ★ 💡 商品提案・進捗管理（Excel自動1ページPDF変換・モニター全幅表示版）
 # ========================================================
 SAVED_PROPOSALS_FILE = os.path.join(BASE_SHARE, "saved_proposals.json")
 LOCAL_PROPOSALS_FILE = os.path.join(BASE_DIR, "saved_proposals.json")
@@ -6580,35 +6580,78 @@ def save_proposals_list(p_list):
             json.dump(p_list, f, ensure_ascii=False, indent=2)
         upload_file_to_gdrive(LOCAL_PROPOSALS_FILE, "saved_proposals.json")
 
-def find_proposal_attachment(prop_id, filename_hint=""):
-    """提案IDまたは登録ファイル名から画像・Excelファイルをローカル／Drive同期フォルダから探す"""
+def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_xls"):
+    """ExcelをGoogleドライブ経由で『横向き・1ページに収めたPDF』に自動変換する"""
+    service, folder_id = get_gdrive_service_and_folder()
+    if not service or not folder_id:
+        return None
+    try:
+        import urllib.request
+        from google.auth.transport.requests import Request
+        from googleapiclient.http import MediaIoBaseUpload
+
+        file_metadata = {
+            "name": temp_name,
+            "parents": [folder_id],
+            "mimeType": "application/vnd.google-apps.spreadsheet"
+        }
+        media = MediaIoBaseUpload(
+            io.BytesIO(excel_bytes),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            resumable=True
+        )
+        uploaded = service.files().create(
+            body=file_metadata, media_body=media, fields="id", supportsAllDrives=True
+        ).execute()
+        sheet_id = uploaded.get("id")
+
+        creds = service._http.credentials
+        if not creds.valid:
+            creds.refresh(Request())
+
+        export_url = (
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?"
+            f"format=pdf&size=A4&portrait=false&scale=4&gridlines=false&sheetnames=false&printtitle=false"
+        )
+        req = urllib.request.Request(export_url, headers={"Authorization": f"Bearer {creds.token}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            pdf_bytes = resp.read()
+
+        try:
+            service.files().delete(fileId=sheet_id, supportsAllDrives=True).execute()
+        except Exception:
+            pass
+
+        return pdf_bytes
+    except Exception:
+        return None
+
+def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""):
+    """提案IDや登録ファイル名から画像・Excel・PDFをすべて探す"""
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
-    found_imgs, found_excels = [], []
+    found_imgs, found_excels, found_pdfs = [], [], []
 
-    # 1) 登録済みファイル名を優先チェック
-    if filename_hint:
-        for d in search_dirs:
-            p = os.path.join(d, filename_hint)
-            if os.path.exists(p):
-                if filename_hint.lower().endswith((".png", ".jpg", ".jpeg")):
-                    found_imgs.append(p)
-                elif filename_hint.lower().endswith((".xlsx", ".xls")):
-                    found_excels.append(p)
-                break
+    for hint, target_list in [(img_hint, found_imgs), (xls_hint, found_excels), (pdf_hint, found_pdfs)]:
+        if hint:
+            for d in search_dirs:
+                p = os.path.join(d, hint)
+                if os.path.exists(p) and p not in target_list:
+                    target_list.append(p)
+                    break
 
-    # 2) 提案IDを含むファイル（例: P001.png, P001_企画書.xlsx 等）を自動検出
     for d in search_dirs:
         if not os.path.exists(d):
             continue
         for ext in ("*.png", "*.jpg", "*.jpeg"):
             for fp in glob.glob(os.path.join(d, f"*{prop_id}*{ext[1:]}")):
-                if fp not in found_imgs:
-                    found_imgs.append(fp)
+                if fp not in found_imgs: found_imgs.append(fp)
         for ext in ("*.xlsx", "*.xls"):
             for fp in glob.glob(os.path.join(d, f"*{prop_id}*{ext[1:]}")):
-                if fp not in found_excels:
-                    found_excels.append(fp)
-    return found_imgs, found_excels
+                if fp not in found_excels: found_excels.append(fp)
+        for fp in glob.glob(os.path.join(d, f"*{prop_id}*.pdf")):
+            if fp not in found_pdfs: found_pdfs.append(fp)
+
+    return found_imgs, found_excels, found_pdfs
 
 def render_proposal_detail_panel(prop_id):
     proposals = load_saved_proposals()
@@ -6619,7 +6662,6 @@ def render_proposal_detail_panel(prop_id):
 
     item = proposals[target_idx]
 
-    # ヘッダー行（タイトル ＋ 閉じるボタン）
     h_col1, h_col2 = st.columns([5.0, 1.0])
     with h_col1:
         st.markdown(
@@ -6634,7 +6676,7 @@ def render_proposal_detail_panel(prop_id):
             st.session_state.pop("selected_prop_id", None)
             st.rerun()
 
-    # --- ① 編集フォーム（普段は折りたたんでスッキリ表示） ---
+    # --- ① 編集フォーム（普段は折りたたみ） ---
     with st.expander("✏️ 進捗ステータス・担当者・添付資料を編集する", expanded=False):
         with st.form(f"edit_prop_form_{prop_id}"):
             c1, c2, c3 = st.columns([1.2, 1.4, 1.2])
@@ -6647,7 +6689,7 @@ def render_proposal_detail_panel(prop_id):
             with c3: new_target_dt = st.text_input("📅 目標発売・確認日", value=item.get("target_date", ""))
 
             new_memo = st.text_area("📝 進捗メモ・コメント", value=item.get("memo", ""), height=80)
-            new_file = st.file_uploader("📎 提案書（キャプチャー画像 / Excel）を追加・差し替え", type=["png", "jpg", "jpeg", "xlsx", "xls"])
+            new_file = st.file_uploader("📎 提案書（Excel / PDF / 画像）を追加・差し替え ※Excelは自動で1ページPDF化されます", type=["xlsx", "xls", "pdf", "png", "jpg", "jpeg"])
 
             col_s1, col_s2 = st.columns([3, 1])
             with col_s1:
@@ -6669,10 +6711,22 @@ def render_proposal_detail_panel(prop_id):
                     with open(save_path, "wb") as f_out:
                         f_out.write(new_file.getbuffer())
                     upload_file_to_gdrive(save_path, save_fname)
+
                     if ext in (".png", ".jpg", ".jpeg"):
                         item["img_file"] = save_fname
-                    else:
+                    elif ext == ".pdf":
+                        item["pdf_file"] = save_fname
+                    elif ext in (".xlsx", ".xls"):
                         item["excel_file"] = save_fname
+                        with st.spinner("Excelを1ページPDFに自動変換しています..."):
+                            pdf_bytes = convert_excel_to_1page_pdf_via_gdrive(new_file.getvalue(), f"tmp_{prop_id}")
+                            if pdf_bytes:
+                                pdf_fname = f"proposal_{prop_id}.pdf"
+                                pdf_path = os.path.join(GDRIVE_SYNC_DIR, pdf_fname)
+                                with open(pdf_path, "wb") as f_pdf:
+                                    f_pdf.write(pdf_bytes)
+                                upload_file_to_gdrive(pdf_path, pdf_fname)
+                                item["pdf_file"] = pdf_fname
 
                 proposals[target_idx] = item
                 save_proposals_list(proposals)
@@ -6688,17 +6742,39 @@ def render_proposal_detail_panel(prop_id):
                 time.sleep(0.4)
                 st.rerun()
 
-    # --- ② メイン：モニター全幅で画像・Excelを表示 ---
-    img_paths, excel_paths = find_proposal_attachment(prop_id, item.get("img_file", ""))
-    _, excel_paths_2 = find_proposal_attachment(prop_id, item.get("excel_file", ""))
-    for ep in excel_paths_2:
-        if ep not in excel_paths:
-            excel_paths.append(ep)
+    # --- ② メイン：モニター全幅でPDF（1ページ資料）・画像・Excel表を表示 ---
+    img_paths, excel_paths, pdf_paths = find_proposal_attachments_all(
+        prop_id, item.get("img_file", ""), item.get("excel_file", ""), item.get("pdf_file", "")
+    )
 
-    tab_img, tab_xls = st.tabs([
-        f"🖼️ 提案書キャプチャー画像（{len(img_paths)}件）",
-        f"📊 Excelデータ中身（{len(excel_paths)}件）"
+    tab_pdf, tab_img, tab_xls = st.tabs([
+        f"📄 1ページ資料プレビュー（{len(pdf_paths)}件）",
+        f"🖼️ キャプチャー画像（{len(img_paths)}件）",
+        f"📊 Excel表データ（{len(excel_paths)}件）"
     ])
+
+    with tab_pdf:
+        if pdf_paths:
+            for pp in pdf_paths:
+                c_p1, c_p2 = st.columns([3.5, 1.2])
+                with c_p1:
+                    st.caption(f"📄 ファイル: `{os.path.basename(pp)}`")
+                with c_p2:
+                    with open(pp, "rb") as f_pdl:
+                        st.download_button(
+                            label="📥 PDFをダウンロード",
+                            data=f_pdl.read(),
+                            file_name=os.path.basename(pp),
+                            mime="application/pdf",
+                            use_container_width=True,
+                            key=f"dl_prop_pdf_{prop_id}_{os.path.basename(pp)}"
+                        )
+                with open(pp, "rb") as f_p:
+                    b64_pdf = base64.b64encode(f_p.read()).decode("utf-8")
+                pdf_html = f'<iframe src="data:application/pdf;base64,{b64_pdf}#view=FitH" width="100%" height="820" style="border:1px solid #cbd5e1; border-radius:6px;"></iframe>'
+                st.markdown(pdf_html, unsafe_allow_html=True)
+        else:
+            st.info("まだPDF資料がありません。上の「✏️ 編集する」からExcelまたはPDFをアップロードすると、ここに1ページそのままの形で表示されます。")
 
     with tab_img:
         if img_paths:
@@ -6736,7 +6812,6 @@ def render_proposal_detail_panel(prop_id):
                             key=f"dl_prop_xls_{prop_id}_{os.path.basename(ep)}"
                         )
                 try:
-                    # 小数点誤差を丸めてモニター全幅で表示
                     df_sheet = pd.read_excel(xls, sheet_name=sel_sheet).round(2).fillna("")
                     st.dataframe(df_sheet, use_container_width=True, height=h_map[tbl_size])
                 except Exception as e:
@@ -6749,15 +6824,14 @@ if view_type == '💡 商品提案・進捗管理':
     st.markdown("#### 💡 商品提案・進捗管理ダッシュボード")
     proposals_list = load_saved_proposals()
 
-    # 1. 新規提案の登録パネル
-    with st.expander("➕ 新しい商品提案を登録する（画像・Excel添付OK）", expanded=False):
+    with st.expander("➕ 新しい商品提案を登録する（Excelは自動で1ページPDFに変換されます）", expanded=False):
         with st.form("new_proposal_form", clear_on_submit=True):
             existing_nums = [int(re.sub(r'\D', '', str(p.get("prop_id", "0"))) or 0) for p in proposals_list]
             next_id = f"P{(max(existing_nums) + 1 if existing_nums else 1):03d}"
 
             nc1, nc2, nc3, nc4 = st.columns([1.0, 2.2, 1.2, 1.3])
             with nc1: new_pid = st.text_input("提案ID", value=next_id)
-            with nc2: new_pname = st.text_input("提案商品名", placeholder="例: 折りたたみ防災バケツ 10L")
+            with nc2: new_pname = st.text_input("提案商品名", placeholder="例: シリカゲル乾燥剤")
             with nc3: new_pstaff = st.selectbox("提案者", list(STAFF_MAP.values()), index=7)
             with nc4: new_pstat = st.selectbox("初期ステータス", PROPOSAL_STATUS_LIST, index=0)
 
@@ -6765,13 +6839,13 @@ if view_type == '💡 商品提案・進捗管理':
             with nc5: new_pmemo = st.text_input("概要・ポイント・社内サーバーパス等", placeholder="例: 想定下代480円 / サーバー場所: \\\\server\\企画\\...")
             with nc6: new_ptarget = st.text_input("目標確認・発売時期", placeholder="例: 2026年12月")
 
-            up_prop_files = st.file_uploader("📎 提案書キャプチャー画像 / Excel（複数同時OK）", type=["png", "jpg", "jpeg", "xlsx", "xls"], accept_multiple_files=True)
+            up_prop_files = st.file_uploader("📎 提案書（Excel / PDF / 画像・複数同時OK）", type=["xlsx", "xls", "pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
 
             if st.form_submit_button("✅ 商品提案を登録する", type="primary", use_container_width=True):
                 if not new_pname.strip():
                     st.warning("提案商品名を入力してください。")
                 else:
-                    img_f, xls_f = "", ""
+                    img_f, xls_f, pdf_f = "", "", ""
                     for uf in (up_prop_files or []):
                         ext = os.path.splitext(uf.name)[1].lower()
                         save_fn = f"proposal_{new_pid.strip()}{ext}"
@@ -6779,10 +6853,22 @@ if view_type == '💡 商品提案・進捗管理':
                         with open(save_p, "wb") as f_o:
                             f_o.write(uf.getbuffer())
                         upload_file_to_gdrive(save_p, save_fn)
+
                         if ext in (".png", ".jpg", ".jpeg"):
                             img_f = save_fn
-                        else:
+                        elif ext == ".pdf":
+                            pdf_f = save_fn
+                        elif ext in (".xlsx", ".xls"):
                             xls_f = save_fn
+                            with st.spinner("Excelを1ページPDFに自動変換しています..."):
+                                pdf_bytes = convert_excel_to_1page_pdf_via_gdrive(uf.getvalue(), f"tmp_{new_pid.strip()}")
+                                if pdf_bytes:
+                                    pdf_fn = f"proposal_{new_pid.strip()}.pdf"
+                                    pdf_p = os.path.join(GDRIVE_SYNC_DIR, pdf_fn)
+                                    with open(pdf_p, "wb") as f_pdf:
+                                        f_pdf.write(pdf_bytes)
+                                    upload_file_to_gdrive(pdf_p, pdf_fn)
+                                    pdf_f = pdf_fn
 
                     proposals_list.insert(0, {
                         "prop_id": new_pid.strip(),
@@ -6793,6 +6879,7 @@ if view_type == '💡 商品提案・進捗管理':
                         "memo": new_pmemo.strip(),
                         "img_file": img_f,
                         "excel_file": xls_f,
+                        "pdf_file": pdf_f,
                         "updated_at": datetime.now().strftime("%Y/%m/%d %H:%M")
                     })
                     save_proposals_list(proposals_list)
@@ -6800,7 +6887,6 @@ if view_type == '💡 商品提案・進捗管理':
                     time.sleep(0.4)
                     st.rerun()
 
-    # 2. 進捗ステータス別の件数サマリー
     stat_counts = {s: sum(1 for p in proposals_list if p.get("status") == s) for s in PROPOSAL_STATUS_LIST}
     st.markdown(f"""
     <div class="total-card">
@@ -6813,7 +6899,6 @@ if view_type == '💡 商品提案・進捗管理':
     </div>
     """, unsafe_allow_html=True)
 
-    # 3. 絞り込みフィルター
     pf1, pf2, pf3 = st.columns([1.3, 1.3, 2.0])
     with pf1:
         f_pstaff = st.selectbox("👤 提案者で絞り込み", ["（すべて）"] + list(STAFF_MAP.values()), key="prop_filt_staff")
@@ -6822,7 +6907,6 @@ if view_type == '💡 商品提案・進捗管理':
     with pf3:
         f_pkw = st.text_input("🔍 商品名・ID・メモで検索", placeholder="キーワードを入力...", key="prop_filt_kw")
 
-    # 4. 一覧テーブル表示
     rows_p = []
     for p in proposals_list:
         if f_pstaff != "（すべて）" and p.get("staff") != f_pstaff:
@@ -6832,26 +6916,27 @@ if view_type == '💡 商品提案・進捗管理':
         if f_pkw.strip() and f_pkw.strip().lower() not in json.dumps(p, ensure_ascii=False).lower():
             continue
 
-        imgs, xlss = find_proposal_attachment(p.get("prop_id", ""), p.get("img_file", ""))
-        _, xlss2 = find_proposal_attachment(p.get("prop_id", ""), p.get("excel_file", ""))
+        imgs, xlss, pdfs = find_proposal_attachments_all(
+            p.get("prop_id", ""), p.get("img_file", ""), p.get("excel_file", ""), p.get("pdf_file", "")
+        )
+        has_pdf = "📄" if pdfs else "-"
         has_img = "🖼️" if imgs else "-"
-        has_xls = "📊" if (xlss or xlss2) else "-"
+        has_xls = "📊" if xlss else "-"
 
         rows_p.append({
             "商品コード": p.get("prop_id", ""),
             "提案商品名": p.get("prod_name", ""),
             "提案者": p.get("staff", ""),
             "進捗ステータス": p.get("status", ""),
-            "資料": f"{has_img} / {has_xls}",
+            "資料": f"{has_pdf} / {has_img} / {has_xls}",
             "目標時期": p.get("target_date", ""),
             "進捗メモ": p.get("memo", ""),
             "更新日時": p.get("updated_at", "")
         })
 
     if rows_p:
-        st.caption("💡 表内の **「🔍 提案ID（商品コード欄）」** をクリックすると、すぐ下に **モニター全幅で画像・Excelプレビュー** が表示されます。")
+        st.caption("💡 表内の **「🔍 提案ID（商品コード欄）」** をクリックすると、すぐ下に **モニター全幅で1ページ資料プレビュー** が表示されます。")
         prop_disp_df = pd.DataFrame(rows_p)
-        # 一覧表はコンパクトにして下にプレビューが見えやすくする
         clicked_prop = render_clickable_product_table(prop_disp_df, comp_key="proposal_clickable_tbl_v1", max_h=280)
         if clicked_prop and isinstance(clicked_prop, dict) and clicked_prop.get("sku"):
             last_pr_ts = st.session_state.get("_last_prop_click_ts", 0)
@@ -6861,7 +6946,6 @@ if view_type == '💡 商品提案・進捗管理':
                 st.session_state["selected_prop_id"] = clicked_prop["sku"]
                 st.rerun()
 
-        # 5. クリックされた提案の詳細・Excel・画像をモニター全幅で下に表示
         sel_pid = st.session_state.get("selected_prop_id")
         if sel_pid:
             st.divider()
