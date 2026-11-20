@@ -6667,41 +6667,6 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
     except Exception as e:
         return None, str(e)
 
-@st.cache_data(show_spinner=False)
-def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
-    """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す"""
-    import subprocess
-        
-    """LibreOfficeを使ってExcelをPDFに変換する（Googleドライブの容量制限を回避）"""
-    import subprocess
-    import tempfile
-
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            xlsx_path = os.path.join(tmpdir, f"{temp_name}.xlsx")
-            with open(xlsx_path, "wb") as f:
-                f.write(excel_bytes)
-
-            cmd = [
-                "libreoffice",
-                "--headless",
-                "--convert-to", "pdf",
-                "--outdir", tmpdir,
-                xlsx_path
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            pdf_path = os.path.join(tmpdir, f"{temp_name}.pdf")
-
-            if os.path.exists(pdf_path):
-                with open(pdf_path, "rb") as f_pdf:
-                    return f_pdf.read(), "OK"
-            else:
-                return None, f"変換失敗: {res.stderr or res.stdout}"
-    except FileNotFoundError:
-        return None, "LibreOfficeが見つかりません。GitHubの packages.txt に libreoffice を追加してください。"
-    except Exception as e:
-        return None, str(e)
-
 def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""):
     """提案IDや登録ファイル名から画像・Excel・PDFを探す（同じファイル名の重複を除外）"""
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
