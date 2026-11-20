@@ -6614,7 +6614,7 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
 
 @st.cache_data(show_spinner=False)
 def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
-    """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す"""
+    """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す（.xlsにも対応）"""
     import subprocess
     import tempfile
     import openpyxl
@@ -6623,16 +6623,35 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             ext = os.path.splitext(excel_path)[1].lower()
-            target_for_pdf = excel_path
+            work_xlsx = excel_path
 
-            # .xlsx の場合は指定シートだけ抜き出して横向き1ページ設定を適用
-            if ext == ".xlsx":
-                wb = openpyxl.load_workbook(excel_path)
-                for name in list(wb.sheetnames):
-                    if name != sheet_name:
-                        del wb[name]
+            # 1. 古い .xls 形式の場合は、まず LibreOffice で一時的に .xlsx へ変換する
+            if ext != ".xlsx":
+                conv_cmd = [
+                    "libreoffice",
+                    "--headless",
+                    "--convert-to", "xlsx",
+                    "--outdir", tmpdir,
+                    excel_path
+                ]
+                subprocess.run(conv_cmd, capture_output=True, text=True, timeout=60)
+                base_name = os.path.splitext(os.path.basename(excel_path))[0] + ".xlsx"
+                converted_path = os.path.join(tmpdir, base_name)
+                if os.path.exists(converted_path):
+                    work_xlsx = converted_path
 
-                ws = wb[sheet_name]
+            # 2. 指定シートだけを残し、横向き・1ページ収め設定を強制適用する
+            target_for_pdf = work_xlsx
+            if work_xlsx.lower().endswith(".xlsx"):
+                wb = openpyxl.load_workbook(work_xlsx)
+                if sheet_name in wb.sheetnames:
+                    for name in list(wb.sheetnames):
+                        if name != sheet_name:
+                            del wb[name]
+                    ws = wb[sheet_name]
+                else:
+                    ws = wb.active
+
                 ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
                 ws.page_setup.paperSize = ws.PAPERSIZE_A4
                 ws.sheet_properties.pageSetUpPr.fitToPage = True
@@ -6648,7 +6667,7 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
                 wb.close()
                 target_for_pdf = tmp_xlsx
 
-            # LibreOfficeでPDFに変換
+            # 3. LibreOfficeでPDFに変換
             cmd = [
                 "libreoffice",
                 "--headless",
@@ -6662,7 +6681,7 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
             if not os.path.exists(tmp_pdf):
                 return None, f"PDF変換失敗: {res.stderr or res.stdout}"
 
-            # PyMuPDFで高画質PNG画像に変換
+            # 4. PyMuPDFで高画質PNG画像に変換
             doc = fitz.open(tmp_pdf)
             imgs = []
             for page in doc:
