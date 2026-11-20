@@ -6627,16 +6627,23 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
         return None
 
 def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""):
-    """提案IDや登録ファイル名から画像・Excel・PDFをすべて探す"""
+    """提案IDや登録ファイル名から画像・Excel・PDFを探す（同じファイル名の重複を除外）"""
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
     found_imgs, found_excels, found_pdfs = [], [], []
+    seen_names = set()
+
+    def _add_unique(path_str, target_list):
+        bname = os.path.basename(path_str).lower()
+        if bname not in seen_names:
+            seen_names.add(bname)
+            target_list.append(path_str)
 
     for hint, target_list in [(img_hint, found_imgs), (xls_hint, found_excels), (pdf_hint, found_pdfs)]:
         if hint:
             for d in search_dirs:
                 p = os.path.join(d, hint)
-                if os.path.exists(p) and p not in target_list:
-                    target_list.append(p)
+                if os.path.exists(p):
+                    _add_unique(p, target_list)
                     break
 
     for d in search_dirs:
@@ -6644,12 +6651,12 @@ def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""
             continue
         for ext in ("*.png", "*.jpg", "*.jpeg"):
             for fp in glob.glob(os.path.join(d, f"*{prop_id}*{ext[1:]}")):
-                if fp not in found_imgs: found_imgs.append(fp)
+                _add_unique(fp, found_imgs)
         for ext in ("*.xlsx", "*.xls"):
             for fp in glob.glob(os.path.join(d, f"*{prop_id}*{ext[1:]}")):
-                if fp not in found_excels: found_excels.append(fp)
+                _add_unique(fp, found_excels)
         for fp in glob.glob(os.path.join(d, f"*{prop_id}*.pdf")):
-            if fp not in found_pdfs: found_pdfs.append(fp)
+            _add_unique(fp, found_pdfs)
 
     return found_imgs, found_excels, found_pdfs
 
