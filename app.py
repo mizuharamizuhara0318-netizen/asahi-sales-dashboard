@@ -6589,7 +6589,6 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
     try:
         from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
-        # 1. Googleスプレッドシート形式に変換しながら一時アップロード
         file_metadata = {
             "name": temp_name,
             "parents": [folder_id],
@@ -6605,7 +6604,6 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
         ).execute()
         slide_or_sheet_id = uploaded.get("id")
 
-        # 2. Drive API標準の export_media でPDFとしてダウンロード
         req = service.files().export_media(fileId=slide_or_sheet_id, mimeType="application/pdf")
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, req)
@@ -6618,7 +6616,6 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
     except Exception as e:
         return None, str(e)
     finally:
-        # 一時ファイルを確実に削除
         if slide_or_sheet_id:
             try:
                 service.files().delete(fileId=slide_or_sheet_id, supportsAllDrives=True).execute()
