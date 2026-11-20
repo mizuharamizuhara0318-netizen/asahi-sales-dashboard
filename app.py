@@ -6763,10 +6763,18 @@ def render_proposal_detail_panel(prop_id):
                             use_container_width=True,
                             key=f"dl_prop_pdf_{prop_id}_{os.path.basename(pp)}"
                         )
-                with open(pp, "rb") as f_p:
-                    b64_pdf = base64.b64encode(f_p.read()).decode("utf-8")
-                pdf_html = f'<iframe src="data:application/pdf;base64,{b64_pdf}#view=FitH" width="100%" height="820" style="border:1px solid #cbd5e1; border-radius:6px;"></iframe>'
-                st.markdown(pdf_html, unsafe_allow_html=True)
+                try:
+                    import fitz  # PyMuPDF
+                    doc = fitz.open(pp)
+                    for page_idx, page in enumerate(doc):
+                        # 解像度2倍（高画質）でPNG画像化して全幅表示
+                        pix = page.get_pixmap(dpi=150)
+                        st.image(pix.tobytes("png"), use_container_width=True)
+                        if len(doc) > 1:
+                            st.caption(f"ページ {page_idx + 1} / {len(doc)}")
+                    doc.close()
+                except Exception as e:
+                    st.error(f"PDF画像化エラー: {e}")
         else:
             if excel_paths:
                 st.info("まだPDF資料が作成されていません。下のボタンで登録済みExcelから今すぐ生成できます。")
