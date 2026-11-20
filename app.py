@@ -6729,7 +6729,7 @@ def render_proposal_detail_panel(prop_id):
                     elif ext in (".xlsx", ".xls"):
                         item["excel_file"] = save_fname
                         with st.spinner("Excelを1ページPDFに自動変換しています..."):
-                            pdf_bytes = convert_excel_to_1page_pdf_via_gdrive(new_file.getvalue(), f"tmp_{prop_id}")
+                            pdf_bytes, conv_err = convert_excel_to_1page_pdf_via_gdrive(new_file.getvalue(), f"tmp_{prop_id}")
                             if pdf_bytes:
                                 pdf_fname = f"proposal_{prop_id}.pdf"
                                 pdf_path = os.path.join(GDRIVE_SYNC_DIR, pdf_fname)
@@ -6763,28 +6763,30 @@ def render_proposal_detail_panel(prop_id):
         f"📊 Excel表データ（{len(excel_paths)}件）"
     ])
 
-    with tab_pdf:
-        if pdf_paths:
-            for pp in pdf_paths:
-                c_p1, c_p2 = st.columns([3.5, 1.2])
-                with c_p1:
-                    st.caption(f"📄 ファイル: `{os.path.basename(pp)}`")
-                with c_p2:
-                    with open(pp, "rb") as f_pdl:
-                        st.download_button(
-                            label="📥 PDFをダウンロード",
-                            data=f_pdl.read(),
-                            file_name=os.path.basename(pp),
-                            mime="application/pdf",
-                            use_container_width=True,
-                            key=f"dl_prop_pdf_{prop_id}_{os.path.basename(pp)}"
-                        )
-                with open(pp, "rb") as f_p:
-                    b64_pdf = base64.b64encode(f_p.read()).decode("utf-8")
-                pdf_html = f'<iframe src="data:application/pdf;base64,{b64_pdf}#view=FitH" width="100%" height="820" style="border:1px solid #cbd5e1; border-radius:6px;"></iframe>'
-                st.markdown(pdf_html, unsafe_allow_html=True)
-        else:
-            st.info("まだPDF資料がありません。上の「✏️ 編集する」からExcelまたはPDFをアップロードすると、ここに1ページそのままの形で表示されます。")
+    else:
+            if excel_paths:
+                st.info("まだPDF資料が作成されていません。下のボタンで登録済みExcelから今すぐ生成できます。")
+                if st.button("🔄 登録済みExcelからPDF資料を今すぐ生成する", type="primary", key=f"btn_gen_pdf_{prop_id}"):
+                    with st.spinner("Googleドライブ経由でPDFに変換しています..."):
+                        with open(excel_paths[0], "rb") as f_x:
+                            x_bytes = f_x.read()
+                        pdf_bytes, conv_err = convert_excel_to_1page_pdf_via_gdrive(x_bytes, f"tmp_{prop_id}")
+                        if pdf_bytes:
+                            pdf_fname = f"proposal_{prop_id}.pdf"
+                            pdf_path = os.path.join(GDRIVE_SYNC_DIR, pdf_fname)
+                            with open(pdf_path, "wb") as f_pdf:
+                                f_pdf.write(pdf_bytes)
+                            upload_file_to_gdrive(pdf_path, pdf_fname)
+                            item["pdf_file"] = pdf_fname
+                            proposals[target_idx] = item
+                            save_proposals_list(proposals)
+                            st.success("✅ PDFを生成しました！")
+                            time.sleep(0.4)
+                            st.rerun()
+                        else:
+                            st.error(f"PDF変換エラー: {conv_err}")
+            else:
+                st.info("まだPDF資料がありません。上の「✏️ 編集する」からExcelまたはPDFをアップロードしてください。")
 
     with tab_img:
         if img_paths:
