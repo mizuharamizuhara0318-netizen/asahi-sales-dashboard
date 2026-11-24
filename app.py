@@ -5561,10 +5561,11 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
 
     prog_bar = None if silent else st.progress(0, text="スマレジEC・B2Bから受注データを取得しています...")
 
-    # ステップ1：指定期間（例：11/01〜11/17）の注文を最後まで全件取得
+    # ステップ1：指定期間の注文を最後まで全件取得（1回最大50件なのでoffsetを50ずつ進めて全件取得）
     offset = 0
     limit = 50
-    for page_i in range(max_pages):
+    fetched_in_step1 = 0
+    for page_i in range(max(max_pages, 60)):
         q_params = urllib.parse.urlencode({
             "order_date_from": f"{date_from_str} 00:00:00",
             "order_date_to": f"{date_to_str} 23:59:59",
@@ -5574,26 +5575,38 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
         url = f"{B2B_DOMAIN}/api/v1/orders.php?{q_params}"
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=25) as resp:
                 data = json.loads(resp.read().decode("utf-8", errors="replace"))
             orders_batch = data.get("orders", [])
-            if not orders_batch:
+            if not isinstance(orders_batch, list) or not orders_batch:
                 break
             for od in orders_batch:
-                oid = str(od.get("serial_order_id", "")).strip()
-                if oid:
-                    orders_map[oid] = _slim_b2b_order(od)
+                if isinstance(od, dict):
+                    oid = str(od.get("serial_order_id", "")).strip()
+                    if oid:
+                        orders_map[oid] = _slim_b2b_order(od)
+                        fetched_in_step1 += 1
             if prog_bar is not None:
-                prog_bar.progress(min(1.0, (page_i + 1) / max_pages), text=f"当月受注分を取得中... ({len(orders_map):,} 件読込済)")
+                prog_bar.progress(
+                    min(1.0, (page_i + 1) / max(max_pages, 60)),
+                    text=f"受注データを取得中...（今回取得: {fetched_in_step1:,} 件 / キャッシュ合計: {len(orders_map):,} 件）"
+                )
             if len(orders_batch) < limit:
                 break
             offset += limit
-            time.sleep(1.02)
+            time.sleep(1.05)
+        except urllib.error.HTTPError as e:
+            if prog_bar is not None:
+                prog_bar.empty()
+            up_str = _save_b2b_orders_disk_cache(orders_map, sync_to_drive=False)
+            if e.code in (401, 403):
+                return list(orders_map.values()), "AUTH_EXPIRED: アクセストークンの有効期限切れまたは権限エラーです。", up_str
+            return list(orders_map.values()), f"API応答エラー（HTTP {e.code}）が発生しました。", up_str
         except Exception as e:
             if prog_bar is not None:
                 prog_bar.empty()
             up_str = _save_b2b_orders_disk_cache(orders_map, sync_to_drive=False)
-            return list(orders_map.values()), f"API通信エラー: {str(e)}", up_str
+            return list(orders_map.values()), f"API通信を確認できませんでした（{str(e)}）。", up_str
 
     # ステップ2：過去受注→当月出荷分の6件の取りこぼしを防ぐため、直近の期間から逆順（①15日前〜前日 ➔ ②35日前〜16日前 ➔ ③75日前〜36日前）で細かく区切って確実に全件スキャン！
     if commit_from_str and not silent:
