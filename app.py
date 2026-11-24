@@ -5448,21 +5448,7 @@ def get_valid_b2b_access_token():
     st.session_state["_b2b_needs_reauth"] = False
     return acc_tok
 
-def get_valid_b2b_access_token():
-    t_info = load_b2b_token_info()
-    acc_tok = str(t_info.get("access_token", "") or "").strip()
-    ref_tok = str(t_info.get("refresh_token", "") or "").strip()
-    saved_at = float(t_info.get("saved_at", time.time()))
-    try:
-        expires_in = float(t_info.get("expires_in", 8640000))
-    except Exception:
-        expires_in = 8640000.0
-    # 有効期限（通常100日＝8,640,000秒）の1日前を切ったら自動更新（もしexpires_inが異常に小さい値でも誤更新しないよう保護）
-    if acc_tok and ref_tok and expires_in >= 3600 and (time.time() - saved_at) > (expires_in - 86400):
-        new_tok = refresh_b2b_access_token(ref_tok)
-        if new_tok:
-            return new_tok
-    return acc_tok
+B2B_ORDERS_CACHE_FILE = os.path.join(GDRIVE_SYNC_DIR, "b2b_orders_cache.json")
 
 B2B_ORDERS_CACHE_FILE = os.path.join(GDRIVE_SYNC_DIR, "b2b_orders_cache.json")
 
@@ -5662,14 +5648,17 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         f"&response_type=code&state=asahi2026"
     )
     current_token = get_valid_b2b_access_token()
+    if st.session_state.get("_b2b_token_notice"):
+        st.info(st.session_state["_b2b_token_notice"])
 
-    with st.expander("🔑 API接続ステータス・初回トークン設定（100日間有効）", expanded=not bool(current_token)):
-        if current_token:
+    need_open_auth = (not bool(current_token)) or bool(st.session_state.get("_b2b_needs_reauth", False))
+    with st.expander("🔑 API接続ステータス・トークン設定（100日間有効）", expanded=need_open_auth):
+        if current_token and not st.session_state.get("_b2b_needs_reauth", False):
             t_info = load_b2b_token_info()
             saved_dt = (datetime.utcfromtimestamp(t_info.get("saved_at", time.time())) + timedelta(hours=9)).strftime("%Y/%m/%d %H:%M")
             st.success(f"✅ スマレジEC・B2B API 接続済み（トークン取得日時: {saved_dt} ／ 有効期間: 100日間）")
         else:
-            st.warning("⚠️ 初回のみ、以下の手順①・②でアクセストークンを取得してください（1回取得すれば100日間自動で繋がります）。")
+            st.warning("⚠️ アクセストークンが未設定または有効期限切れです。手順①から新しい認可コードを取得して保存してください。")
 
         st.markdown(f"**手順①：** [👉 ここをクリックしてスマレジEC・B2Bの認可画面を開く]({auth_url}) （承認すると `https://localhost:8501/?code=...` に移動します）")
         col_c_in, col_c_btn = st.columns([3.2, 1.2])
@@ -5679,13 +5668,18 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             st.write("")
             if st.button("🚀 トークンを発行して保存", type="primary", use_container_width=True):
                 if in_auth_code.strip():
-                    ok, res_obj = exchange_b2b_code_for_token(in_auth_code.strip())
-                    if ok:
-                        st.success("✅ アクセストークンの取得・保存に成功しました！")
-                        time.sleep(0.5)
-                        st.rerun()
-                    else:
-                        st.error(f"トークン取得失敗: {res_obj}")
+                    try:
+                        ok, res_obj = exchange_b2b_code_for_token(in_auth_code.strip())
+                        if ok:
+                            st.session_state["_b2b_needs_reauth"] = False
+                            st.session_state["_b2b_token_notice"] = ""
+                            st.success("✅ アクセストークンの取得・保存に成功しました！")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.warning(f"⚠️ トークンを取得できませんでした（使用済みコードの可能性があります）。手順①のリンクから新しく認可コードを取得してください。詳細: {res_obj}")
+                    except Exception as e_auth:
+                        st.warning(f"⚠️ 認可コードの有効期限切れ、またはすでに使用済みのコードです。手順①のリンクから再度開いて新しいURLを貼り付けてください。（{e_auth}）")
 
     if not current_token:
         st.stop()
@@ -5756,9 +5750,14 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         _b2b_background_poller()
 
     raw_orders = cached_orders_list
-    if api_msg != "OK" and not raw_orders:
-        st.error(f"⚠️ {api_msg}")
-        st.stop()
+    if api_msg != "OK":
+        if "AUTH_EXPIRED" in api_msg:
+            st.session_state["_b2b_needs_reauth"] = True
+            st.warning("⚠️ アクセストークンの有効期限が切れているため最新データを取得できませんでした。上の「🔑 API接続ステータス」から再連携してください（以下は保存済みキャッシュを表示しています）。")
+        else:
+            st.warning(f"⚠️ 最新API同期の注意: {api_msg}")
+        if not raw_orders:
+            st.stop()
 
     # 受注ヘッダ＆商品明細の展開（スマレジEC・B2Bの期間別売上CSVと完全同一の計算式）
     order_header_rows = []
@@ -5776,8 +5775,8 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
             od.get("plg_raku2_order_date") or od.get("order_date") or od.get("create_date") or hasso_dt or commit_dt or ""
         ).strip()
 
-        ord_date_10 = ord_dt_raw[:10] if len(ord_dt_raw) >= 10 else ""
-        commit_date_10 = commit_dt[:10] if (commit_dt and len(commit_dt) >= 10 and not commit_dt.startswith("0000")) else ""
+        ord_date_10 = ord_dt_raw[:10].replace("/", "-") if len(ord_dt_raw) >= 10 else ""
+        commit_date_10 = commit_dt[:10].replace("/", "-") if (commit_dt and len(commit_dt) >= 10 and not commit_dt.startswith("0000")) else ""
 
         # 出荷日(commit_date_10)が入っている全伝票（キャンセル除く）を出荷済とする
         is_shipped = bool(commit_date_10)
@@ -5891,9 +5890,12 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
     # ★ 4大サマリーカード集計 ＆ クリックで即座に開く詳細POP（モーダル）データ構築
     # ========================================================
     today_str = now_d.strftime("%Y-%m-%d")
+    today_slash = now_d.strftime("%Y/%m/%d")
     unshipped_df = hdr_df[hdr_df["区分"].str.contains("未出荷")].copy()
     shipped_df = hdr_df[hdr_df["区分"].str.contains("出荷済")].copy()
-    today_df = hdr_df[hdr_df["受注日時"].str.startswith(today_str)].copy()
+    today_df = hdr_df[
+        hdr_df["受注日時"].str.startswith(today_str) | hdr_df["受注日時"].str.startswith(today_slash)
+    ].copy()
 
     unshipped_amt = int(unshipped_df["商品代金(税別)"].sum())
     unshipped_prof = int(unshipped_df["粗利額"].sum())
