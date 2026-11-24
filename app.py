@@ -5385,9 +5385,10 @@ def exchange_b2b_code_for_token(raw_code_or_url):
             return True, d_tok
         return False, res_json
 
-def refresh_b2b_access_token(refresh_tok):
+def refresh_b2b_access_token_with_status(refresh_tok):
     if not refresh_tok:
-        return None
+        return None, "リフレッシュトークンがありません。"
+    last_reason = "トークンの自動更新に失敗しました。"
     for ep in ["/api/oauth/token.php", "/oauth/token.php"]:
         try:
             token_url = f"{B2B_DOMAIN}{ep}"
@@ -5405,10 +5406,47 @@ def refresh_b2b_access_token(refresh_tok):
                     if not d_tok.get("refresh_token"):
                         d_tok["refresh_token"] = refresh_tok
                     save_b2b_token_info(d_tok)
-                    return d_tok["access_token"]
+                    return d_tok["access_token"], "自動更新完了"
+                if isinstance(res_json, dict) and res_json.get("error_description"):
+                    last_reason = str(res_json.get("error_description"))
+        except urllib.error.HTTPError as e:
+            if e.code in (400, 401, 403):
+                last_reason = "リフレッシュトークンの有効期限が切れているため、再認可が必要です。"
+            else:
+                last_reason = f"認証サーバーとの通信が一時的に不安定です（HTTP {e.code}）。"
         except Exception:
-            continue
-    return None
+            last_reason = "認証サーバーへの接続を確認できませんでした。"
+    return None, last_reason
+
+def get_valid_b2b_access_token():
+    t_info = load_b2b_token_info()
+    acc_tok = str(t_info.get("access_token", "") or "").strip()
+    ref_tok = str(t_info.get("refresh_token", "") or "").strip()
+    saved_at = float(t_info.get("saved_at", time.time()))
+    try:
+        expires_in = float(t_info.get("expires_in", 8640000))
+    except Exception:
+        expires_in = 8640000.0
+
+    st.session_state.setdefault("_b2b_token_notice", "")
+    st.session_state.setdefault("_b2b_needs_reauth", False)
+
+    if not acc_tok:
+        st.session_state["_b2b_needs_reauth"] = True
+        return ""
+
+    # 有効期限の1日前を切ったら自動更新を試行
+    if ref_tok and expires_in >= 3600 and (time.time() - saved_at) > (expires_in - 86400):
+        new_tok, reason_msg = refresh_b2b_access_token_with_status(ref_tok)
+        if new_tok:
+            st.session_state["_b2b_token_notice"] = "🔄 アクセストークンの有効期限が近づいていたため、新しいトークンへ自動更新しました。"
+            st.session_state["_b2b_needs_reauth"] = False
+            return new_tok
+        st.session_state["_b2b_token_notice"] = f"⏳ {reason_msg}"
+        st.session_state["_b2b_needs_reauth"] = True
+
+    st.session_state["_b2b_needs_reauth"] = False
+    return acc_tok
 
 def get_valid_b2b_access_token():
     t_info = load_b2b_token_info()
