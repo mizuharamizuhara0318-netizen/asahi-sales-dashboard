@@ -5375,15 +5375,27 @@ def exchange_b2b_code_for_token(raw_code_or_url):
         "grant_type": "client_credentials",
         "redirect_uri": B2B_REDIRECT_URI
     }).encode("utf-8")
-    req = urllib.request.Request(token_url, data=params, method="POST")
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        res_body = resp.read().decode("utf-8", errors="replace")
-        res_json = json.loads(res_body)
-        d_tok = _extract_token_dict(res_json)
-        if d_tok:
-            save_b2b_token_info(d_tok)
-            return True, d_tok
-        return False, res_json
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/x-www-form-urlencoded"
+    }
+    req = urllib.request.Request(token_url, data=params, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            res_body = resp.read().decode("utf-8", errors="replace")
+            res_json = json.loads(res_body)
+            d_tok = _extract_token_dict(res_json)
+            if d_tok:
+                save_b2b_token_info(d_tok)
+                return True, d_tok
+            return False, res_json
+    except urllib.error.HTTPError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        return False, f"HTTP {e.code} 応答本文: {err_body[:400]}"
 
 def refresh_b2b_access_token_with_status(refresh_tok):
     if not refresh_tok:
@@ -5543,7 +5555,10 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
         return [], "アクセストークンが未設定です", ""
     cache_data = _load_b2b_orders_disk_cache()
     orders_map = cache_data.get("orders_map", {})
-    headers = {"Authorization": f"Bearer {access_token}"}
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
 
     prog_bar = None if silent else st.progress(0, text="スマレジEC・B2Bから受注データを取得しています...")
 
@@ -5584,10 +5599,15 @@ def fetch_b2b_orders_into_cache(date_from_str, date_to_str, access_token, max_pa
         except urllib.error.HTTPError as e:
             if prog_bar is not None:
                 prog_bar.empty()
+            err_body = ""
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")[:300]
+            except Exception:
+                pass
             up_str = _save_b2b_orders_disk_cache(orders_map, sync_to_drive=False)
-            if e.code in (401, 403):
-                return list(orders_map.values()), "AUTH_EXPIRED: アクセストークンの有効期限切れまたは権限エラーです。", up_str
-            return list(orders_map.values()), f"API応答エラー（HTTP {e.code}）が発生しました。", up_str
+            if e.code == 401:
+                return list(orders_map.values()), f"AUTH_EXPIRED (401): {err_body}", up_str
+            return list(orders_map.values()), f"HTTP {e.code} 拒否エラー: {err_body}", up_str
         except Exception as e:
             if prog_bar is not None:
                 prog_bar.empty()
