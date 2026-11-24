@@ -5736,20 +5736,21 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
 
     with c_ap5:
         st.write("")
-        if st.button("⚡ 今すぐ最新を取得", type="primary", use_container_width=True):
-            # 直近4日分を取得してステータス変更（本日出荷完了になった伝票等）も即座に反映
-            quick_from = (now_d - pd.Timedelta(days=4)).strftime("%Y-%m-%d")
-            cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=12, silent=False)
+        if st.button("⚡ ドライブから最新を読込", type="primary", use_container_width=True):
+            # ローカルキャッシュを一度消してGoogleドライブの最新 b2b_orders_cache.json を取り直す
+            if os.path.exists(B2B_ORDERS_CACHE_FILE):
+                try:
+                    os.remove(B2B_ORDERS_CACHE_FILE)
+                except Exception:
+                    pass
+            cache_obj = _load_b2b_orders_disk_cache()
+            cached_orders_list = list(cache_obj.get("orders_map", {}).values())
+            last_up_str = cache_obj.get("updated_at", "未取得")
+            st.rerun()
     with c_ap6:
         st.write("")
-        if st.button("🔄 月初から全件再取得", use_container_width=True):
+        if st.button("🔄 API直接取得(ローカル用)", use_container_width=True):
             cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(d_from_str, d_to_str, current_token, max_pages=50, silent=False, commit_from_str=d_from_str)
-
-    if not cached_orders_list:
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(d_from_str, d_to_str, current_token, max_pages=50, silent=False, commit_from_str=d_from_str)
-    elif (time.time() - last_sync_ts) >= 120:
-        quick_from = (now_d - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
-        cached_orders_list, api_msg, last_up_str = fetch_b2b_orders_into_cache(quick_from, today_jst_str, current_token, max_pages=6, silent=True)
 
     col_cap_l, col_cap_r = st.columns([3.8, 1.2])
     with col_cap_l:
