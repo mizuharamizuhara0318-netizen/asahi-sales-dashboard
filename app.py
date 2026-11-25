@@ -5759,15 +5759,25 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         enable_auto_timer = st.toggle("⏱️ 放置時も5分自動更新", value=False, key="b2b_auto_timer_toggle")
 
     if enable_auto_timer and hasattr(st, "fragment"):
+        st.session_state.setdefault("_last_b2b_auto_sync_ts", time.time())
+
         @st.fragment(run_every=300)
         def _b2b_background_poller():
             import gc
             prev_ts = st.session_state.get("_last_b2b_auto_sync_ts", 0.0)
             if (time.time() - prev_ts) >= 290:
-                q_from = (now_d - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
-                fetch_b2b_orders_into_cache(q_from, today_jst_str, current_token, max_pages=5, silent=True)
+                if os.path.exists(B2B_ORDERS_CACHE_FILE):
+                    try:
+                        os.remove(B2B_ORDERS_CACHE_FILE)
+                    except Exception:
+                        pass
+                _load_b2b_orders_disk_cache()
+                st.session_state["_last_b2b_auto_sync_ts"] = time.time()
                 gc.collect()
-                st.rerun()
+                try:
+                    st.rerun(scope="app")
+                except TypeError:
+                    st.rerun()
         _b2b_background_poller()
 
     raw_orders = cached_orders_list
