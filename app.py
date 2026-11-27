@@ -6862,10 +6862,10 @@ def load_saved_proposals():
     for d_item in drive_list:
         did = d_item["prop_id"]
         drel = d_item.get("drive_rel_path", "")
-        if did in saved_by_id or (drel and drel in saved_by_rel):
+        is_child_item = bool(d_item.get("parent_id"))
+        if did in saved_by_id or (not is_child_item and drel and drel in saved_by_rel):
             continue
         merged.append(d_item)
-    return merged
 
 
 def save_proposals_list(p_list):
