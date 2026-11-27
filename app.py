@@ -6767,6 +6767,12 @@ def load_saved_proposals():
             except Exception:
                 pass
 
+    # 初回に取り込んだ旧形式データ（IDに「/」が含まれる長いパス形式）を自動除外
+    saved_list = [
+        p for p in saved_list
+        if "/" not in str(p.get("prop_id", ""))
+    ]
+
     drive_list, _ = load_drive_extracted_proposals()
     if not drive_list:
         return saved_list
@@ -6786,7 +6792,6 @@ def load_saved_proposals():
             continue
         merged.append(d_item)
     return merged
-
 def save_proposals_list(p_list):
     target_f = SAVED_PROPOSALS_FILE if os.path.exists(os.path.dirname(SAVED_PROPOSALS_FILE)) else LOCAL_PROPOSALS_FILE
     try:
