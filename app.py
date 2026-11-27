@@ -7634,7 +7634,9 @@ if view_type == '💡 商品提案・進捗管理':
         st.write("")
         only_stale_chk = st.checkbox(f"⚠️ 滞留({stale_threshold_days}日+)のみ", value=False, key="prop_only_stale")
 
-    expanded_parents = st.session_state.setdefault("expanded_prop_parents", set())
+    # 手動で折りたたんだ親だけを記憶（それ以外の展開済み親は基本オープン）
+    collapsed_parents = st.session_state.setdefault("collapsed_prop_parents", set())
+    expanded_parents = {pid for pid in children_by_parent.keys() if pid not in collapsed_parents}
 
     # 親レコードと子（シート）レコードを分類
     children_by_parent = {}
@@ -7740,36 +7742,39 @@ if view_type == '💡 商品提案・進捗管理':
                 # 親コードの展開／折りたたみクリック時
                 if clicked_sku.startswith("TOGGLE::"):
                     t_pid = clicked_sku.replace("TOGGLE::", "", 1)
-                    if t_pid in expanded_parents:
-                        expanded_parents.remove(t_pid)
+                    if t_pid in children_by_parent:
+                        # すでにシート展開済みなら開閉を切り替え
+                        if t_pid in collapsed_parents:
+                            collapsed_parents.remove(t_pid)
+                        else:
+                            collapsed_parents.add(t_pid)
                     else:
-                        expanded_parents.add(t_pid)
-                        # まだシートが展開されていない場合は、ここで自動読込して子行を作成
-                        if t_pid not in children_by_parent:
-                            par_obj = next((x for x in proposals_list if str(x.get("prop_id")) == t_pid), None)
-                            if par_obj:
-                                _, xlss, _ = find_proposal_attachments_all(
-                                    t_pid, par_obj.get("img_file", ""), par_obj.get("excel_file", ""), par_obj.get("pdf_file", "")
-                                )
-                                ep_target = xlss[0] if xlss else ""
-                                if not ep_target and par_obj.get("drive_rel_path"):
-                                    with st.spinner("☁️ Excelのシート一覧を取得しています..."):
-                                        ep_target = _fetch_proposal_file_from_gdrive(par_obj["drive_rel_path"])
-                                if ep_target and os.path.exists(ep_target):
-                                    try:
-                                        s_names = pd.ExcelFile(ep_target).sheet_names
-                                        for s_i, s_nm in enumerate(s_names, 1):
-                                            new_ch = dict(par_obj)
-                                            new_ch["prop_id"] = f"{t_pid}-S{s_i:02d}"
-                                            new_ch["parent_id"] = t_pid
-                                            new_ch["sheet_name"] = s_nm
-                                            new_ch["prod_name"] = s_nm
-                                            new_ch["comments"] = []
-                                            new_ch["likes"] = []
-                                            proposals_list.append(new_ch)
-                                        save_proposals_list(proposals_list)
-                                    except Exception as e_sh:
-                                        st.error(f"シート読込エラー: {e_sh}")
+                        # 初回クリック時はExcelからシート一覧を取得して自動で開く
+                        collapsed_parents.discard(t_pid)
+                        par_obj = next((x for x in proposals_list if str(x.get("prop_id")) == t_pid), None)
+                        if par_obj:
+                            _, xlss, _ = find_proposal_attachments_all(
+                                t_pid, par_obj.get("img_file", ""), par_obj.get("excel_file", ""), par_obj.get("pdf_file", "")
+                            )
+                            ep_target = xlss[0] if xlss else ""
+                            if not ep_target and par_obj.get("drive_rel_path"):
+                                with st.spinner("☁️ Excelのシート一覧を取得しています..."):
+                                    ep_target = _fetch_proposal_file_from_gdrive(par_obj["drive_rel_path"])
+                            if ep_target and os.path.exists(ep_target):
+                                try:
+                                    s_names = pd.ExcelFile(ep_target).sheet_names
+                                    for s_i, s_nm in enumerate(s_names, 1):
+                                        new_ch = dict(par_obj)
+                                        new_ch["prop_id"] = f"{t_pid}-S{s_i:02d}"
+                                        new_ch["parent_id"] = t_pid
+                                        new_ch["sheet_name"] = s_nm
+                                        new_ch["prod_name"] = s_nm
+                                        new_ch["comments"] = []
+                                        new_ch["likes"] = []
+                                        proposals_list.append(new_ch)
+                                    save_proposals_list(proposals_list)
+                                except Exception as e_sh:
+                                    st.error(f"シート読込エラー: {e_sh}")
                     st.rerun()
                 else:
                     # シート行（またはPDF行）をクリック → 下の詳細パネルを開く
