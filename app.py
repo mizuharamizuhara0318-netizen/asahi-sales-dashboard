@@ -6643,7 +6643,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         render_universal_table(det_df.drop(columns=["粗利率_数値"], errors="ignore").head(500), max_h=520)
     st.stop()
 # ========================================================
-# ★ 💡 商品提案・進捗管理（ドライブ抽出170件連動・クリック時自動DL版）
+# ★ 💡 商品提案・進捗管理（ドライブ抽出連動・会議支援＆ポイント自動集計版）
 # ========================================================
 SAVED_PROPOSALS_FILE = os.path.join(BASE_SHARE, "saved_proposals.json")
 LOCAL_PROPOSALS_FILE = os.path.join(BASE_DIR, "saved_proposals.json")
@@ -6663,8 +6663,56 @@ PROPOSAL_STATUS_LIST = [
     "営業預かり",
     "上長確認",
     "採用・商品化",
+    "ヒット商品化",
     "見送り",
 ]
+
+# 報奨金ポイントルール（1P = 100円）
+PROPOSAL_POINT_MAP = {
+    "起案中": 1,
+    "見送り": 1,
+    "市場調査中": 10,
+    "原価・仕様検討": 10,
+    "サンプル確認": 10,
+    "営業預かり": 10,
+    "上長確認": 10,
+    "採用・商品化": 25,
+    "ヒット商品化": 50,
+}
+
+# 滞留チェック対象外（完了系ステータス）
+PROPOSAL_CLOSED_STATUSES = {"採用・商品化", "ヒット商品化", "見送り"}
+
+
+def _get_proposal_stale_days(item):
+    """最終更新日からの経過日数を返す（完了系ステータスや日付不明時は None）"""
+    if item.get("status") in PROPOSAL_CLOSED_STATUSES:
+        return None
+    raw_dt = str(item.get("updated_at", "") or "").strip()
+    if not raw_dt:
+        return None
+    try:
+        dt_val = pd.to_datetime(raw_dt, errors="coerce")
+        if pd.isna(dt_val):
+            return None
+        diff_days = (datetime.now() - dt_val.to_pydatetime().replace(tzinfo=None)).days
+        return max(0, diff_days)
+    except Exception:
+        return None
+
+
+def _get_proposal_ym(item):
+    """集計用の年月（YYYY-MM）を取得"""
+    t_dt = str(item.get("target_date", "") or "").strip()
+    m1 = re.search(r'(20\d{2})[-/年](\d{1,2})', t_dt)
+    if m1:
+        return f"{m1.group(1)}-{int(m1.group(2)):02d}"
+    u_dt = str(item.get("updated_at", "") or "").strip()
+    m2 = re.search(r'(20\d{2})[-/年](\d{1,2})', u_dt)
+    if m2:
+        return f"{m2.group(1)}-{int(m2.group(2)):02d}"
+    return "年月不明"
+
 
 def _fetch_proposal_file_from_gdrive(rel_path):
     """rel_path (例: 2026/202602/西山/xxx.xls) をGoogleドライブから辿ってローカルキャッシュへDLする"""
@@ -6676,12 +6724,10 @@ def _fetch_proposal_file_from_gdrive(rel_path):
     if os.path.exists(local_cache_path) and os.path.getsize(local_cache_path) > 0:
         return local_cache_path
 
-    # ローカルPC（Gドライブ直結環境）ならそのまま返す
     g_local = os.path.join(BASE_SHARE, "商品提案", norm_rel.replace("/", os.sep))
     if os.path.exists(g_local):
         return g_local
 
-    # Streamlit Cloud側：Google Drive APIで「商品提案」配下を辿ってDL
     service, root_folder_id = get_gdrive_service_and_folder()
     if not service or not root_folder_id:
         return ""
@@ -6722,6 +6768,7 @@ def _fetch_proposal_file_from_gdrive(rel_path):
         return ""
     return ""
 
+
 def load_drive_extracted_proposals():
     for cp in PROPOSALS_DRIVE_CACHE_CANDIDATES:
         if os.path.exists(cp):
@@ -6746,6 +6793,8 @@ def load_drive_extracted_proposals():
                         "status": "起案中",
                         "target_date": ym_s,
                         "memo": "",
+                        "comments": [],
+                        "likes": [],
                         "img_file": "",
                         "excel_file": "",
                         "pdf_file": "",
@@ -6760,6 +6809,7 @@ def load_drive_extracted_proposals():
                 pass
     return [], ""
 
+
 def load_saved_proposals():
     saved_list = []
     for f in [SAVED_PROPOSALS_FILE, LOCAL_PROPOSALS_FILE, os.path.join(GDRIVE_SYNC_DIR, "saved_proposals.json")]:
@@ -6773,11 +6823,15 @@ def load_saved_proposals():
             except Exception:
                 pass
 
-    # 初回に取り込んだ旧形式データ（IDに「/」が含まれる長いパス形式）を自動除外
     saved_list = [
         p for p in saved_list
         if "/" not in str(p.get("prop_id", ""))
     ]
+    for p in saved_list:
+        if not isinstance(p.get("comments"), list):
+            p["comments"] = []
+        if not isinstance(p.get("likes"), list):
+            p["likes"] = []
 
     drive_list, _ = load_drive_extracted_proposals()
     if not drive_list:
@@ -6798,6 +6852,8 @@ def load_saved_proposals():
             continue
         merged.append(d_item)
     return merged
+
+
 def save_proposals_list(p_list):
     target_f = SAVED_PROPOSALS_FILE if os.path.exists(os.path.dirname(SAVED_PROPOSALS_FILE)) else LOCAL_PROPOSALS_FILE
     try:
@@ -6808,6 +6864,7 @@ def save_proposals_list(p_list):
         with open(LOCAL_PROPOSALS_FILE, "w", encoding="utf-8") as f:
             json.dump(p_list, f, ensure_ascii=False, indent=2)
         upload_file_to_gdrive(LOCAL_PROPOSALS_FILE, "saved_proposals.json")
+
 
 def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_xls"):
     """LibreOfficeを使ってExcelをPDFに変換する"""
@@ -6839,6 +6896,7 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
         return None, "LibreOfficeが見つかりません。GitHubの packages.txt に libreoffice を追加してください。"
     except Exception as e:
         return None, str(e)
+
 
 @st.cache_data(show_spinner=False)
 def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
@@ -6917,6 +6975,7 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
     except Exception as e:
         return None, str(e)
 
+
 def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""):
     """提案IDや登録ファイル名・フルパスから画像・Excel・PDFを探す"""
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
@@ -6956,7 +7015,8 @@ def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""
 
     return found_imgs, found_excels, found_pdfs
 
-def render_proposal_detail_panel(prop_id):
+
+def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水原", stale_threshold=14):
     proposals = load_saved_proposals()
     target_idx = next((i for i, p in enumerate(proposals) if str(p.get("prop_id")) == str(prop_id)), None)
     if target_idx is None:
@@ -6964,21 +7024,67 @@ def render_proposal_detail_panel(prop_id):
         return
 
     item = proposals[target_idx]
+    likes_list = list(item.get("likes", []) or [])
+    comments_list = list(item.get("comments", []) or [])
+    pts = PROPOSAL_POINT_MAP.get(item.get("status", "起案中"), 1)
+    stale_days = _get_proposal_stale_days(item)
+    stale_badge = (
+        f" &nbsp;|&nbsp; <span style='background:#dc2626; padding:2px 7px; border-radius:4px; font-size:12px;'>⚠️ 滞留 {stale_days}日</span>"
+        if (stale_days is not None and stale_days >= stale_threshold) else ""
+    )
 
-    h_col1, h_col2 = st.columns([5.0, 1.0])
-    with h_col1:
-        st.markdown(
-            f"<div class='side-panel-header' style='margin-bottom:4px;'>"
-            f"💡 【{item['prop_id']}】 {item['prod_name']} &nbsp;|&nbsp; "
-            f"提案者: {item.get('staff','')} &nbsp;|&nbsp; ステータス: {item.get('status','')}"
-            f"</div>",
-            unsafe_allow_html=True
-        )
-    with h_col2:
-        if st.button("✖️ 詳細を閉じる", use_container_width=True, key=f"close_prop_{prop_id}"):
-            st.session_state.pop("selected_prop_id", None)
-            st.rerun()
+    # --- ページ送り用インデックス計算 ---
+    nav_ids = filtered_ids if (filtered_ids and str(prop_id) in filtered_ids) else [str(p.get("prop_id")) for p in proposals]
+    cur_pos = nav_ids.index(str(prop_id)) if str(prop_id) in nav_ids else 0
+    has_prev = cur_pos > 0
+    has_next = cur_pos < len(nav_ids) - 1
 
+    def _render_nav_bar(pos_suffix):
+        nb1, nb2, nb3, nb4, nb5 = st.columns([1.2, 1.0, 1.2, 1.5, 1.1])
+        with nb1:
+            if st.button("⬅️ 前の提案", disabled=not has_prev, use_container_width=True, key=f"nav_prev_{prop_id}_{pos_suffix}"):
+                st.session_state["selected_prop_id"] = nav_ids[cur_pos - 1]
+                st.rerun()
+        with nb2:
+            st.markdown(
+                f"<div style='text-align:center; padding-top:6px; font-weight:bold; color:#334155;'>{cur_pos + 1} / {len(nav_ids)} 件</div>",
+                unsafe_allow_html=True
+            )
+        with nb3:
+            if st.button("次の提案 ➡️", disabled=not has_next, use_container_width=True, key=f"nav_next_{prop_id}_{pos_suffix}"):
+                st.session_state["selected_prop_id"] = nav_ids[cur_pos + 1]
+                st.rerun()
+        with nb4:
+            liked_by_me = current_user in likes_list
+            like_lbl = f"👍 いいね済 ({len(likes_list)})" if liked_by_me else f"👍 いいね ({len(likes_list)})"
+            if st.button(like_lbl, type=("primary" if liked_by_me else "secondary"), use_container_width=True, key=f"btn_like_{prop_id}_{pos_suffix}"):
+                if liked_by_me:
+                    likes_list = [u for u in likes_list if u != current_user]
+                else:
+                    likes_list.append(current_user)
+                item["likes"] = likes_list
+                proposals[target_idx] = item
+                save_proposals_list(proposals)
+                st.rerun()
+        with nb5:
+            if st.button("✖️ 詳細を閉じる", use_container_width=True, key=f"close_prop_{prop_id}_{pos_suffix}"):
+                st.session_state.pop("selected_prop_id", None)
+                st.rerun()
+
+    # 上部ナビゲーション＆ヘッダー
+    _render_nav_bar("top")
+
+    like_members_txt = f" ｜ 👍 投票: {', '.join(likes_list)}" if likes_list else ""
+    st.markdown(
+        f"<div class='side-panel-header' style='margin-top:4px; margin-bottom:6px;'>"
+        f"💡 【{item['prop_id']}】 {item['prod_name']} &nbsp;|&nbsp; "
+        f"提案者: {item.get('staff','')} &nbsp;|&nbsp; ステータス: {item.get('status','')}（{pts}P）"
+        f"{stale_badge}{like_members_txt}"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+    # --- ① 編集フォーム（折りたたみ） ---
     with st.expander("✏️ 進捗ステータス・担当者・添付資料を編集する", expanded=False):
         with st.form(f"edit_prop_form_{prop_id}"):
             c1, c2, c3 = st.columns([1.2, 1.4, 1.2])
@@ -6990,7 +7096,7 @@ def render_proposal_detail_panel(prop_id):
             with c2: new_status = st.selectbox("🚦 進捗ステータス", PROPOSAL_STATUS_LIST, index=cur_stat_idx)
             with c3: new_target_dt = st.text_input("📅 目標発売・確認日", value=item.get("target_date", ""))
 
-            new_memo = st.text_area("📝 進捗メモ・コメント", value=item.get("memo", ""), height=80)
+            new_memo = st.text_area("📝 概要・進捗メモ", value=item.get("memo", ""), height=70)
             new_file = st.file_uploader("📎 提案書（Excel / PDF / 画像）を追加・差し替え ※Excelは自動で1ページPDF化されます", type=["xlsx", "xls", "pdf", "png", "jpg", "jpeg"])
 
             col_s1, col_s2 = st.columns([3, 1])
@@ -7046,11 +7152,58 @@ def render_proposal_detail_panel(prop_id):
                 time.sleep(0.4)
                 st.rerun()
 
+    # --- ② 時系列コメント履歴（簡易チャット・議事録） ---
+    with st.expander(f"💬 会議コメント・時系列メモ履歴（{len(comments_list)}件）", expanded=bool(comments_list)):
+        if comments_list:
+            for c_idx, cm in enumerate(comments_list):
+                cm_c1, cm_c2 = st.columns([5.5, 0.5])
+                with cm_c1:
+                    st.markdown(
+                        f"<div style='background:#f8fafc; border-left:3px solid #2563eb; padding:6px 10px; border-radius:4px; margin-bottom:5px; font-size:13px;'>"
+                        f"<span style='color:#64748b; font-size:11.5px;'>{cm.get('dt', '')}</span> &nbsp; "
+                        f"<b style='color:#1e3a8a;'>{cm.get('author', '')}</b>： {cm.get('text', '')}"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+                with cm_c2:
+                    if st.button("🗑️", key=f"del_cm_{prop_id}_{c_idx}", help="このコメントを削除"):
+                        comments_list.pop(c_idx)
+                        item["comments"] = comments_list
+                        proposals[target_idx] = item
+                        save_proposals_list(proposals)
+                        st.rerun()
+        else:
+            st.caption("まだコメント履歴はありません。下から会議メモやフィードバックを追記できます。")
+
+        with st.form(f"add_comment_form_{prop_id}", clear_on_submit=True):
+            cm_in1, cm_in2, cm_in3 = st.columns([1.1, 3.6, 1.0])
+            author_opts = list(STAFF_MAP.values()) + ["上長", "その他"]
+            def_auth_idx = author_opts.index(current_user) if current_user in author_opts else 0
+            with cm_in1:
+                cm_author = st.selectbox("発言者", author_opts, index=def_auth_idx, label_visibility="collapsed")
+            with cm_in2:
+                cm_text = st.text_input("コメント入力", placeholder="例: 下代450円以下なら採用 / 工場に再見積依頼中...", label_visibility="collapsed")
+            with cm_in3:
+                cm_submit = st.form_submit_button("💬 追記", type="primary", use_container_width=True)
+
+            if cm_submit and cm_text.strip():
+                now_ts = datetime.now().strftime("%Y/%m/%d %H:%M")
+                comments_list.append({
+                    "dt": now_ts,
+                    "author": cm_author,
+                    "text": cm_text.strip()
+                })
+                item["comments"] = comments_list
+                item["updated_at"] = now_ts
+                proposals[target_idx] = item
+                save_proposals_list(proposals)
+                st.rerun()
+
+    # --- ③ 添付資料の取得＆全幅プレビュー ---
     img_paths, excel_paths, pdf_paths = find_proposal_attachments_all(
         prop_id, item.get("img_file", ""), item.get("excel_file", ""), item.get("pdf_file", "")
     )
 
-    # ドライブ抽出アイテムの場合、詳細を開いたタイミングでGoogleドライブから実ファイルを取得
     if item.get("drive_rel_path") and not (img_paths or excel_paths or pdf_paths):
         with st.spinner("☁️ Googleドライブから提案資料を取得しています..."):
             dl_path = _fetch_proposal_file_from_gdrive(item["drive_rel_path"])
@@ -7182,24 +7335,37 @@ def render_proposal_detail_panel(prop_id):
         else:
             st.info("まだExcelファイルが登録されていません。")
 
+    # 下部にもページ送りバーを配置（会議中に下まで見てそのまま次へ進める）
+    st.write("")
+    _render_nav_bar("bottom")
+
 
 if view_type == '💡 商品提案・進捗管理':
     st.markdown("#### 💡 商品提案・進捗管理ダッシュボード")
     _, drive_cache_updated_at = load_drive_extracted_proposals()
     proposals_list = load_saved_proposals()
 
-    c_sync_p1, c_sync_p2 = st.columns([3.8, 1.2])
+    c_sync_p1, c_sync_p2, c_sync_p3 = st.columns([2.8, 1.2, 1.0])
     with c_sync_p1:
         st.caption(
-            f"📂 **Googleドライブ抽出データ（2025〜2026年・『新商品の提案資料はこのフォルダーに入れてください』＋『提案』含むPDF/Excel）** ｜ "
-            f"抽出キャッシュ更新: **{drive_cache_updated_at or '未同期'}**"
+            f"📂 **Googleドライブ抽出データ連動中** ｜ 抽出キャッシュ更新: **{drive_cache_updated_at or '未同期'}**"
         )
     with c_sync_p2:
-        if st.button("🔄 ドライブ抽出を再読込", use_container_width=True, key="reload_prop_drive_cache"):
+        staff_vals = list(STAFF_MAP.values())
+        cur_op_user = st.selectbox(
+            "👤 操作ユーザー（いいね・コメント用）",
+            staff_vals,
+            index=staff_vals.index("水原") if "水原" in staff_vals else 0,
+            key="prop_current_operator"
+        )
+    with c_sync_p3:
+        st.write("")
+        if st.button("🔄 ドライブ再読込", use_container_width=True, key="reload_prop_drive_cache"):
             sync_all_from_gdrive(force=True)
             st.cache_data.clear()
             st.rerun()
 
+    # --- 新規登録フォーム ---
     with st.expander("➕ 新しい商品提案を登録する（Excelは自動で1ページPDFに変換されます）", expanded=False):
         with st.form("new_proposal_form", clear_on_submit=True):
             existing_nums = [int(re.sub(r'\D', '', str(p.get("prop_id", "0"))) or 0) for p in proposals_list if str(p.get("prop_id", "")).startswith("P")]
@@ -7213,7 +7379,7 @@ if view_type == '💡 商品提案・進捗管理':
 
             nc5, nc6 = st.columns([2.5, 1.5])
             with nc5: new_pmemo = st.text_input("概要・ポイント・社内サーバーパス等", placeholder="例: 想定下代480円 / サーバー場所: \\\\server\\企画\\...")
-            with nc6: new_ptarget = st.text_input("目標確認・発売時期", placeholder="例: 2026年12月")
+            with nc6: new_ptarget = st.text_input("目標確認・発売時期", placeholder="例: 2026-12")
 
             up_prop_files = st.file_uploader("📎 提案書（Excel / PDF / 画像・複数同時OK）", type=["xlsx", "xls", "pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
 
@@ -7253,6 +7419,8 @@ if view_type == '💡 商品提案・進捗管理':
                         "status": new_pstat,
                         "target_date": new_ptarget.strip(),
                         "memo": new_pmemo.strip(),
+                        "comments": [],
+                        "likes": [],
                         "img_file": img_f,
                         "excel_file": xls_f,
                         "pdf_file": pdf_f,
@@ -7263,6 +7431,57 @@ if view_type == '💡 商品提案・進捗管理':
                     time.sleep(0.4)
                     st.rerun()
 
+    # --- 🏆 報奨金ポイント自動集計パネル ---
+    with st.expander("🏆 報奨金ポイント自動集計（担当者別・月別｜提出1P / 継続検討10P / 商品化25P / ヒット50P）", expanded=False):
+        if proposals_list:
+            pt_rows = []
+            for p in proposals_list:
+                st_nm = p.get("status", "起案中")
+                pt_val = PROPOSAL_POINT_MAP.get(st_nm, 1)
+                pt_rows.append({
+                    "提案者": p.get("staff", "未設定") or "未設定",
+                    "年月": _get_proposal_ym(p),
+                    "ステータス": st_nm,
+                    "ポイント": pt_val,
+                    "報奨金額(円)": pt_val * 100
+                })
+            pt_df = pd.DataFrame(pt_rows)
+
+            pt_tab1, pt_tab2 = st.tabs(["👤 担当者別 累計ポイント", "📅 月別 × 担当者別 ポイント表"])
+            with pt_tab1:
+                staff_pt_agg = pt_df.groupby("提案者", as_index=False).agg(
+                    提出件数=("ステータス", "count"),
+                    継続検討数=("ポイント", lambda s: int((s == 10).sum())),
+                    商品化数=("ポイント", lambda s: int((s == 25).sum())),
+                    ヒット数=("ポイント", lambda s: int((s == 50).sum())),
+                    獲得ポイント=("ポイント", "sum"),
+                    報奨金見込_円=("報奨金額(円)", "sum")
+                ).sort_values("獲得ポイント", ascending=False).reset_index(drop=True)
+                staff_pt_agg.insert(0, "順位", range(1, len(staff_pt_agg) + 1))
+                staff_pt_agg.rename(columns={"報奨金見込_円": "報奨金見込(円)"}, inplace=True)
+                render_universal_table(staff_pt_agg, max_h=340)
+                st.download_button(
+                    "📥 担当者別ポイント集計をExcel保存",
+                    data=generate_excel_bytes(staff_pt_agg, "担当者別ポイント集計"),
+                    file_name=f"商品提案_報奨金ポイント集計_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_prop_points_staff"
+                )
+            with pt_tab2:
+                ym_piv = pt_df.pivot_table(index="提案者", columns="年月", values="ポイント", aggfunc="sum", fill_value=0)
+                ym_piv["合計P"] = ym_piv.sum(axis=1)
+                ym_piv["報奨金見込(円)"] = ym_piv["合計P"] * 100
+                ym_piv = ym_piv.sort_values("合計P", ascending=False).reset_index()
+                render_universal_table(ym_piv, max_h=340)
+        else:
+            st.info("集計対象の提案データがありません。")
+
+    # --- 滞留チェック設定＆サマリーカード ---
+    stale_threshold_days = 14
+    stale_count_all = sum(
+        1 for p in proposals_list
+        if (_get_proposal_stale_days(p) is not None and _get_proposal_stale_days(p) >= stale_threshold_days)
+    )
     stat_counts = {s: sum(1 for p in proposals_list if p.get("status") == s) for s in PROPOSAL_STATUS_LIST}
     st.markdown(f"""
     <div class="total-card">
@@ -7274,25 +7493,37 @@ if view_type == '💡 商品提案・進捗管理':
         営業預かり: <b style="color:#7c3aed;">{stat_counts['営業預かり']}</b> &nbsp;|&nbsp;
         上長確認: <b style="color:#ea580c;">{stat_counts['上長確認']}</b> &nbsp;|&nbsp;
         採用・商品化: <b style="color:#16a34a;">{stat_counts['採用・商品化']}</b> &nbsp;|&nbsp;
-        見送り: <b>{stat_counts['見送り']}</b>
+        ヒット: <b style="color:#d97706;">{stat_counts['ヒット商品化']}</b> &nbsp;|&nbsp;
+        見送り: <b>{stat_counts['見送り']}</b> &nbsp;|&nbsp;
+        <span style="color:#dc2626; font-weight:bold;">⚠️ 滞留({stale_threshold_days}日以上): {stale_count_all} 件</span>
     </div>
     """, unsafe_allow_html=True)
 
-    pf1, pf2, pf3 = st.columns([1.3, 1.3, 2.0])
+    # --- 絞り込みバー ---
+    pf1, pf2, pf3, pf4 = st.columns([1.2, 1.2, 1.8, 1.1])
     with pf1:
         f_pstaff = st.selectbox("👤 提案者で絞り込み", ["（すべて）"] + list(STAFF_MAP.values()) + ["未設定"], key="prop_filt_staff")
     with pf2:
         f_pstat = st.selectbox("🚦 進捗ステータスで絞り込み", ["（すべて）"] + PROPOSAL_STATUS_LIST, key="prop_filt_stat")
     with pf3:
-        f_pkw = st.text_input("🔍 商品名・ID・メモで検索", placeholder="キーワードを入力...", key="prop_filt_kw")
+        f_pkw = st.text_input("🔍 商品名・ID・メモ・コメントで検索", placeholder="キーワードを入力...", key="prop_filt_kw")
+    with pf4:
+        st.write("")
+        only_stale_chk = st.checkbox(f"⚠️ 滞留({stale_threshold_days}日+)のみ", value=False, key="prop_only_stale")
 
     rows_p = []
+    filtered_ids = []
     for p in proposals_list:
         if f_pstaff != "（すべて）" and p.get("staff") != f_pstaff:
             continue
         if f_pstat != "（すべて）" and p.get("status") != f_pstat:
             continue
         if f_pkw.strip() and f_pkw.strip().lower() not in json.dumps(p, ensure_ascii=False).lower():
+            continue
+
+        s_days = _get_proposal_stale_days(p)
+        is_stale = (s_days is not None and s_days >= stale_threshold_days)
+        if only_stale_chk and not is_stale:
             continue
 
         imgs, xlss, pdfs = find_proposal_attachments_all(
@@ -7303,14 +7534,28 @@ if view_type == '💡 商品提案・進捗管理':
         has_img = "🖼️" if (imgs or d_ext in ("PNG", "JPG", "JPEG")) else "-"
         has_xls = "📊" if (xlss or d_ext in ("XLSX", "XLS")) else "-"
 
+        st_label = p.get("status", "起案中")
+        if is_stale:
+            st_label = f"⚠️ {st_label} ({s_days}日滞留)"
+
+        likes_cnt = len(p.get("likes", []) or [])
+        cm_list = p.get("comments", []) or []
+        latest_memo = cm_list[-1]["text"] if cm_list else p.get("memo", "")
+        if cm_list:
+            latest_memo = f"💬({len(cm_list)}) {cm_list[-1].get('author','')}: {latest_memo}"
+
+        pid_str = str(p.get("prop_id", ""))
+        filtered_ids.append(pid_str)
         rows_p.append({
-            "商品コード": p.get("prop_id", ""),
+            "商品コード": pid_str,
             "提案商品名": p.get("prod_name", ""),
             "提案者": p.get("staff", ""),
-            "進捗ステータス": p.get("status", ""),
+            "進捗ステータス": st_label,
+            "👍": f"👍{likes_cnt}" if likes_cnt > 0 else "-",
+            "P": PROPOSAL_POINT_MAP.get(p.get("status", "起案中"), 1),
             "資料": f"{has_pdf} / {has_img} / {has_xls}",
             "目標時期": p.get("target_date", ""),
-            "進捗メモ": p.get("memo", ""),
+            "進捗メモ": latest_memo,
             "更新日時": p.get("updated_at", "")
         })
 
@@ -7329,7 +7574,12 @@ if view_type == '💡 商品提案・進捗管理':
         sel_pid = st.session_state.get("selected_prop_id")
         if sel_pid:
             st.divider()
-            render_proposal_detail_panel(sel_pid)
+            render_proposal_detail_panel(
+                sel_pid,
+                filtered_ids=filtered_ids,
+                current_user=cur_op_user,
+                stale_threshold=stale_threshold_days
+            )
     else:
         st.info("条件に一致する商品提案がありません。検索条件を変更するか、上の「➕ 新しい商品提案を登録する」から追加してください。")
     st.stop()
