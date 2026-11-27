@@ -6637,21 +6637,95 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         render_universal_table(det_df.drop(columns=["粗利率_数値"], errors="ignore").head(500), max_h=520)
     st.stop()
 # ========================================================
-# ★ 💡 商品提案・進捗管理（Excel自動1ページPDF変換・モニター全幅表示版）
+# ★ 💡 商品提案・進捗管理（ドライブ抽出170件連動・ステータス拡張版）
 # ========================================================
 SAVED_PROPOSALS_FILE = os.path.join(BASE_SHARE, "saved_proposals.json")
 LOCAL_PROPOSALS_FILE = os.path.join(BASE_DIR, "saved_proposals.json")
-PROPOSAL_STATUS_LIST = ["起案中", "原価・仕様検討", "サンプル確認", "上長確認", "採用・商品化", "見送り"]
+PROPOSALS_DRIVE_CACHE_CANDIDATES = [
+    os.path.join(GDRIVE_SYNC_DIR, "proposals_drive_cache.json"),
+    os.path.join(BASE_SHARE, "proposals_drive_cache.json"),
+    os.path.join(BASE_DIR, "proposals_drive_cache.json"),
+]
+PROPOSAL_STATUS_LIST = [
+    "起案中",
+    "市場調査中",
+    "原価・仕様検討",
+    "サンプル確認",
+    "営業預かり",
+    "上長確認",
+    "採用・商品化",
+    "見送り",
+]
+
+def load_drive_extracted_proposals():
+    for cp in PROPOSALS_DRIVE_CACHE_CANDIDATES:
+        if os.path.exists(cp):
+            try:
+                with open(cp, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+                raw_items = data.get("items", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                converted = []
+                for idx, it in enumerate(raw_items, 1):
+                    if not isinstance(it, dict):
+                        continue
+                    rel_p = str(it.get("rel_path", "") or "").strip()
+                    fname = str(it.get("file_name", "") or "").strip()
+                    ext_u = str(it.get("ext", "") or "").upper()
+                    pid = str(it.get("id") or f"DRV-{idx:03d}").strip()
+                    full_p = os.path.join(BASE_SHARE, "商品提案", rel_p.replace("/", os.sep)) if rel_p else ""
+                    converted.append({
+                        "prop_id": pid,
+                        "prod_name": str(it.get("title") or os.path.splitext(fname)[0] or pid).strip(),
+                        "staff": str(it.get("member") or "未設定").strip(),
+                        "status": "起案中",
+                        "target_date": str(it.get("ym") or "").strip(),
+                        "memo": f"[{it.get('source_type', '')}] {rel_p or fname}",
+                        "img_file": full_p if ext_u in ("PNG", "JPG", "JPEG") else "",
+                        "excel_file": full_p if ext_u in ("XLSX", "XLS") else "",
+                        "pdf_file": full_p if ext_u == "PDF" else "",
+                        "full_path": full_p,
+                        "file_name": fname,
+                        "updated_at": str(it.get("updated_at") or "").strip(),
+                        "from_drive_scan": True,
+                    })
+                return converted, str(data.get("updated_at", "") if isinstance(data, dict) else "")
+            except Exception:
+                pass
+    return [], ""
 
 def load_saved_proposals():
+    saved_list = []
     for f in [SAVED_PROPOSALS_FILE, LOCAL_PROPOSALS_FILE, os.path.join(GDRIVE_SYNC_DIR, "saved_proposals.json")]:
         if os.path.exists(f):
             try:
                 with open(f, "r", encoding="utf-8") as fp:
-                    return json.load(fp)
+                    loaded = json.load(fp)
+                    if isinstance(loaded, list):
+                        saved_list = loaded
+                        break
             except Exception:
                 pass
-    return []
+
+    drive_list, _ = load_drive_extracted_proposals()
+    if not drive_list:
+        return saved_list
+
+    # 編集済み・手動登録分（saved_proposals.json）を優先し、未登録のドライブ抽出分をマージ
+    saved_by_id = {str(p.get("prop_id", "")).strip(): p for p in saved_list if str(p.get("prop_id", "")).strip()}
+    saved_by_path = {
+        str(p.get("full_path") or p.get("excel_file") or p.get("pdf_file") or p.get("img_file") or "").strip(): p
+        for p in saved_list
+        if str(p.get("full_path") or p.get("excel_file") or p.get("pdf_file") or p.get("img_file") or "").strip()
+    }
+
+    merged = list(saved_list)
+    for d_item in drive_list:
+        did = d_item["prop_id"]
+        dpath = d_item.get("full_path", "")
+        if did in saved_by_id or (dpath and dpath in saved_by_path):
+            continue
+        merged.append(d_item)
+    return merged
 
 def save_proposals_list(p_list):
     target_f = SAVED_PROPOSALS_FILE if os.path.exists(os.path.dirname(SAVED_PROPOSALS_FILE)) else LOCAL_PROPOSALS_FILE
@@ -6777,12 +6851,14 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
         return None, str(e)
 
 def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""):
-    """提案IDや登録ファイル名から画像・Excel・PDFを探す（同じファイル名の重複を除外）"""
+    """提案IDや登録ファイル名・フルパスから画像・Excel・PDFを探す（同じファイル名の重複を除外）"""
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
     found_imgs, found_excels, found_pdfs = [], [], []
     seen_names = set()
 
     def _add_unique(path_str, target_list):
+        if not path_str or not os.path.exists(path_str):
+            return
         bname = os.path.basename(path_str).lower()
         if bname not in seen_names:
             seen_names.add(bname)
@@ -6790,11 +6866,14 @@ def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""
 
     for hint, target_list in [(img_hint, found_imgs), (xls_hint, found_excels), (pdf_hint, found_pdfs)]:
         if hint:
-            for d in search_dirs:
-                p = os.path.join(d, hint)
-                if os.path.exists(p):
-                    _add_unique(p, target_list)
-                    break
+            if os.path.isabs(hint) and os.path.exists(hint):
+                _add_unique(hint, target_list)
+            else:
+                for d in search_dirs:
+                    p = os.path.join(d, hint)
+                    if os.path.exists(p):
+                        _add_unique(p, target_list)
+                        break
 
     for d in search_dirs:
         if not os.path.exists(d):
@@ -6833,11 +6912,10 @@ def render_proposal_detail_panel(prop_id):
             st.session_state.pop("selected_prop_id", None)
             st.rerun()
 
-    # --- ① 編集フォーム（普段は折りたたみ） ---
     with st.expander("✏️ 進捗ステータス・担当者・添付資料を編集する", expanded=False):
         with st.form(f"edit_prop_form_{prop_id}"):
             c1, c2, c3 = st.columns([1.2, 1.4, 1.2])
-            staff_opts = list(STAFF_MAP.values())
+            staff_opts = list(STAFF_MAP.values()) + ["未設定"]
             cur_staff_idx = staff_opts.index(item.get("staff", "水原")) if item.get("staff") in staff_opts else 0
             cur_stat_idx = PROPOSAL_STATUS_LIST.index(item.get("status", "起案中")) if item.get("status") in PROPOSAL_STATUS_LIST else 0
 
@@ -6901,7 +6979,6 @@ def render_proposal_detail_panel(prop_id):
                 time.sleep(0.4)
                 st.rerun()
 
-    # --- ② メイン：モニター全幅でPDF（1ページ資料）・画像・Excel表を表示 ---
     img_paths, excel_paths, pdf_paths = find_proposal_attachments_all(
         prop_id, item.get("img_file", ""), item.get("excel_file", ""), item.get("pdf_file", "")
     )
@@ -6913,7 +6990,6 @@ def render_proposal_detail_panel(prop_id):
     ])
 
     with tab_pdf:
-        # Excelが登録されている場合は、シートを選んで「1ページ丸ごと画像」で表示
         if excel_paths:
             ep = excel_paths[0]
             try:
@@ -6954,7 +7030,6 @@ def render_proposal_detail_panel(prop_id):
                 else:
                     st.error(f"プレビュー生成エラー: {err_msg}")
 
-        # ExcelがなくPDF単体で登録されている場合は、そのままPDFを画像表示
         elif pdf_paths:
             for pp in pdf_paths:
                 c_p1, c_p2 = st.columns([3.5, 1.2])
@@ -6982,7 +7057,7 @@ def render_proposal_detail_panel(prop_id):
                 except Exception as e:
                     st.error(f"PDF画像化エラー: {e}")
         else:
-            st.info("まだ資料がありません。上の「✏️ 編集する」からExcelまたはPDFをアップロードしてください。")
+            st.info("まだ資料がありません（ローカルPCのパス参照中の場合は社内PCまたは同期済フォルダをご確認ください）。")
 
     with tab_img:
         if img_paths:
@@ -6994,7 +7069,7 @@ def render_proposal_detail_panel(prop_id):
 
     with tab_xls:
         if excel_paths:
-            for ep in excel_paths[:1]: 
+            for ep in excel_paths[:1]:
                 c_x1, c_x2, c_x3 = st.columns([2.0, 1.8, 1.2])
                 with c_x1:
                     xls = pd.ExcelFile(ep)
@@ -7030,11 +7105,24 @@ def render_proposal_detail_panel(prop_id):
 
 if view_type == '💡 商品提案・進捗管理':
     st.markdown("#### 💡 商品提案・進捗管理ダッシュボード")
+    _, drive_cache_updated_at = load_drive_extracted_proposals()
     proposals_list = load_saved_proposals()
+
+    c_sync_p1, c_sync_p2 = st.columns([3.8, 1.2])
+    with c_sync_p1:
+        st.caption(
+            f"📂 **Googleドライブ抽出データ（2025〜2026年・『新商品の提案資料はこのフォルダーに入れてください』＋『提案』含むPDF/Excel）** ｜ "
+            f"抽出キャッシュ更新: **{drive_cache_updated_at or '未同期'}**"
+        )
+    with c_sync_p2:
+        if st.button("🔄 ドライブ抽出を再読込", use_container_width=True, key="reload_prop_drive_cache"):
+            sync_all_from_gdrive(force=True)
+            st.cache_data.clear()
+            st.rerun()
 
     with st.expander("➕ 新しい商品提案を登録する（Excelは自動で1ページPDFに変換されます）", expanded=False):
         with st.form("new_proposal_form", clear_on_submit=True):
-            existing_nums = [int(re.sub(r'\D', '', str(p.get("prop_id", "0"))) or 0) for p in proposals_list]
+            existing_nums = [int(re.sub(r'\D', '', str(p.get("prop_id", "0"))) or 0) for p in proposals_list if not str(p.get("prop_id", "")).startswith("DRV-")]
             next_id = f"P{(max(existing_nums) + 1 if existing_nums else 1):03d}"
 
             nc1, nc2, nc3, nc4 = st.columns([1.0, 2.2, 1.2, 1.3])
@@ -7100,16 +7188,19 @@ if view_type == '💡 商品提案・進捗管理':
     <div class="total-card">
         <b>全提案数:</b> <span style="color:#1a73e8; font-size:16px; font-weight:bold;">{len(proposals_list)} 件</span> &nbsp;|&nbsp;
         起案中: <b>{stat_counts['起案中']}</b> &nbsp;|&nbsp;
+        市場調査中: <b style="color:#0284c7;">{stat_counts['市場調査中']}</b> &nbsp;|&nbsp;
         原価・仕様検討: <b>{stat_counts['原価・仕様検討']}</b> &nbsp;|&nbsp;
         サンプル確認: <b>{stat_counts['サンプル確認']}</b> &nbsp;|&nbsp;
+        営業預かり: <b style="color:#7c3aed;">{stat_counts['営業預かり']}</b> &nbsp;|&nbsp;
         上長確認: <b style="color:#ea580c;">{stat_counts['上長確認']}</b> &nbsp;|&nbsp;
-        採用・商品化: <b style="color:#16a34a;">{stat_counts['採用・商品化']}</b>
+        採用・商品化: <b style="color:#16a34a;">{stat_counts['採用・商品化']}</b> &nbsp;|&nbsp;
+        見送り: <b>{stat_counts['見送り']}</b>
     </div>
     """, unsafe_allow_html=True)
 
     pf1, pf2, pf3 = st.columns([1.3, 1.3, 2.0])
     with pf1:
-        f_pstaff = st.selectbox("👤 提案者で絞り込み", ["（すべて）"] + list(STAFF_MAP.values()), key="prop_filt_staff")
+        f_pstaff = st.selectbox("👤 提案者で絞り込み", ["（すべて）"] + list(STAFF_MAP.values()) + ["未設定"], key="prop_filt_staff")
     with pf2:
         f_pstat = st.selectbox("🚦 進捗ステータスで絞り込み", ["（すべて）"] + PROPOSAL_STATUS_LIST, key="prop_filt_stat")
     with pf3:
@@ -7145,7 +7236,7 @@ if view_type == '💡 商品提案・進捗管理':
     if rows_p:
         st.caption("💡 表内の **「🔍 提案ID（商品コード欄）」** をクリックすると、すぐ下に **モニター全幅で1ページ資料プレビュー** が表示されます。")
         prop_disp_df = pd.DataFrame(rows_p)
-        clicked_prop = render_clickable_product_table(prop_disp_df, comp_key="proposal_clickable_tbl_v1", max_h=280)
+        clicked_prop = render_clickable_product_table(prop_disp_df, comp_key="proposal_clickable_tbl_v1", max_h=340)
         if clicked_prop and isinstance(clicked_prop, dict) and clicked_prop.get("sku"):
             last_pr_ts = st.session_state.get("_last_prop_click_ts", 0)
             cur_pr_ts = clicked_prop.get("ts", 0)
@@ -7159,5 +7250,5 @@ if view_type == '💡 商品提案・進捗管理':
             st.divider()
             render_proposal_detail_panel(sel_pid)
     else:
-        st.info("まだ商品提案が登録されていません。上の「➕ 新しい商品提案を登録する」から追加してみてください。")
+        st.info("条件に一致する商品提案がありません。検索条件を変更するか、上の「➕ 新しい商品提案を登録する」から追加してください。")
     st.stop()
