@@ -6824,9 +6824,6 @@ def load_drive_extracted_proposals():
     return [], ""
 
 
-def load_saved_proposals():
-
-
 def save_proposals_list(p_list):
     target_f = SAVED_PROPOSALS_FILE if os.path.exists(os.path.dirname(SAVED_PROPOSALS_FILE)) else LOCAL_PROPOSALS_FILE
     try:
