@@ -6877,7 +6877,8 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
                     ws = wb[sheet_name]
                 else:
                     ws = wb.active
-
+                if "水原" in os.path.basename(excel_path):
+                    ws.print_area = None
                 ws.page_setup.orientation = ws.ORIENTATION_LANDSCAPE
                 ws.page_setup.paperSize = ws.PAPERSIZE_A4
                 ws.sheet_properties.pageSetUpPr.fitToPage = True
