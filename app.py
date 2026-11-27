@@ -6637,7 +6637,7 @@ if view_type == '⚡ 楽楽B2B：リアルタイム受注＆見込み速報 (API
         render_universal_table(det_df.drop(columns=["粗利率_数値"], errors="ignore").head(500), max_h=520)
     st.stop()
 # ========================================================
-# ★ 💡 商品提案・進捗管理（ドライブ抽出170件連動・ステータス拡張版）
+# ★ 💡 商品提案・進捗管理（ドライブ抽出170件連動・クリック時自動DL版）
 # ========================================================
 SAVED_PROPOSALS_FILE = os.path.join(BASE_SHARE, "saved_proposals.json")
 LOCAL_PROPOSALS_FILE = os.path.join(BASE_DIR, "saved_proposals.json")
@@ -6646,6 +6646,9 @@ PROPOSALS_DRIVE_CACHE_CANDIDATES = [
     os.path.join(BASE_SHARE, "proposals_drive_cache.json"),
     os.path.join(BASE_DIR, "proposals_drive_cache.json"),
 ]
+PROP_FILES_CACHE_DIR = os.path.join(GDRIVE_SYNC_DIR, "_prop_files")
+os.makedirs(PROP_FILES_CACHE_DIR, exist_ok=True)
+
 PROPOSAL_STATUS_LIST = [
     "起案中",
     "市場調査中",
@@ -6656,6 +6659,62 @@ PROPOSAL_STATUS_LIST = [
     "採用・商品化",
     "見送り",
 ]
+
+def _fetch_proposal_file_from_gdrive(rel_path):
+    """rel_path (例: 2026/202602/西山/xxx.xls) をGoogleドライブから辿ってローカルキャッシュへDLする"""
+    if not rel_path:
+        return ""
+    norm_rel = str(rel_path).replace("\\", "/").strip("/")
+    safe_name = re.sub(r'[\\/:*?"<>|]', '_', norm_rel)
+    local_cache_path = os.path.join(PROP_FILES_CACHE_DIR, safe_name)
+    if os.path.exists(local_cache_path) and os.path.getsize(local_cache_path) > 0:
+        return local_cache_path
+
+    # ローカルPC（Gドライブ直結環境）ならそのまま返す
+    g_local = os.path.join(BASE_SHARE, "商品提案", norm_rel.replace("/", os.sep))
+    if os.path.exists(g_local):
+        return g_local
+
+    # Streamlit Cloud側：Google Drive APIで「商品提案」配下を辿ってDL
+    service, root_folder_id = get_gdrive_service_and_folder()
+    if not service or not root_folder_id:
+        return ""
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+        parts = ["商品提案"] + [p for p in norm_rel.split("/") if p]
+        curr_parent = root_folder_id
+
+        for idx, part_name in enumerate(parts):
+            esc_name = part_name.replace("'", "\\'")
+            is_last = (idx == len(parts) - 1)
+            if is_last:
+                q = f"'{curr_parent}' in parents and name = '{esc_name}' and trashed = false"
+            else:
+                q = f"'{curr_parent}' in parents and name = '{esc_name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+            res = service.files().list(
+                q=q,
+                fields="files(id, name, mimeType)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute().get("files", [])
+            if not res:
+                return ""
+            if is_last:
+                fid = res[0]["id"]
+                req = service.files().get_media(fileId=fid, supportsAllDrives=True)
+                fh = io.BytesIO()
+                dl = MediaIoBaseDownload(fh, req)
+                done = False
+                while not done:
+                    _, done = dl.next_chunk()
+                with open(local_cache_path, "wb") as f_out:
+                    f_out.write(fh.getvalue())
+                return local_cache_path
+            else:
+                curr_parent = res[0]["id"]
+    except Exception:
+        return ""
+    return ""
 
 def load_drive_extracted_proposals():
     for cp in PROPOSALS_DRIVE_CACHE_CANDIDATES:
@@ -6671,19 +6730,21 @@ def load_drive_extracted_proposals():
                     rel_p = str(it.get("rel_path", "") or "").strip()
                     fname = str(it.get("file_name", "") or "").strip()
                     ext_u = str(it.get("ext", "") or "").upper()
-                    pid = str(it.get("id") or f"DRV-{idx:03d}").strip()
-                    full_p = os.path.join(BASE_SHARE, "商品提案", rel_p.replace("/", os.sep)) if rel_p else ""
+                    ym_s = str(it.get("ym") or "").strip()
+                    short_ym = ym_s.replace("-", "")[2:] if len(ym_s) >= 7 else "DRV"
+                    pid = f"{short_ym}-{idx:03d}"
                     converted.append({
                         "prop_id": pid,
                         "prod_name": str(it.get("title") or os.path.splitext(fname)[0] or pid).strip(),
                         "staff": str(it.get("member") or "未設定").strip(),
                         "status": "起案中",
-                        "target_date": str(it.get("ym") or "").strip(),
+                        "target_date": ym_s,
                         "memo": f"[{it.get('source_type', '')}] {rel_p or fname}",
-                        "img_file": full_p if ext_u in ("PNG", "JPG", "JPEG") else "",
-                        "excel_file": full_p if ext_u in ("XLSX", "XLS") else "",
-                        "pdf_file": full_p if ext_u == "PDF" else "",
-                        "full_path": full_p,
+                        "img_file": "",
+                        "excel_file": "",
+                        "pdf_file": "",
+                        "drive_rel_path": rel_p,
+                        "drive_ext": ext_u,
                         "file_name": fname,
                         "updated_at": str(it.get("updated_at") or "").strip(),
                         "from_drive_scan": True,
@@ -6710,19 +6771,18 @@ def load_saved_proposals():
     if not drive_list:
         return saved_list
 
-    # 編集済み・手動登録分（saved_proposals.json）を優先し、未登録のドライブ抽出分をマージ
     saved_by_id = {str(p.get("prop_id", "")).strip(): p for p in saved_list if str(p.get("prop_id", "")).strip()}
-    saved_by_path = {
-        str(p.get("full_path") or p.get("excel_file") or p.get("pdf_file") or p.get("img_file") or "").strip(): p
+    saved_by_rel = {
+        str(p.get("drive_rel_path", "")).strip(): p
         for p in saved_list
-        if str(p.get("full_path") or p.get("excel_file") or p.get("pdf_file") or p.get("img_file") or "").strip()
+        if str(p.get("drive_rel_path", "")).strip()
     }
 
     merged = list(saved_list)
     for d_item in drive_list:
         did = d_item["prop_id"]
-        dpath = d_item.get("full_path", "")
-        if did in saved_by_id or (dpath and dpath in saved_by_path):
+        drel = d_item.get("drive_rel_path", "")
+        if did in saved_by_id or (drel and drel in saved_by_rel):
             continue
         merged.append(d_item)
     return merged
@@ -6739,7 +6799,7 @@ def save_proposals_list(p_list):
         upload_file_to_gdrive(LOCAL_PROPOSALS_FILE, "saved_proposals.json")
 
 def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_xls"):
-    """LibreOfficeを使ってExcelをPDFに変換する（Googleドライブの容量制限を回避）"""
+    """LibreOfficeを使ってExcelをPDFに変換する"""
     import subprocess
     import tempfile
 
@@ -6769,21 +6829,19 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
     except Exception as e:
         return None, str(e)
 
-
 @st.cache_data(show_spinner=False)
 def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
     """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す（.xlsにも対応）"""
     import subprocess
     import tempfile
     import openpyxl
-    import fitz  # PyMuPDF
+    import fitz
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             ext = os.path.splitext(excel_path)[1].lower()
             work_xlsx = excel_path
 
-            # 1. 古い .xls 形式の場合は、まず LibreOffice で一時的に .xlsx へ変換する
             if ext != ".xlsx":
                 conv_cmd = [
                     "libreoffice",
@@ -6798,7 +6856,6 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
                 if os.path.exists(converted_path):
                     work_xlsx = converted_path
 
-            # 2. 指定シートだけを残し、横向き・1ページ収め設定を強制適用する
             target_for_pdf = work_xlsx
             if work_xlsx.lower().endswith(".xlsx"):
                 wb = openpyxl.load_workbook(work_xlsx)
@@ -6825,7 +6882,6 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
                 wb.close()
                 target_for_pdf = tmp_xlsx
 
-            # 3. LibreOfficeでPDFに変換
             cmd = [
                 "libreoffice",
                 "--headless",
@@ -6839,7 +6895,6 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
             if not os.path.exists(tmp_pdf):
                 return None, f"PDF変換失敗: {res.stderr or res.stdout}"
 
-            # 4. PyMuPDFで高画質PNG画像に変換
             doc = fitz.open(tmp_pdf)
             imgs = []
             for page in doc:
@@ -6851,7 +6906,7 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
         return None, str(e)
 
 def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""):
-    """提案IDや登録ファイル名・フルパスから画像・Excel・PDFを探す（同じファイル名の重複を除外）"""
+    """提案IDや登録ファイル名・フルパスから画像・Excel・PDFを探す"""
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
     found_imgs, found_excels, found_pdfs = [], [], []
     seen_names = set()
@@ -6983,6 +7038,19 @@ def render_proposal_detail_panel(prop_id):
         prop_id, item.get("img_file", ""), item.get("excel_file", ""), item.get("pdf_file", "")
     )
 
+    # ドライブ抽出アイテムの場合、詳細を開いたタイミングでGoogleドライブから実ファイルを取得
+    if item.get("drive_rel_path") and not (img_paths or excel_paths or pdf_paths):
+        with st.spinner("☁️ Googleドライブから提案資料を取得しています..."):
+            dl_path = _fetch_proposal_file_from_gdrive(item["drive_rel_path"])
+        if dl_path and os.path.exists(dl_path):
+            ext_dl = os.path.splitext(dl_path)[1].lower()
+            if ext_dl in (".png", ".jpg", ".jpeg"):
+                img_paths.append(dl_path)
+            elif ext_dl == ".pdf":
+                pdf_paths.append(dl_path)
+            elif ext_dl in (".xlsx", ".xls"):
+                excel_paths.append(dl_path)
+
     tab_pdf, tab_img, tab_xls = st.tabs([
         f"📄 1ページ資料プレビュー（{1 if (excel_paths or pdf_paths) else 0}件）",
         f"🖼️ キャプチャー画像（{len(img_paths)}件）",
@@ -7057,7 +7125,7 @@ def render_proposal_detail_panel(prop_id):
                 except Exception as e:
                     st.error(f"PDF画像化エラー: {e}")
         else:
-            st.info("まだ資料がありません（ローカルPCのパス参照中の場合は社内PCまたは同期済フォルダをご確認ください）。")
+            st.info("まだ資料が見つかりませんでした。Googleドライブの「商品提案」フォルダにファイルがあるか確認してください。")
 
     with tab_img:
         if img_paths:
@@ -7122,7 +7190,7 @@ if view_type == '💡 商品提案・進捗管理':
 
     with st.expander("➕ 新しい商品提案を登録する（Excelは自動で1ページPDFに変換されます）", expanded=False):
         with st.form("new_proposal_form", clear_on_submit=True):
-            existing_nums = [int(re.sub(r'\D', '', str(p.get("prop_id", "0"))) or 0) for p in proposals_list if not str(p.get("prop_id", "")).startswith("DRV-")]
+            existing_nums = [int(re.sub(r'\D', '', str(p.get("prop_id", "0"))) or 0) for p in proposals_list if str(p.get("prop_id", "")).startswith("P")]
             next_id = f"P{(max(existing_nums) + 1 if existing_nums else 1):03d}"
 
             nc1, nc2, nc3, nc4 = st.columns([1.0, 2.2, 1.2, 1.3])
@@ -7218,9 +7286,10 @@ if view_type == '💡 商品提案・進捗管理':
         imgs, xlss, pdfs = find_proposal_attachments_all(
             p.get("prop_id", ""), p.get("img_file", ""), p.get("excel_file", ""), p.get("pdf_file", "")
         )
-        has_pdf = "📄" if pdfs else "-"
-        has_img = "🖼️" if imgs else "-"
-        has_xls = "📊" if xlss else "-"
+        d_ext = str(p.get("drive_ext", "")).upper()
+        has_pdf = "📄" if (pdfs or d_ext == "PDF") else "-"
+        has_img = "🖼️" if (imgs or d_ext in ("PNG", "JPG", "JPEG")) else "-"
+        has_xls = "📊" if (xlss or d_ext in ("XLSX", "XLS")) else "-"
 
         rows_p.append({
             "商品コード": p.get("prop_id", ""),
