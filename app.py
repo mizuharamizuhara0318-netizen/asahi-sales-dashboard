@@ -7015,7 +7015,71 @@ def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""
 
     return found_imgs, found_excels, found_pdfs
 
+def render_proposal_tree_table(tree_rows, expanded_ids, selected_pid="", comp_key="proposal_tree_tbl_v1", max_h=380):
+    """親コードを展開するとExcelのシート名が子行として表示されるツリーテーブル"""
+    if not tree_rows:
+        st.info("該当するデータがありません。")
+        return None
 
+    cols = ["商品コード", "提案商品名", "提案者", "進捗ステータス", "👍", "P", "資料", "目標時期", "進捗メモ", "更新日時"]
+    center_cols = {"👍", "P", "目標時期", "更新日時"}
+
+    header_html = "".join([
+        f"<th style='text-align:{'center' if c in center_cols else 'left'};'>{c}</th>"
+        for c in cols
+    ])
+
+    body_rows = []
+    for r in tree_rows:
+        is_child = bool(r.get("_is_child", False))
+        is_excel_parent = bool(r.get("_is_excel_parent", False))
+        pid = str(r.get("商品コード", ""))
+        safe_pid = pid.replace('"', '&quot;')
+        is_exp = pid in expanded_ids
+        is_sel = (pid == str(selected_pid))
+
+        row_bg = "#dbeafe" if is_sel else ("#f0f9ff" if is_child else "")
+        row_style = f" style='background:{row_bg};'" if row_bg else ""
+
+        cells = []
+        for c in cols:
+            val_str = "" if pd.isna(r.get(c)) else str(r.get(c, ""))
+            align = "center" if c in center_cols else "left"
+
+            if c == "商品コード":
+                if is_child:
+                    cells.append(
+                        f"<td style='text-align:left; padding-left:22px;'>"
+                        f"<span class='sku-link' data-sku=\"{safe_pid}\" style='color:#0369a1;'>└ 📑 {val_str}</span></td>"
+                    )
+                elif is_excel_parent:
+                    icon = "▼" if is_exp else "▶"
+                    cells.append(
+                        f"<td style='text-align:left;'>"
+                        f"<span class='sku-link' data-sku=\"TOGGLE::{safe_pid}\" style='color:#1d4ed8; font-weight:bold;'>{icon} {val_str}</span></td>"
+                    )
+                else:
+                    cells.append(
+                        f"<td style='text-align:left;'>"
+                        f"<span class='sku-link' data-sku=\"{safe_pid}\">🔍 {val_str}</span></td>"
+                    )
+            elif c == "提案商品名" and is_child:
+                cells.append(
+                    f"<td style='text-align:left;'>"
+                    f"<span class='sku-link' data-sku=\"{safe_pid}\" style='color:#0369a1; font-weight:bold;'>{val_str}</span></td>"
+                )
+            else:
+                cells.append(f"<td style='text-align:{align};'>{val_str}</td>")
+        body_rows.append(f"<tr{row_style}>{''.join(cells)}</tr>")
+
+    full_html = (
+        f"<div class='tbl-wrap' style='max-height:{max_h}px;'>"
+        f"<table><thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody></table></div>"
+    )
+    calc_h = min(max_h + 20, 80 + len(tree_rows) * 36)
+    return _clickable_prod_table_func(table_html=full_html, height=calc_h, key=comp_key)
+    
 def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水原", stale_threshold=14):
     proposals = load_saved_proposals()
     target_idx = next((i for i, p in enumerate(proposals) if str(p.get("prop_id")) == str(prop_id)), None)
