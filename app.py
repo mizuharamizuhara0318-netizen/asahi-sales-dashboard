@@ -6786,7 +6786,7 @@ def load_drive_extracted_proposals():
                     ym_s = str(it.get("ym") or "").strip()
                     short_ym = ym_s.replace("-", "")[2:] if len(ym_s) >= 7 else "DRV"
                     pid = f"{short_ym}-{idx:03d}"
-                    converted.append({
+                    par_obj = {
                         "prop_id": pid,
                         "prod_name": str(it.get("title") or os.path.splitext(fname)[0] or pid).strip(),
                         "staff": str(it.get("member") or "未設定").strip(),
@@ -6803,7 +6803,21 @@ def load_drive_extracted_proposals():
                         "file_name": fname,
                         "updated_at": str(it.get("updated_at") or "").strip(),
                         "from_drive_scan": True,
-                    })
+                    }
+                    converted.append(par_obj)
+
+                    # JSON側に sheets リストが入っていれば、最初から子シート行を自動展開する
+                    sheets_in_json = it.get("sheets") or []
+                    if isinstance(sheets_in_json, list):
+                        for s_i, s_nm in enumerate(sheets_in_json, 1):
+                            ch_obj = dict(par_obj)
+                            ch_obj["prop_id"] = f"{pid}-S{s_i:02d}"
+                            ch_obj["parent_id"] = pid
+                            ch_obj["sheet_name"] = str(s_nm)
+                            ch_obj["prod_name"] = str(s_nm)
+                            ch_obj["comments"] = []
+                            ch_obj["likes"] = []
+                            converted.append(ch_obj)
                 return converted, str(data.get("updated_at", "") if isinstance(data, dict) else "")
             except Exception:
                 pass
@@ -6899,8 +6913,11 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
 
 
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=6, ttl=600)
+@st.cache_data(show_spinner=False, max_entries=6, ttl=600)
 def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
-    """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す（.xlsにも対応）"""
+    """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す（省メモリ版）"""
+    import gc
     import subprocess
     import tempfile
     import openpyxl
@@ -6950,6 +6967,7 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
                 tmp_xlsx = os.path.join(tmpdir, "target_sheet.xlsx")
                 wb.save(tmp_xlsx)
                 wb.close()
+                del wb
                 target_for_pdf = tmp_xlsx
 
             cmd = [
@@ -6968,11 +6986,14 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
             doc = fitz.open(tmp_pdf)
             imgs = []
             for page in doc:
-                pix = page.get_pixmap(dpi=150)
+                pix = page.get_pixmap(dpi=120)
                 imgs.append(pix.tobytes("png"))
             doc.close()
+            del doc
+            gc.collect()
             return imgs, "OK"
     except Exception as e:
+        gc.collect()
         return None, str(e)
 
 
@@ -7651,13 +7672,10 @@ if view_type == '💡 商品提案・進捗管理':
     def _build_row_dict(p_obj, is_child=False, is_excel_parent=False):
         s_days = _get_proposal_stale_days(p_obj)
         is_stale = (s_days is not None and s_days >= stale_threshold_days)
-        imgs, xlss, pdfs = find_proposal_attachments_all(
-            p_obj.get("prop_id", ""), p_obj.get("img_file", ""), p_obj.get("excel_file", ""), p_obj.get("pdf_file", "")
-        )
         d_ext = str(p_obj.get("drive_ext", "")).upper()
-        has_pdf = "📄" if (pdfs or d_ext == "PDF") else "-"
-        has_img = "🖼️" if (imgs or d_ext in ("PNG", "JPG", "JPEG")) else "-"
-        has_xls = "📊" if (xlss or d_ext in ("XLSX", "XLS")) else "-"
+        has_pdf = "📄" if (p_obj.get("pdf_file") or d_ext == "PDF") else "-"
+        has_img = "🖼️" if (p_obj.get("img_file") or d_ext in ("PNG", "JPG", "JPEG")) else "-"
+        has_xls = "📊" if (p_obj.get("excel_file") or d_ext in ("XLSX", "XLS")) else "-"
 
         st_label = p_obj.get("status", "起案中")
         if is_stale:
