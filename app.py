@@ -7059,10 +7059,9 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
             like_lbl = f"👍 いいね済 ({len(likes_list)})" if liked_by_me else f"👍 いいね ({len(likes_list)})"
             if st.button(like_lbl, type=("primary" if liked_by_me else "secondary"), use_container_width=True, key=f"btn_like_{prop_id}_{pos_suffix}"):
                 if liked_by_me:
-                    likes_list = [u for u in likes_list if u != current_user]
+                    item["likes"] = [u for u in likes_list if u != current_user]
                 else:
-                    likes_list.append(current_user)
-                item["likes"] = likes_list
+                    item["likes"] = likes_list + [current_user]
                 proposals[target_idx] = item
                 save_proposals_list(proposals)
                 st.rerun()
