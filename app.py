@@ -7232,11 +7232,47 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
                 st.error(f"Excelシート読込エラー: {e}")
 
             if sheet_names:
+                fixed_sheet = str(item.get("sheet_name", "") or "").strip()
+
+                # 複数シートあり、かつ未展開（Excel全体レコード）のときだけ「シート展開ボタン」を表示
+                if len(sheet_names) > 1 and not fixed_sheet:
+                    st.info(f"📑 このExcelには **{len(sheet_names)} シート** 入っています。シート（商品）ごとにステータス・いいね・コメントを個別管理できます。")
+                    if st.button(f"✨ 全 {len(sheet_names)} シートを個別の提案として一覧に展開する", type="primary", key=f"btn_split_sheets_{prop_id}"):
+                        existing_sheet_keys = {
+                            (str(p.get("excel_file", "")), str(p.get("drive_rel_path", "")), str(p.get("sheet_name", "")))
+                            for p in proposals
+                        }
+                        added_cnt = 0
+                        for s_idx, s_name in enumerate(sheet_names, 1):
+                            s_key = (str(item.get("excel_file", "")), str(item.get("drive_rel_path", "")), str(s_name))
+                            if s_key in existing_sheet_keys:
+                                continue
+                            new_sub = dict(item)
+                            new_sub["prop_id"] = f"{prop_id}-S{s_idx:02d}"
+                            new_sub["prod_name"] = f"{s_name}（{item.get('prod_name', '')}）"
+                            new_sub["sheet_name"] = s_name
+                            new_sub["comments"] = []
+                            new_sub["likes"] = []
+                            new_sub["updated_at"] = datetime.now().strftime("%Y/%m/%d %H:%M")
+                            proposals.insert(target_idx + 1 + added_cnt, new_sub)
+                            added_cnt += 1
+                        if added_cnt > 0:
+                            save_proposals_list(proposals)
+                            st.success(f"✅ {added_cnt} 件のシート別提案を一覧に追加しました！")
+                            time.sleep(0.5)
+                            st.rerun()
+                        else:
+                            st.warning("すでに全シート展開済みです。")
+
+                # シート固定レコードなら該当シートを初期選択にする
+                def_sh_idx = sheet_names.index(fixed_sheet) if fixed_sheet in sheet_names else 0
+
                 c_p1, c_p2 = st.columns([3.5, 1.2])
                 with c_p1:
                     sel_pdf_sheet = st.selectbox(
                         "📑 表示するシートを選択（自動で横向き1ページに収めます）",
                         sheet_names,
+                        index=def_sh_idx,
                         key=f"prop_pdf_sh_{prop_id}_{os.path.basename(ep)}"
                     )
                 with c_p2:
@@ -7381,12 +7417,14 @@ if view_type == '💡 商品提案・進捗管理':
             with nc6: new_ptarget = st.text_input("目標確認・発売時期", placeholder="例: 2026-12")
 
             up_prop_files = st.file_uploader("📎 提案書（Excel / PDF / 画像・複数同時OK）", type=["xlsx", "xls", "pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
+            split_sheets_on_reg = st.checkbox("📑 Excelに複数シートがある場合、シートごとに個別提案として登録する", value=True)
 
             if st.form_submit_button("✅ 商品提案を登録する", type="primary", use_container_width=True):
                 if not new_pname.strip():
                     st.warning("提案商品名を入力してください。")
                 else:
                     img_f, xls_f, pdf_f = "", "", ""
+                    saved_xls_path = ""
                     for uf in (up_prop_files or []):
                         ext = os.path.splitext(uf.name)[1].lower()
                         save_fn = f"proposal_{new_pid.strip()}{ext}"
@@ -7401,32 +7439,54 @@ if view_type == '💡 商品提案・進捗管理':
                             pdf_f = save_fn
                         elif ext in (".xlsx", ".xls"):
                             xls_f = save_fn
-                            with st.spinner("Excelを1ページPDFに自動変換しています..."):
-                                pdf_bytes, conv_err = convert_excel_to_1page_pdf_via_gdrive(uf.getvalue(), f"tmp_{new_pid.strip()}")
-                                if pdf_bytes:
-                                    pdf_fn = f"proposal_{new_pid.strip()}.pdf"
-                                    pdf_p = os.path.join(GDRIVE_SYNC_DIR, pdf_fn)
-                                    with open(pdf_p, "wb") as f_pdf:
-                                        f_pdf.write(pdf_bytes)
-                                    upload_file_to_gdrive(pdf_p, pdf_fn)
-                                    pdf_f = pdf_fn
+                            saved_xls_path = save_p
 
-                    proposals_list.insert(0, {
-                        "prop_id": new_pid.strip(),
-                        "prod_name": new_pname.strip(),
-                        "staff": new_pstaff,
-                        "status": new_pstat,
-                        "target_date": new_ptarget.strip(),
-                        "memo": new_pmemo.strip(),
-                        "comments": [],
-                        "likes": [],
-                        "img_file": img_f,
-                        "excel_file": xls_f,
-                        "pdf_file": pdf_f,
-                        "updated_at": datetime.now().strftime("%Y/%m/%d %H:%M")
-                    })
-                    save_proposals_list(proposals_list)
-                    st.success(f"✅ 【{new_pid}】{new_pname} を登録しました！")
+                    # Excelに複数シートがあり、分割登録ONの場合はシートごとにレコードを作成
+                    reg_sheets = []
+                    if split_sheets_on_reg and saved_xls_path and os.path.exists(saved_xls_path):
+                        try:
+                            reg_sheets = pd.ExcelFile(saved_xls_path).sheet_names
+                        except Exception:
+                            reg_sheets = []
+
+                    now_str = datetime.now().strftime("%Y/%m/%d %H:%M")
+                    if len(reg_sheets) > 1:
+                        for s_idx, s_name in enumerate(reg_sheets, 1):
+                            proposals_list.insert(0, {
+                                "prop_id": f"{new_pid.strip()}-S{s_idx:02d}",
+                                "prod_name": f"{s_name}（{new_pname.strip()}）",
+                                "sheet_name": s_name,
+                                "staff": new_pstaff,
+                                "status": new_pstat,
+                                "target_date": new_ptarget.strip(),
+                                "memo": new_pmemo.strip(),
+                                "comments": [],
+                                "likes": [],
+                                "img_file": img_f,
+                                "excel_file": xls_f,
+                                "pdf_file": pdf_f,
+                                "updated_at": now_str
+                            })
+                        save_proposals_list(proposals_list)
+                        st.success(f"✅ {len(reg_sheets)} シート分を個別の提案として登録しました！")
+                    else:
+                        proposals_list.insert(0, {
+                            "prop_id": new_pid.strip(),
+                            "prod_name": new_pname.strip(),
+                            "sheet_name": reg_sheets[0] if reg_sheets else "",
+                            "staff": new_pstaff,
+                            "status": new_pstat,
+                            "target_date": new_ptarget.strip(),
+                            "memo": new_pmemo.strip(),
+                            "comments": [],
+                            "likes": [],
+                            "img_file": img_f,
+                            "excel_file": xls_f,
+                            "pdf_file": pdf_f,
+                            "updated_at": now_str
+                        })
+                        save_proposals_list(proposals_list)
+                        st.success(f"✅ 【{new_pid}】{new_pname} を登録しました！")
                     time.sleep(0.4)
                     st.rerun()
 
