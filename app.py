@@ -7634,11 +7634,7 @@ if view_type == '💡 商品提案・進捗管理':
         st.write("")
         only_stale_chk = st.checkbox(f"⚠️ 滞留({stale_threshold_days}日+)のみ", value=False, key="prop_only_stale")
 
-    # 手動で折りたたんだ親だけを記憶（それ以外の展開済み親は基本オープン）
-    collapsed_parents = st.session_state.setdefault("collapsed_prop_parents", set())
-    expanded_parents = {pid for pid in children_by_parent.keys() if pid not in collapsed_parents}
-
-    # 親レコードと子（シート）レコードを分類
+    # 1. 先に親レコードと子（シート）レコードを分類する
     children_by_parent = {}
     parent_items = []
     for p in proposals_list:
@@ -7647,6 +7643,10 @@ if view_type == '💡 商品提案・進捗管理':
             children_by_parent.setdefault(par_id, []).append(p)
         else:
             parent_items.append(p)
+
+    # 2. その「すぐ下」にこの2行を置く
+    collapsed_parents = st.session_state.setdefault("collapsed_prop_parents", set())
+    expanded_parents = {pid for pid in children_by_parent.keys() if pid not in collapsed_parents}
 
     def _build_row_dict(p_obj, is_child=False, is_excel_parent=False):
         s_days = _get_proposal_stale_days(p_obj)
