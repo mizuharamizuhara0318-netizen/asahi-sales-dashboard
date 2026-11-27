@@ -6825,47 +6825,6 @@ def load_drive_extracted_proposals():
 
 
 def load_saved_proposals():
-    saved_list = []
-    for f in [SAVED_PROPOSALS_FILE, LOCAL_PROPOSALS_FILE, os.path.join(GDRIVE_SYNC_DIR, "saved_proposals.json")]:
-        if os.path.exists(f):
-            try:
-                with open(f, "r", encoding="utf-8") as fp:
-                    loaded = json.load(fp)
-                    if isinstance(loaded, list):
-                        saved_list = loaded
-                        break
-            except Exception:
-                pass
-
-    saved_list = [
-        p for p in saved_list
-        if "/" not in str(p.get("prop_id", ""))
-    ]
-    for p in saved_list:
-        if not isinstance(p.get("comments"), list):
-            p["comments"] = []
-        if not isinstance(p.get("likes"), list):
-            p["likes"] = []
-
-    drive_list, _ = load_drive_extracted_proposals()
-    if not drive_list:
-        return saved_list
-
-    saved_by_id = {str(p.get("prop_id", "")).strip(): p for p in saved_list if str(p.get("prop_id", "")).strip()}
-    saved_by_rel = {
-        str(p.get("drive_rel_path", "")).strip(): p
-        for p in saved_list
-        if str(p.get("drive_rel_path", "")).strip()
-    }
-
-    merged = list(saved_list)
-    for d_item in drive_list:
-        did = d_item["prop_id"]
-        drel = d_item.get("drive_rel_path", "")
-        is_child_item = bool(d_item.get("parent_id"))
-        if did in saved_by_id or (not is_child_item and drel and drel in saved_by_rel):
-            continue
-        merged.append(d_item)
 
 
 def save_proposals_list(p_list):
