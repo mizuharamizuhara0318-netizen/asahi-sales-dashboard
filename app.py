@@ -6667,7 +6667,6 @@ PROPOSAL_STATUS_LIST = [
     "見送り",
 ]
 
-# 報奨金ポイントルール（1P = 100円）
 PROPOSAL_POINT_MAP = {
     "起案中": 1,
     "見送り": 1,
@@ -6680,12 +6679,10 @@ PROPOSAL_POINT_MAP = {
     "ヒット商品化": 50,
 }
 
-# 滞留チェック対象外（完了系ステータス）
 PROPOSAL_CLOSED_STATUSES = {"採用・商品化", "ヒット商品化", "見送り"}
 
 
 def _get_proposal_stale_days(item):
-    """最終更新日からの経過日数を返す（完了系ステータスや日付不明時は None）"""
     if item.get("status") in PROPOSAL_CLOSED_STATUSES:
         return None
     raw_dt = str(item.get("updated_at", "") or "").strip()
@@ -6702,7 +6699,6 @@ def _get_proposal_stale_days(item):
 
 
 def _get_proposal_ym(item):
-    """集計用の年月（YYYY-MM）を取得"""
     t_dt = str(item.get("target_date", "") or "").strip()
     m1 = re.search(r'(20\d{2})[-/年](\d{1,2})', t_dt)
     if m1:
@@ -6715,7 +6711,6 @@ def _get_proposal_ym(item):
 
 
 def _fetch_proposal_file_from_gdrive(rel_path):
-    """rel_path (例: 2026/202602/西山/xxx.xls) をGoogleドライブから辿ってローカルキャッシュへDLする"""
     if not rel_path:
         return ""
     norm_rel = str(rel_path).replace("\\", "/").strip("/")
@@ -6806,7 +6801,6 @@ def load_drive_extracted_proposals():
                     }
                     converted.append(par_obj)
 
-                    # JSON側に sheets リストが入っていれば、最初から子シート行を自動展開する
                     sheets_in_json = it.get("sheets") or []
                     if isinstance(sheets_in_json, list):
                         for s_i, s_nm in enumerate(sheets_in_json, 1):
@@ -6824,6 +6818,51 @@ def load_drive_extracted_proposals():
     return [], ""
 
 
+def load_saved_proposals():
+    saved_list = []
+    for f in [SAVED_PROPOSALS_FILE, LOCAL_PROPOSALS_FILE, os.path.join(GDRIVE_SYNC_DIR, "saved_proposals.json")]:
+        if os.path.exists(f):
+            try:
+                with open(f, "r", encoding="utf-8") as fp:
+                    loaded = json.load(fp)
+                    if isinstance(loaded, list):
+                        saved_list = loaded
+                        break
+            except Exception:
+                pass
+
+    saved_list = [
+        p for p in saved_list
+        if "/" not in str(p.get("prop_id", ""))
+    ]
+    for p in saved_list:
+        if not isinstance(p.get("comments"), list):
+            p["comments"] = []
+        if not isinstance(p.get("likes"), list):
+            p["likes"] = []
+
+    drive_list, _ = load_drive_extracted_proposals()
+    if not drive_list:
+        return saved_list
+
+    saved_by_id = {str(p.get("prop_id", "")).strip(): p for p in saved_list if str(p.get("prop_id", "")).strip()}
+    saved_by_rel = {
+        str(p.get("drive_rel_path", "")).strip(): p
+        for p in saved_list
+        if str(p.get("drive_rel_path", "")).strip()
+    }
+
+    merged = list(saved_list)
+    for d_item in drive_list:
+        did = d_item["prop_id"]
+        drel = d_item.get("drive_rel_path", "")
+        is_child_item = bool(d_item.get("parent_id"))
+        if did in saved_by_id or (not is_child_item and drel and drel in saved_by_rel):
+            continue
+        merged.append(d_item)
+    return merged
+
+
 def save_proposals_list(p_list):
     target_f = SAVED_PROPOSALS_FILE if os.path.exists(os.path.dirname(SAVED_PROPOSALS_FILE)) else LOCAL_PROPOSALS_FILE
     try:
@@ -6837,7 +6876,6 @@ def save_proposals_list(p_list):
 
 
 def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_xls"):
-    """LibreOfficeを使ってExcelをPDFに変換する"""
     import subprocess
     import tempfile
 
@@ -6868,11 +6906,8 @@ def convert_excel_to_1page_pdf_via_gdrive(excel_bytes, temp_name="temp_proposal_
         return None, str(e)
 
 
-@st.cache_data(show_spinner=False)
-@st.cache_data(show_spinner=False, max_entries=6, ttl=600)
 @st.cache_data(show_spinner=False, max_entries=6, ttl=600)
 def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
-    """指定したシートだけを『横向き・1ページに収める』設定でPDF化→PNG画像バイト列を返す（省メモリ版）"""
     import gc
     import subprocess
     import tempfile
@@ -6954,7 +6989,6 @@ def render_excel_sheet_as_1page_png(excel_path, file_mtime, sheet_name):
 
 
 def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""):
-    """提案IDや登録ファイル名・フルパスから画像・Excel・PDFを探す"""
     search_dirs = [GDRIVE_SYNC_DIR, BASE_DIR, OTHER_DATA_DIR, BASE_SHARE]
     found_imgs, found_excels, found_pdfs = [], [], []
     seen_names = set()
@@ -6992,8 +7026,8 @@ def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""
 
     return found_imgs, found_excels, found_pdfs
 
+
 def render_proposal_tree_table(tree_rows, expanded_ids, selected_pid="", comp_key="proposal_tree_tbl_v1", max_h=380):
-    """親コードを展開するとExcelのシート名が子行として表示されるツリーテーブル"""
     if not tree_rows:
         st.info("該当するデータがありません。")
         return None
@@ -7056,7 +7090,8 @@ def render_proposal_tree_table(tree_rows, expanded_ids, selected_pid="", comp_ke
     )
     calc_h = min(max_h + 20, 80 + len(tree_rows) * 36)
     return _clickable_prod_table_func(table_html=full_html, height=calc_h, key=comp_key)
-    
+
+
 def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水原", stale_threshold=14):
     proposals = load_saved_proposals()
     target_idx = next((i for i, p in enumerate(proposals) if str(p.get("prop_id")) == str(prop_id)), None)
@@ -7074,7 +7109,6 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
         if (stale_days is not None and stale_days >= stale_threshold) else ""
     )
 
-    # --- ページ送り用インデックス計算 ---
     nav_ids = filtered_ids if (filtered_ids and str(prop_id) in filtered_ids) else [str(p.get("prop_id")) for p in proposals]
     cur_pos = nav_ids.index(str(prop_id)) if str(prop_id) in nav_ids else 0
     has_prev = cur_pos > 0
@@ -7111,7 +7145,6 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
                 st.session_state.pop("selected_prop_id", None)
                 st.rerun()
 
-    # 上部ナビゲーション＆ヘッダー
     _render_nav_bar("top")
 
     like_members_txt = f" ｜ 👍 投票: {', '.join(likes_list)}" if likes_list else ""
@@ -7124,7 +7157,6 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
         unsafe_allow_html=True
     )
 
-    # --- ① 編集フォーム（折りたたみ） ---
     with st.expander("✏️ 進捗ステータス・担当者・添付資料を編集する", expanded=False):
         with st.form(f"edit_prop_form_{prop_id}"):
             c1, c2, c3 = st.columns([1.2, 1.4, 1.2])
@@ -7192,7 +7224,6 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
                 time.sleep(0.4)
                 st.rerun()
 
-    # --- ② 時系列コメント履歴（簡易チャット・議事録） ---
     with st.expander(f"💬 会議コメント・時系列メモ履歴（{len(comments_list)}件）", expanded=bool(comments_list)):
         if comments_list:
             for c_idx, cm in enumerate(comments_list):
@@ -7239,7 +7270,6 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
                 save_proposals_list(proposals)
                 st.rerun()
 
-    # --- ③ 添付資料の取得＆全幅プレビュー ---
     img_paths, excel_paths, pdf_paths = find_proposal_attachments_all(
         prop_id, item.get("img_file", ""), item.get("excel_file", ""), item.get("pdf_file", "")
     )
@@ -7275,7 +7305,6 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
             if sheet_names:
                 fixed_sheet = str(item.get("sheet_name", "") or "").strip()
 
-                # 複数シートあり、かつ未展開（Excel全体レコード）のときだけ「シート展開ボタン」を表示
                 if len(sheet_names) > 1 and not fixed_sheet:
                     st.info(f"📑 このExcelには **{len(sheet_names)} シート** 入っています。シート（商品）ごとにステータス・いいね・コメントを個別管理できます。")
                     if st.button(f"✨ 全 {len(sheet_names)} シートを個別の提案として一覧に展開する", type="primary", key=f"btn_split_sheets_{prop_id}"):
@@ -7305,7 +7334,6 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
                         else:
                             st.warning("すでに全シート展開済みです。")
 
-                # シート固定レコードなら該当シートを初期選択にする
                 def_sh_idx = sheet_names.index(fixed_sheet) if fixed_sheet in sheet_names else 0
 
                 c_p1, c_p2 = st.columns([3.5, 1.2])
@@ -7358,7 +7386,7 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
                     import fitz
                     doc = fitz.open(pp)
                     for page_idx, page in enumerate(doc):
-                        pix = page.get_pixmap(dpi=150)
+                        pix = page.get_pixmap(dpi=120)
                         st.image(pix.tobytes("png"), use_container_width=True)
                         if len(doc) > 1:
                             st.caption(f"ページ {page_idx + 1} / {len(doc)}")
@@ -7411,7 +7439,6 @@ def render_proposal_detail_panel(prop_id, filtered_ids=None, current_user="水�
         else:
             st.info("まだExcelファイルが登録されていません。")
 
-    # 下部にもページ送りバーを配置（会議中に下まで見てそのまま次へ進める）
     st.write("")
     _render_nav_bar("bottom")
 
@@ -7441,7 +7468,6 @@ if view_type == '💡 商品提案・進捗管理':
             st.cache_data.clear()
             st.rerun()
 
-    # --- 新規登録フォーム ---
     with st.expander("➕ 新しい商品提案を登録する（Excelは自動で1ページPDFに変換されます）", expanded=False):
         with st.form("new_proposal_form", clear_on_submit=True):
             existing_nums = [int(re.sub(r'\D', '', str(p.get("prop_id", "0"))) or 0) for p in proposals_list if str(p.get("prop_id", "")).startswith("P")]
@@ -7482,7 +7508,6 @@ if view_type == '💡 商品提案・進捗管理':
                             xls_f = save_fn
                             saved_xls_path = save_p
 
-                    # Excelに複数シートがあり、分割登録ONの場合はシートごとにレコードを作成
                     reg_sheets = []
                     if split_sheets_on_reg and saved_xls_path and os.path.exists(saved_xls_path):
                         try:
@@ -7531,7 +7556,6 @@ if view_type == '💡 商品提案・進捗管理':
                     time.sleep(0.4)
                     st.rerun()
 
-    # --- 🏆 報奨金ポイント自動集計パネル ---
     with st.expander("🏆 報奨金ポイント自動集計（担当者別・月別｜提出1P / 継続検討10P / 商品化25P / ヒット50P）", expanded=False):
         if proposals_list:
             pt_rows = []
@@ -7576,7 +7600,6 @@ if view_type == '💡 商品提案・進捗管理':
         else:
             st.info("集計対象の提案データがありません。")
 
-    # --- 滞留チェック設定＆サマリーカード ---
     stale_threshold_days = 14
     stale_count_all = sum(
         1 for p in proposals_list
@@ -7599,7 +7622,6 @@ if view_type == '💡 商品提案・進捗管理':
     </div>
     """, unsafe_allow_html=True)
 
-    # --- 絞り込みバー ---
     pf1, pf2, pf3, pf4 = st.columns([1.2, 1.2, 1.8, 1.1])
     with pf1:
         f_pstaff = st.selectbox("👤 提案者で絞り込み", ["（すべて）"] + list(STAFF_MAP.values()) + ["未設定"], key="prop_filt_staff")
@@ -7611,7 +7633,6 @@ if view_type == '💡 商品提案・進捗管理':
         st.write("")
         only_stale_chk = st.checkbox(f"⚠️ 滞留({stale_threshold_days}日+)のみ", value=False, key="prop_only_stale")
 
-    # 1. 先に親レコードと子（シート）レコードを分類する
     children_by_parent = {}
     parent_items = []
     for p in proposals_list:
@@ -7621,7 +7642,6 @@ if view_type == '💡 商品提案・進捗管理':
         else:
             parent_items.append(p)
 
-    # 2. その「すぐ下」にこの2行を置く
     collapsed_parents = st.session_state.setdefault("collapsed_prop_parents", set())
     expanded_parents = {pid for pid in children_by_parent.keys() if pid not in collapsed_parents}
 
@@ -7664,7 +7684,6 @@ if view_type == '💡 商品提案・進捗管理':
         pid_str = str(p.get("prop_id", ""))
         my_children = children_by_parent.get(pid_str, [])
 
-        # 絞り込み判定（親または子のどちらかが一致すれば表示）
         def _match_filter(obj):
             if f_pstaff != "（すべて）" and obj.get("staff") != f_pstaff:
                 return False
@@ -7689,7 +7708,6 @@ if view_type == '💡 商品提案・進捗管理':
         if not is_excel_par:
             filtered_ids.append(pid_str)
 
-        # 展開中の親なら、配下のExcelシート行を直下に表示
         if pid_str in expanded_parents:
             show_chs = matched_children if (f_pstat != "（すべて）" or f_pkw.strip() or only_stale_chk) else my_children
             for ch in show_chs:
@@ -7713,17 +7731,14 @@ if view_type == '💡 商品提案・進捗管理':
                 st.session_state["_last_prop_click_ts"] = cur_pr_ts
                 clicked_sku = str(clicked_prop["sku"])
 
-                # 親コードの展開／折りたたみクリック時
                 if clicked_sku.startswith("TOGGLE::"):
                     t_pid = clicked_sku.replace("TOGGLE::", "", 1)
                     if t_pid in children_by_parent:
-                        # すでにシート展開済みなら開閉を切り替え
                         if t_pid in collapsed_parents:
                             collapsed_parents.remove(t_pid)
                         else:
                             collapsed_parents.add(t_pid)
                     else:
-                        # 初回クリック時はExcelからシート一覧を取得して自動で開く
                         collapsed_parents.discard(t_pid)
                         par_obj = next((x for x in proposals_list if str(x.get("prop_id")) == t_pid), None)
                         if par_obj:
@@ -7751,7 +7766,6 @@ if view_type == '💡 商品提案・進捗管理':
                                     st.error(f"シート読込エラー: {e_sh}")
                     st.rerun()
                 else:
-                    # シート行（またはPDF行）をクリック → 下の詳細パネルを開く
                     st.session_state["selected_prop_id"] = clicked_sku
                     st.rerun()
 
