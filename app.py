@@ -1835,7 +1835,10 @@ def render_universal_table(df_data, max_h=600):
         st.info("該当するデータがありません。")
         return
     center_cols = {"番号", "順位", "日付", "販売期間", "最終売上日", "初回売上日", "未販売期間", "目標達成率", "通期進捗率", "前年比", "粗利率", "構成比", "倉庫", "センター", "判定", "受注日", "納入期日"}
-    left_cols = {"得意先名", "商品コード", "商品名", "商品番号", "ランク名", "担当者", "客先名", "販売価格帯", "備考", "決定事項", "入荷予定日"}
+    left_cols = {
+        "得意先名", "商品コード", "商品名", "商品番号", "ランク名", "担当者", "客先名", "販売価格帯",
+        "提案商品名", "提案者", "進捗ステータス", "資料", "目標時期", "進捗メモ", "更新日時"
+    }
     narrow_cols = {"番号", "順位"}
 
     header_cells = []
@@ -6739,7 +6742,7 @@ def load_drive_extracted_proposals():
                         "staff": str(it.get("member") or "未設定").strip(),
                         "status": "起案中",
                         "target_date": ym_s,
-                        "memo": f"[{it.get('source_type', '')}] {rel_p or fname}",
+                        "memo": "",
                         "img_file": "",
                         "excel_file": "",
                         "pdf_file": "",
