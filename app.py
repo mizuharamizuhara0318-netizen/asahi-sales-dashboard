@@ -7028,6 +7028,9 @@ def find_proposal_attachments_all(prop_id, img_hint="", xls_hint="", pdf_hint=""
 
 
 def render_proposal_tree_table(tree_rows, expanded_ids, selected_pid="", comp_key="proposal_tree_tbl_v1", max_h=380):
+    """親コードを展開するとExcelのシート名が子行として表示され、進捗ステータスをプルダウン変更できるツリーテーブル"""
+    import html as _html
+
     if not tree_rows:
         st.info("該当するデータがありません。")
         return None
@@ -7046,6 +7049,7 @@ def render_proposal_tree_table(tree_rows, expanded_ids, selected_pid="", comp_ke
         is_excel_parent = bool(r.get("_is_excel_parent", False))
         pid = str(r.get("商品コード", ""))
         safe_pid = pid.replace('"', '&quot;')
+        raw_status = str(r.get("_raw_status", "起案中"))
         is_exp = pid in expanded_ids
         is_sel = (pid == str(selected_pid))
 
@@ -7079,6 +7083,22 @@ def render_proposal_tree_table(tree_rows, expanded_ids, selected_pid="", comp_ke
                     f"<td style='text-align:left;'>"
                     f"<span class='sku-link' data-sku=\"{safe_pid}\" style='color:#0369a1; font-weight:bold;'>{val_str}</span></td>"
                 )
+            elif c == "進捗ステータス":
+                opts_html = []
+                for st_opt in PROPOSAL_STATUS_LIST:
+                    sel_attr = " selected" if st_opt == raw_status else ""
+                    esc_opt = _html.escape(st_opt, quote=True)
+                    opts_html.append(f"<option value=\"{esc_opt}\"{sel_attr}>{_html.escape(st_opt)}</option>")
+                stale_note = ""
+                if "⚠️" in val_str and "滞留" in val_str:
+                    m_st = re.search(r'\((\d+日滞留)\)', val_str)
+                    if m_st:
+                        stale_note = f" <span style='color:#dc2626; font-size:11px; font-weight:bold;'>⚠️{m_st.group(1)}</span>"
+                cells.append(
+                    f"<td style='text-align:left;'>"
+                    f"<select class='status-sel' data-pid=\"{safe_pid}\" style='padding:3px 6px; border:1px solid #94a3b8; border-radius:4px; background:#fff; color:#0f172a; font-size:12px; font-weight:600; cursor:pointer;'>"
+                    f"{''.join(opts_html)}</select>{stale_note}</td>"
+                )
             else:
                 cells.append(f"<td style='text-align:{align};'>{val_str}</td>")
         body_rows.append(f"<tr{row_style}>{''.join(cells)}</tr>")
@@ -7087,8 +7107,18 @@ def render_proposal_tree_table(tree_rows, expanded_ids, selected_pid="", comp_ke
         f"<div class='tbl-wrap' style='max-height:{max_h}px;'>"
         f"<table><thead><tr>{header_html}</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody></table></div>"
+        f"<script>"
+        f"(function(){{"
+        f"  const root = document.getElementById('root') || document;"
+        f"  root.querySelectorAll('.status-sel').forEach(function(sel){{"
+        f"    sel.addEventListener('change', function(){{"
+        f"      sendValue({{action: 'status', pid: this.getAttribute('data-pid'), status: this.value, ts: Date.now()}});"
+        f"    }});"
+        f"  }});"
+        f"}})();"
+        f"</script>"
     )
-    calc_h = min(max_h + 20, 80 + len(tree_rows) * 36)
+    calc_h = min(max_h + 20, 80 + len(tree_rows) * 38)
     return _clickable_prod_table_func(table_html=full_html, height=calc_h, key=comp_key)
 
 
@@ -7666,6 +7696,7 @@ if view_type == '💡 商品提案・進捗管理':
         return {
             "_is_child": is_child,
             "_is_excel_parent": is_excel_parent,
+            "_raw_status": p_obj.get("status", "起案中"),
             "商品コード": str(p_obj.get("prop_id", "")),
             "提案商品名": p_obj.get("prod_name", ""),
             "提案者": p_obj.get("staff", ""),
@@ -7724,50 +7755,65 @@ if view_type == '💡 商品提案・進捗管理':
             max_h=380
         )
 
-        if clicked_prop and isinstance(clicked_prop, dict) and clicked_prop.get("sku"):
+        if clicked_prop and isinstance(clicked_prop, dict):
             last_pr_ts = st.session_state.get("_last_prop_click_ts", 0)
             cur_pr_ts = clicked_prop.get("ts", 0)
             if cur_pr_ts != last_pr_ts:
                 st.session_state["_last_prop_click_ts"] = cur_pr_ts
-                clicked_sku = str(clicked_prop["sku"])
 
-                if clicked_sku.startswith("TOGGLE::"):
-                    t_pid = clicked_sku.replace("TOGGLE::", "", 1)
-                    if t_pid in children_by_parent:
-                        if t_pid in collapsed_parents:
-                            collapsed_parents.remove(t_pid)
+                # プルダウンからステータスが変更された場合
+                if clicked_prop.get("action") == "status":
+                    t_pid = str(clicked_prop.get("pid", ""))
+                    new_st = str(clicked_prop.get("status", ""))
+                    if t_pid and new_st in PROPOSAL_STATUS_LIST:
+                        for p_item in proposals_list:
+                            if str(p_item.get("prop_id")) == t_pid:
+                                p_item["status"] = new_st
+                                p_item["updated_at"] = datetime.now().strftime("%Y/%m/%d %H:%M")
+                                break
+                        save_proposals_list(proposals_list)
+                        st.rerun()
+
+                elif clicked_prop.get("sku"):
+                    clicked_sku = str(clicked_prop["sku"])
+
+                    if clicked_sku.startswith("TOGGLE::"):
+                        t_pid = clicked_sku.replace("TOGGLE::", "", 1)
+                        if t_pid in children_by_parent:
+                            if t_pid in collapsed_parents:
+                                collapsed_parents.remove(t_pid)
+                            else:
+                                collapsed_parents.add(t_pid)
                         else:
-                            collapsed_parents.add(t_pid)
+                            collapsed_parents.discard(t_pid)
+                            par_obj = next((x for x in proposals_list if str(x.get("prop_id")) == t_pid), None)
+                            if par_obj:
+                                _, xlss, _ = find_proposal_attachments_all(
+                                    t_pid, par_obj.get("img_file", ""), par_obj.get("excel_file", ""), par_obj.get("pdf_file", "")
+                                )
+                                ep_target = xlss[0] if xlss else ""
+                                if not ep_target and par_obj.get("drive_rel_path"):
+                                    with st.spinner("☁️ Excelのシート一覧を取得しています..."):
+                                        ep_target = _fetch_proposal_file_from_gdrive(par_obj["drive_rel_path"])
+                                if ep_target and os.path.exists(ep_target):
+                                    try:
+                                        s_names = pd.ExcelFile(ep_target).sheet_names
+                                        for s_i, s_nm in enumerate(s_names, 1):
+                                            new_ch = dict(par_obj)
+                                            new_ch["prop_id"] = f"{t_pid}-S{s_i:02d}"
+                                            new_ch["parent_id"] = t_pid
+                                            new_ch["sheet_name"] = s_nm
+                                            new_ch["prod_name"] = s_nm
+                                            new_ch["comments"] = []
+                                            new_ch["likes"] = []
+                                            proposals_list.append(new_ch)
+                                        save_proposals_list(proposals_list)
+                                    except Exception as e_sh:
+                                        st.error(f"シート読込エラー: {e_sh}")
+                        st.rerun()
                     else:
-                        collapsed_parents.discard(t_pid)
-                        par_obj = next((x for x in proposals_list if str(x.get("prop_id")) == t_pid), None)
-                        if par_obj:
-                            _, xlss, _ = find_proposal_attachments_all(
-                                t_pid, par_obj.get("img_file", ""), par_obj.get("excel_file", ""), par_obj.get("pdf_file", "")
-                            )
-                            ep_target = xlss[0] if xlss else ""
-                            if not ep_target and par_obj.get("drive_rel_path"):
-                                with st.spinner("☁️ Excelのシート一覧を取得しています..."):
-                                    ep_target = _fetch_proposal_file_from_gdrive(par_obj["drive_rel_path"])
-                            if ep_target and os.path.exists(ep_target):
-                                try:
-                                    s_names = pd.ExcelFile(ep_target).sheet_names
-                                    for s_i, s_nm in enumerate(s_names, 1):
-                                        new_ch = dict(par_obj)
-                                        new_ch["prop_id"] = f"{t_pid}-S{s_i:02d}"
-                                        new_ch["parent_id"] = t_pid
-                                        new_ch["sheet_name"] = s_nm
-                                        new_ch["prod_name"] = s_nm
-                                        new_ch["comments"] = []
-                                        new_ch["likes"] = []
-                                        proposals_list.append(new_ch)
-                                    save_proposals_list(proposals_list)
-                                except Exception as e_sh:
-                                    st.error(f"シート読込エラー: {e_sh}")
-                    st.rerun()
-                else:
-                    st.session_state["selected_prop_id"] = clicked_sku
-                    st.rerun()
+                        st.session_state["selected_prop_id"] = clicked_sku
+                        st.rerun()
 
         sel_pid = st.session_state.get("selected_prop_id")
         if sel_pid:
